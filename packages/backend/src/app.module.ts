@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { LoggerModule } from 'nestjs-pino';
 import { validateEnv } from './config/env.validation';
 import { buildLoggerConfig } from './config/logger.config';
@@ -16,6 +17,7 @@ import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 import { WarmupModule } from './modules/warmup/warmup.module';
 import { AiModule } from './modules/ai/ai.module';
+import { AccountHealthModule } from './modules/account-health/account-health.module';
 
 @Module({
   imports: [
@@ -26,6 +28,7 @@ import { AiModule } from './modules/ai/ai.module';
       envFilePath: ['.env', '.env.local'],
     }),
     LoggerModule.forRoot(buildLoggerConfig(process.env)),
+    EventEmitterModule.forRoot({ wildcard: true, maxListeners: 50, verboseMemoryLeak: false }),
     DatabaseModule,
     UsersModule,
     AuthModule,
@@ -35,6 +38,7 @@ import { AiModule } from './modules/ai/ai.module';
     LicenseModule,
     AiModule,
     WarmupModule,
+    AccountHealthModule,
     TasksModule,
     HealthModule,
   ],

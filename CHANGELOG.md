@@ -4,6 +4,126 @@
 
 ---
 
+## [v0.8.0-m8] · 2026-04-20 · M8 健康分 + 风险感知 + 自动降级交付 (跳 M7, 保命先)
+
+M8 里程碑: Event collector (EventEmitter2) + §5.4 公式 scorer + 30min debounce 自动 regress + dispatcher 6th 拒绝路径 (skip-health-high) + medium 降档 (priority -2 / send_delay ×1.5) + 桌面告警 + dry-run 模式 + 去重 UNIQUE 约束 + 滚动窗口 + HealthTab UI 带教育性 tooltip.
+
+**顺序变更**: 原 roadmap M7 (素材生成) · M8 (健康分). 用户 2026-04-20 优先级翻转: M7 "锦上添花" 延后, M8 "保命" 先做. 理由: 当前 §B.16 预置素材池能工作 · 被风控的号跑 warmup 会拖累同 IP 组 · 产品介绍书"🟢🟡🔴 封号危险指数"是客户承诺.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | Event collector EventEmitter2 · dispatcher 任务失败 emit send_failed | `DispatcherService.emitRisk` · smoke: task 10 fail → risk_event 落 `send_failed task_run:10` |
+| 2 | §5.4 公式 scorer: 验证码/举报/同IP被封/加好友拒 + sendFailRate + 自然会话加分 | `HealthScorerService.compute` 纯函数 · 12 ut cover 每 rule + 边界 0/29/30/59/60 |
+| 3 | 去重 UNIQUE(account_id, code, source_ref) + ON CONFLICT DO NOTHING | migration + `RiskEventService.record` qb.orIgnore() · 4 ut + live smoke INSERT 0 when duplicate |
+| 4 | 滚动窗口: 只累加 at > now - N 天 (default 30, settings 可配) | `HealthSettingsService` + `findWithinWindow` · 7 ut settings service + compute 纯函数验证 |
+| 5 | 30min debounce · high 持续才 auto-regress · 进出 high 清时钟 | `HealthCoordinatorService.handleScoreTransition` · 6 ut (含 fake timers 31min 测试) |
+| 6 | Dry-run 模式: 照常算分写 level, 不触发 regress/priority降档/send_delay 加倍 | 1 ut · live smoke: 13 captcha + 3 reported → score 0 level high, plan 仍 phase=2 · 关 dry-run 后新任务 skip-health-high 留 pending |
+| 7 | dispatcher 6 条拒绝: `skip-health-high` · medium 降档 `healthDegrade` 标 payload | `dispatcher.service.ts` 新 branch · live smoke task 11/12 stays pending under high |
+| 8 | 桌面告警 §B.25 · `node-notifier` 跨平台 + `AlertChannel` interface 留 email/Telegram 扩展 | `DesktopAlertChannel` + `AlertDispatcherService` · 日志 `AlertDispatcher ready · 1 channels: desktop` |
+| 9 | Admin UI HealthTab · Table 健康分条 + 详情 Modal + 教育性 tooltip + dry-run 开关 + 窗口配置 | `HealthTab.tsx` · 每 breakdown 条带 explanation 教育文案 + `?` tooltip |
+| 10 | 111/111 unit test green (+30 M8) | dispatcher 17 + pack-loader 9 + runner 16 + phase 13 + pair 7 + encryption 6 + adapter 6 + redaction 7 + scorer 12 + risk-event 4 + coord 6 + settings 7 |
+
+### Added (M8)
+
+**数据模型** — migration `CreateRiskEventAndAppSetting1776900000000`
+- `risk_event`: BIGSERIAL · account_id FK · code · severity · source · source_ref · meta jsonb · at · created_at · UNIQUE (account_id, code, source_ref) · 3 idx
+- `ai_setting` → rename to **`app_setting`** (通用 k-v, 命名空间 key 前缀): `ai.text_enabled` (M6 迁移保留) / `health.dry_run` / `health.scoring_window_days`
+- `AppSettingEntity` 移 `common/`, 跨模块共享
+
+**Event bus** (`@nestjs/event-emitter`)
+- `EventEmitterModule.forRoot({ wildcard: true, maxListeners: 50 })` 全局注册
+- channel `'risk.raw'` · payload `RiskRawEvent { accountId, code, severity, source, sourceRef?, meta?, at? }`
+- `DispatcherService` 注入 `@Optional() EventEmitter2`, task 失败时 emit `send_failed` 带 `task_run:<id>` sourceRef (保 M3 spec 无 bus 兼容)
+
+**Risk event service** (`risk-event.service.ts`)
+- `record(event)`: qb.insert().orIgnore() · 返 `{inserted: boolean}` (false = 去重击中)
+- 无 source_ref 兜底: `auto:md5(code|floor-to-minute).substring(0,16)`
+- `findRecent(accountId, limit)` / `findWithinWindow(accountId, windowDays)` (滚动窗口查询) / `trendDaily(accountId, days)` (HealthTab 趋势)
+
+**Scorer** (`health-scorer.service.ts`)
+- `compute(events, prevHealth)` 纯函数 · 返 `ScoreBreakdown[]` (rule / delta / count / value / **explanation 教育性说明**)
+- 扣分: captcha × 5 · reported × 15 · friend_rejected 5%/次 × 20 · same_ip_banned × 10 · sendFailRate × 100
+- 加分: 通讯录 × 0.1 (max 10) · 自然会话 50/50 对称度 × 15
+- `rescore(accountId)` 读 window events + prev_health → 写 `account_health.health_score/risk_level` + 追 20 条 riskFlags snapshot
+- `toRiskLevel(score)`: 60+ low · 30-59 medium · 0-29 high (§5.4 边界严格)
+
+**Coordinator · debounce 状态机** (`health-coordinator.service.ts`)
+- `@OnEvent('risk.raw')` · record → rescore → handleScoreTransition
+- 内存 `Map<accountId, firstHighAt>` · 进程重启清空 (故意, 降级要响应, 别过分记忆)
+- high 进入: 记时刻 + warn 告警, 不 regress
+- high 持续 >= 30min: 触发 `WarmupPhaseService.maybeRegress` + critical 告警
+- 退出 high: 清 Map 条目 + log
+- 5min setInterval 兜底 rescore (处理 missed events)
+- **dry_run** 分支: 照常写 level, regress/告警加 `dry_run=true` 标, 日志 `[DRY-RUN]` 前缀
+
+**Alert channel** (§B.25 对齐)
+- `AlertChannel` interface + `ALERT_CHANNELS` Symbol DI token
+- `DesktopAlertChannel` (`node-notifier`): 跨 Win/Mac/Linux 原生 toast · dry_run 加 `[DRY-RUN]` 前缀 · severity emoji (🔴 critical / 🟡 warn / ℹ️ info)
+- `AlertDispatcherService`: fan-out 所有 channels · channel 失败不抛 (告警丢失 degraded 非 fatal)
+- email / Telegram 留 interface 不实装 (V1.1)
+
+**Dispatcher 集成** (`dispatcher.service.ts`)
+- 新 rejection path `skip-health-high`: 读 `account_health.risk_level`, high 且 !dry_run → task 保 pending (不 run)
+- Medium 降档: `{ action: 'run', healthDegrade: 'medium' }` · 标记 `task.payload._healthDegrade='medium'` 给 executor 读
+- `@Optional() HealthSettingsService` 注入兼容 M3 spec
+
+**WarmupPhaseService** 便捷方法
+- `maybeRegressByAccountId(accountId)`: coordinator 直接用, 免查 plan
+
+**API** (`account-health.controller.ts` — 避开 M1 `/health`)
+- `GET /account-health/overview` · 租户视角 list 每号分数+level
+- `GET /account-health/:accountId` · 详情含 breakdown + recent 30 events + 7 天趋势
+- `POST /account-health/:accountId/rescore` · 手动重算
+- `GET /account-health/settings` · dry_run + window_days
+- `POST /account-health/settings/dry-run` · `{enabled}`
+- `POST /account-health/settings/scoring-window-days` · `{days}` (1-365)
+
+**Admin UI `HealthTab`** (`packages/frontend/src/pages/admin/HealthTab.tsx`)
+- 顶部 Alert: dry-run Switch + 72h 首 rollout 提示 tooltip · 评分窗口 InputNumber
+- Table: 槽/账号/进度条 (level 配色)/等级 Tag (🟢🟡🔴)/更新时间/详情+重算按钮
+- 详情 Modal 折叠 3 块 (对齐 Y3 默认折叠):
+  - 扣分/加分明细 · 每条带 **? tooltip 教育性说明** (为什么扣, 降低租户恐惧感)
+  - 最近 30 事件流水 · severity 着色
+  - 7 天趋势 · 按天 progress bar
+
+**文档**
+- 技术交接文档 §3.2 追加 `risk_event` 和 `app_setting` schema 块 · 详述去重/窗口/为何独立表设计决策 (用户 2026-04-20 要求: 不允许代码加表但文档没跟)
+
+### Verified (smoke)
+
+- `AlertDispatcher ready · 1 channels: desktop` + `health coordinator enabled · rescore every 120s · debounce 30min` 启动日志确认
+- **去重**: 重复 INSERT 同 (account, code, source_ref) → `INSERT 0 0` · 总数 3 不变 (`ON CONFLICT DO NOTHING` 生效)
+- **滚动窗口**: settings service 7 ut · 默认 30 · 非法值降级
+- **Scoring §5.4**: 3 captcha → -15 → 85/low · 13 captcha + 3 reported = -110 clamped to 0 → 0/high · breakdown 每条带中文教育性 explanation 字段
+- **Dry-run**: 开 dry-run 下 score=0 level=high · 但 `warmup_plan.currentPhase=2` 未回退 · 全局开关切到 false 后新任务触发 `skip-health-high` 保 pending
+- **Dispatcher gate**: dry-run off 时 acc 1 (high) 新开 task #12 → **status=pending** (dispatcher skip-health-high 生效) · 同期 acc 2 (low) 任务能跑
+- **App_setting rename**: 两行并存 · `ai.text_enabled=false` (M6 迁移保留) · `health.dry_run=false`
+- **Log 脱敏传承 M6**: 227+ 日志行 grep key/master hex 0 次泄漏
+
+### Constraints (M8 范围边界)
+
+- **告警只实装桌面** — email / Telegram 留接口但不写实现. V1.1 加 SMTP / bot token config
+- **debounce 状态存内存** — 进程重启清空. 再次 rescore 时重建. 故意不持久化: 降级是 "持续观察" 信号, 不是历史合计
+- **send_failed 不直接扣分** — §5.4 公式用 `send_fail_rate` 比率, 不是事件次数. rate 字段由 baileys send 成功/失败路径维护 (M2 scope 已有, M8 不改)
+- **M3 未知 task_type** `mystery_type` 仍 pending · 不受 health gate 影响 (gate 前已过 leave-pending-unknown-type 早退)
+- **coordinator 兜底 5min setInterval** — 高频 event 仍主推 handleRaw, 定时仅处理 missed. HEALTH_RESCORE_INTERVAL_MS 可调
+- **Priority 降档" 未做真实 priority 列动态修改** — dispatcher.decide 只在 payload 打 `_healthDegrade` 标, 给 executor 读. 真 priority 降档 (`task.priority -= 2`) 需改 task row, 会影响已有 pending 任务排序, V1.1 评估
+
+### Rationale (存档关键决策)
+
+- **Event 去重 UNIQUE (account, code, source_ref)** — 用户 2026-04-20 加固 #1. 重复事件虚降分是生产灾难 (同一次 captcha 被 task retry 多次触发导致同号被扣几次分). 数据库硬约束比应用层检查更可靠.
+- **兜底 md5(code|minute) 而非 md5(code|id)** — 上游无稳定 id 时按分钟去重. 60s 内同 code 视为同事件 (WA 侧一次验证码弹窗实际上就是 1 事件, 但 baileys 可能触发多个 status change 信号).
+- **滚动窗口 30 天默认** — 用户 2026-04-20 加固 #2. 账号分数永远回不来是产品痛点. 30 天平衡"记住短期异常" vs "允许恢复". settings 可调. 写 DB 行让运维可按租户/地区调整.
+- **Dry-run 模式必做** — 用户 2026-04-20 加固 #3. 新公式首次 rollout 不验证就打开真降级 = 50 号全被误降 = 生产灾难. 72h dry-run 期可校准公式. 兜底: 任意 DB 坏数据 / coordinator bug 在 dry-run 下不会真伤害账号
+- **§5.4 explanation 中文教育文案** — 用户 2026-04-20 Y3 UX 加 ?. 扣分项暴露给租户时, 干字段名 ("captcha_triggered × 5") 吓人. 加一行说明 "WA 侧对该号存疑, 需降频保号" 降低租户恐惧感 + 自然教育. 这些文案硬编码在 compute() 里, 与规则同源, 绝不漂移
+- **账号独立 account-health 模块路径** — M1 已有 `health` (系统健康 uptime), 两者语义完全不同但同名. M8 走 `/account-health/*` 路径 + `AccountHealthModule` 类名避免冲突. 放一起会让人迷惑
+- **AppSettingEntity 共享 + 命名空间 key** — 拒绝"每模块 settings 一张表". `ai.text_enabled` / `health.dry_run` 靠前缀分命名空间, 单表双索引就够快. M10 可能加 `backup.auto_daily` 等, 不会为此加表
+- **coordinator Map<accountId, firstHighAt> 内存状态** — 降级要"响应此刻的持续性", 不是"历史总时长". 进程 restart 后重新观察 30min 是正确的, 已用户在 restart 时点刚好 high 也算公平
+
+---
+
 ## [v0.6.0-m6] · 2026-04-20 · M6 AI 层 + Provider 抽象 + 改写缓存 + 三维降级交付
 
 M6 里程碑: OpenAI-compat adapter (覆盖 openai / deepseek / custom 5+ endpoints) + AES-256-GCM key 加密 (MasterKeyProvider DI 抽象) + pino 递归日志脱敏 + ScriptRunner miss 接 AI + 全链路失败降级到 content_pool (§B.4).

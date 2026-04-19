@@ -98,6 +98,16 @@ export class WarmupPhaseService {
   }
 
   /**
+   * M8 coordinator 便捷入口: 直接按 accountId 触发 regress 检查.
+   * 内部重用 maybeRegress, 但 plan 找不到时返 false 而不抛.
+   */
+  async maybeRegressByAccountId(accountId: number, now: Date = new Date()): Promise<boolean> {
+    const plan = await this.planRepo.findOne({ where: { accountId } });
+    if (!plan) return false;
+    return this.maybeRegress(plan, now);
+  }
+
+  /**
    * 手动跳下一 phase (expert mode). 只允许往前, 不允许回退 (回退走 regress).
    */
   async skipToNextPhase(planId: number, reason: string): Promise<WarmupPlanEntity> {

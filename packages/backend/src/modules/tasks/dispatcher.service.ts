@@ -5,27 +5,35 @@
 import {
   Injectable,
   Logger,
+  Optional,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, LessThanOrEqual } from 'typeorm';
 import { TaskEntity, TaskStatus, TaskTargetType } from './task.entity';
 import { TaskRunEntity, TaskRunStatus } from './task-run.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WaAccountEntity, WarmupStage } from '../slots/wa-account.entity';
+import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
 import { ExecutorRegistry } from './executor-registry.service';
 import type { TaskExecutorContext } from './executor.interface';
+import { HealthSettingsService } from '../account-health/health-settings.service';
+import { RISK_EVENT_CHANNEL, type RiskRawEvent } from '../account-health/risk.events';
+import { RiskEventCode } from '../account-health/risk-event.entity';
 
 // 5 条拒绝路径 + soft skip (warmup_stage)
+// M8 · 加第 6 条: skip-health-high (risk_level=high 且非 dry_run 时)
 export type DispatchDecision =
-  | { action: 'run'; accountId: number }
+  | { action: 'run'; accountId: number; healthDegrade?: 'medium' } // M8 · medium 降档时带标记
   | { action: 'skip-global-capacity' }      // #1 全局 6 槽已满
   | { action: 'skip-account-busy' }         // #2 该账号有任务在跑
   | { action: 'skip-ip-group-busy' }        // #3 该账号 IP 组有任务在跑 (proxy_id 相同)
   | { action: 'skip-takeover-active' }      // #4 该账号在接管中
   | { action: 'skip-night-window' }         // 夜间只放行 warmup/maintenance
+  | { action: 'skip-health-high' }          // #6 M8 · 健康分 high 暂停主动任务
   | { action: 'soft-warn-warmup-stage' }    // #5 soft: warmup_stage 不够, 允许执行 + 记警告
   | { action: 'leave-pending-unknown-type' }; // executor 未注册 → 不 reject 不 run, 保 pending
 
@@ -57,6 +65,9 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService,
     private readonly registry: ExecutorRegistry,
+    // M8 · optional 为了 M3 单测仍能 new DispatcherService(...)
+    @Optional() private readonly eventBus?: EventEmitter2,
+    @Optional() private readonly healthSettings?: HealthSettingsService,
   ) {}
 
   onModuleInit(): void {
@@ -172,6 +183,22 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       // 落 soft-warn 后仍 run, 不 reject
     }
 
+    // #6 M8 · 健康分 gate. dry_run 不拦截, 只标记 meta
+    const health = await this.dataSource
+      .getRepository(AccountHealthEntity)
+      .findOne({ where: { accountId } });
+    if (health) {
+      const dryRun = this.healthSettings ? await this.healthSettings.isDryRun() : false;
+      if (health.riskLevel === RiskLevel.High && !dryRun) {
+        // M5 maybeRegress 路径已把该号养号阶段回退, 任务这里直接跳
+        return { action: 'skip-health-high' };
+      }
+      if (health.riskLevel === RiskLevel.Medium && !dryRun) {
+        // medium · 允许跑但带标记 (executor/runner 后续按 healthDegrade 放慢 send_delay)
+        return { action: 'run', accountId, healthDegrade: 'medium' };
+      }
+    }
+
     return { action: 'run', accountId };
   }
 
@@ -182,13 +209,14 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     switch (decision.action) {
       case 'run':
-        await this.startRun(task, decision.accountId, ctx);
+        await this.startRun(task, decision.accountId, ctx, decision.healthDegrade);
         return;
       case 'skip-global-capacity':
       case 'skip-account-busy':
       case 'skip-ip-group-busy':
       case 'skip-takeover-active':
       case 'skip-night-window':
+      case 'skip-health-high':
         // 保 pending 让下一轮 tick 重新评估
         return;
       case 'leave-pending-unknown-type':
@@ -204,7 +232,19 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async startRun(task: TaskEntity, accountId: number, ctx: DispatchContext): Promise<void> {
+  private async startRun(
+    task: TaskEntity,
+    accountId: number,
+    ctx: DispatchContext,
+    healthDegrade?: 'medium',
+  ): Promise<void> {
+    if (healthDegrade === 'medium') {
+      this.logger.warn(
+        `task ${task.id} on acc ${accountId} runs in DEGRADED mode (risk_level=medium) · executor 应放慢 send_delay × 1.5`,
+      );
+      // executor 从 task.payload._healthDegrade 读
+      task.payload = { ...(task.payload ?? {}), _healthDegrade: 'medium' };
+    }
     // 原子事务: task.status=queued → 新建 task_run (running) → 提交后异步跑 executor
     let runId!: number;
     await this.dataSource.transaction(async (m) => {
@@ -260,6 +300,17 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
         status: result.success ? TaskStatus.Done : TaskStatus.Failed,
         lastError: result.success ? null : (result.errorMessage ?? 'executor reported failure'),
       });
+      // M8 · emit risk event on failure (send_failed for real send errors, generic failure otherwise)
+      if (!result.success) {
+        this.emitRisk({
+          accountId,
+          code: RiskEventCode.SendFailed,
+          severity: 'warn',
+          source: 'task_runner',
+          sourceRef: `task_run:${runId}`,
+          meta: { taskId: task.id, errorCode: result.errorCode, taskType: task.taskType },
+        });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`task ${task.id} executor threw: ${message}`);
@@ -271,6 +322,26 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
         status: TaskStatus.Failed,
         lastError: message,
       });
+      this.emitRisk({
+        accountId,
+        code: RiskEventCode.SendFailed,
+        severity: 'warn',
+        source: 'task_runner',
+        sourceRef: `task_run:${runId}`,
+        meta: { taskId: task.id, errorCode: 'EXEC_THREW' },
+      });
+    }
+  }
+
+  /**
+   * M8 · 发 risk event 到 event bus. 静默失败 (bus 未注入 = M3 spec / 无监听 = 正常).
+   */
+  private emitRisk(event: RiskRawEvent): void {
+    if (!this.eventBus) return;
+    try {
+      this.eventBus.emit(RISK_EVENT_CHANNEL, event);
+    } catch (err) {
+      this.logger.debug(`emit risk failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

@@ -144,12 +144,45 @@ CREATE TABLE account_health (
   account_id INT PRIMARY KEY REFERENCES wa_account(id),
   health_score INT DEFAULT 100,
   risk_level TEXT DEFAULT 'low', -- low/medium/high
-  risk_flags JSONB,              -- [{code, severity, at}]
+  risk_flags JSONB,              -- [{code, severity, at}] (最近 20 条 snapshot)
   total_sent INT DEFAULT 0,
   total_received INT DEFAULT 0,
   send_fail_rate DECIMAL,
   last_incident JSONB,
   updated_at TIMESTAMPTZ
+);
+
+-- M8 新增 · 风险事件原始流水 (§5.4 所有"次数"源头)
+-- 去重: UNIQUE(account_id, code, source_ref) + ON CONFLICT DO NOTHING
+--   source_ref 上游唯一 id (task_run_id / baileys_msg_id / proxy_log_hash)
+--   兜底 'auto:md5(code||minute)' 按分钟去重
+-- 滚动窗口: scorer 只读 at > now - health.scoring_window_days (default 30)
+-- 为何独立表而非扩 risk_flags JSONB: 事件量大 (每号每天数十条), JSONB 累加到百条 + 趋势 GROUP BY 会慢;
+-- 独立表+索引 (idx_risk_event_account_at, idx_risk_event_at) 给 HealthTab 7 天趋势折线 10ms 级查询.
+CREATE TABLE risk_event (
+  id BIGSERIAL PRIMARY KEY,
+  account_id INT NOT NULL REFERENCES wa_account(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,            -- captcha_triggered / reported / send_failed / friend_rejected /
+                                 --  same_ip_banned / qr_expired / connection_lost / proxy_down /
+                                 --  banned_by_wa / phase_gate_blocked
+  severity TEXT NOT NULL,        -- info / warn / critical
+  source TEXT NOT NULL,          -- task_runner / baileys / dispatcher / executor
+  source_ref TEXT NOT NULL,      -- 上游唯一 id 或 auto:md5(code|minute) 兜底
+  meta JSONB,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT UQ_risk_event_dedupe UNIQUE (account_id, code, source_ref)
+);
+CREATE INDEX idx_risk_event_account_at ON risk_event (account_id, at DESC);
+CREATE INDEX idx_risk_event_code ON risk_event (code);
+CREATE INDEX idx_risk_event_at ON risk_event (at DESC);
+
+-- M6 新增 / M8 改名 · 全局 k-v 设置 (命名空间 key 前缀)
+--   ai.text_enabled · health.dry_run · health.scoring_window_days
+CREATE TABLE app_setting (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 

@@ -1,7 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AiProviderEntity } from './ai-provider.entity';
-import { AiSettingEntity } from './ai-setting.entity';
+import { AppSettingEntity } from '../../common/app-setting.entity';
 import { AiEncryptionService } from './ai-encryption.service';
 import { AiProvidersService } from './ai-providers.service';
 import { AiTextService } from './ai-text.service';
@@ -16,7 +16,7 @@ import { AiProvidersController, AiSettingsController } from './ai.controller';
 // 不用 import AiModule (避开新的交叉依赖). AI 是全局基础服务.
 @Global()
 @Module({
-  imports: [TypeOrmModule.forFeature([AiProviderEntity, AiSettingEntity])],
+  imports: [TypeOrmModule.forFeature([AiProviderEntity, AppSettingEntity])],
   controllers: [AiProvidersController, AiSettingsController],
   providers: [
     { provide: MASTER_KEY_PROVIDER, useClass: EnvMasterKeyProvider },
