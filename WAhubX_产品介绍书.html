@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAhubX — 产品介绍书</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    color: #0f2419;
+    background: #fff;
+    line-height: 1.7;
+  }
+
+  /* ─── COVER ─── */
+  .cover {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #042f2e 0%, #064e3b 40%, #0f766e 70%, #065f46 100%);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; padding: 60px 40px;
+    position: relative; overflow: hidden;
+    page-break-after: always;
+  }
+  .cover::before { content: ''; position: absolute; top: -100px; left: -100px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(52,211,153,0.22) 0%, transparent 70%); border-radius: 50%; }
+  .cover::after { content: ''; position: absolute; bottom: -80px; right: -80px; width: 500px; height: 500px; background: radial-gradient(circle, rgba(45,212,191,0.15) 0%, transparent 70%); border-radius: 50%; }
+
+  .cover-logo {
+    font-size: 72px; font-weight: 900;
+    background: linear-gradient(90deg, #34d399, #2dd4bf, #34d399);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    letter-spacing: 4px; margin-bottom: 12px; position: relative; z-index: 1;
+  }
+  .cover-tagline { font-size: 20px; color: rgba(255,255,255,0.75); font-weight: 300; letter-spacing: 2px; margin-bottom: 48px; position: relative; z-index: 1; }
+  .cover-divider { width: 80px; height: 3px; background: linear-gradient(90deg, #34d399, #2dd4bf); border-radius: 2px; margin: 0 auto 48px; position: relative; z-index: 1; }
+  .cover-title { font-size: 38px; font-weight: 700; color: #fff; margin-bottom: 16px; position: relative; z-index: 1; }
+  .cover-subtitle { font-size: 17px; color: rgba(255,255,255,0.62); max-width: 560px; position: relative; z-index: 1; font-weight: 300; margin-bottom: 60px; }
+  .cover-badges { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; position: relative; z-index: 1; }
+  .cover-badge { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 50px; padding: 8px 22px; color: rgba(255,255,255,0.85); font-size: 13px; letter-spacing: 1px; }
+  .cover-footer { position: absolute; bottom: 32px; color: rgba(255,255,255,0.3); font-size: 12px; letter-spacing: 1px; z-index: 1; }
+
+  /* ─── SECTIONS ─── */
+  .section { padding: 72px 80px; max-width: 960px; margin: 0 auto; }
+  .section-full { padding: 72px 80px; }
+  .section-label { font-size: 11px; font-weight: 700; letter-spacing: 3px; color: #10b981; text-transform: uppercase; margin-bottom: 10px; }
+  .section-title { font-size: 34px; font-weight: 800; color: #064e3b; margin-bottom: 14px; line-height: 1.2; }
+  .section-title span { background: linear-gradient(90deg, #10b981, #14b8a6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .section-desc { font-size: 16px; color: #475569; max-width: 680px; margin-bottom: 48px; line-height: 1.8; }
+
+  /* ─── INTRO ─── */
+  .intro-bg { background: #f0fdfa; border-top: 4px solid #10b981; }
+  .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; margin-top: 40px; }
+  .intro-stat { background: #fff; border-radius: 16px; padding: 28px 32px; box-shadow: 0 4px 24px rgba(16,185,129,0.08); border: 1px solid #d1fae5; }
+  .intro-stat-number { font-size: 42px; font-weight: 900; background: linear-gradient(90deg, #10b981, #14b8a6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; line-height: 1; margin-bottom: 6px; }
+  .intro-stat-label { font-size: 14px; color: #475569; font-weight: 500; }
+
+  /* ─── PAIN ─── */
+  .pain-bg { background: linear-gradient(135deg, #042f2e 0%, #0f3d2e 100%); page-break-before: always; }
+  .pain-bg .section-label { color: #34d399; }
+  .pain-bg .section-title { color: #ecfdf5; }
+  .pain-bg .section-title span { background: linear-gradient(90deg, #34d399, #2dd4bf); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .pain-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 40px; }
+  .pain-card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 24px; }
+  .pain-icon { font-size: 28px; margin-bottom: 12px; }
+  .pain-title { font-size: 15px; font-weight: 700; color: #ecfdf5; margin-bottom: 8px; }
+  .pain-desc { font-size: 13px; color: rgba(255,255,255,0.55); line-height: 1.7; }
+
+  /* ─── FEATURES ─── */
+  .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 16px; }
+  .feature-card { background: #fff; border-radius: 16px; padding: 28px 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: 1px solid #f0fdf4; transition: all 0.3s; }
+  .feature-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; margin-bottom: 14px; }
+  .feature-title { font-size: 16px; font-weight: 700; color: #064e3b; margin-bottom: 8px; }
+  .feature-desc { font-size: 13px; color: #475569; line-height: 1.7; }
+  .feature-tag { display: inline-block; margin-top: 10px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+
+  /* ─── HOW ─── */
+  .how-bg { background: #f0fdfa; page-break-before: always; }
+  .steps { display: flex; flex-direction: column; gap: 0; position: relative; margin-top: 40px; }
+  .step { display: flex; gap: 28px; align-items: flex-start; position: relative; padding-bottom: 32px; }
+  .step:last-child { padding-bottom: 0; }
+  .step-num { width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #10b981, #14b8a6); display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 800; color: #fff; flex-shrink: 0; position: relative; z-index: 1; }
+  .step-line { position: absolute; left: 23px; top: 48px; width: 2px; height: calc(100% - 16px); background: linear-gradient(180deg, #10b981, #14b8a6); opacity: 0.25; }
+  .step:last-child .step-line { display: none; }
+  .step-content { padding-top: 10px; }
+  .step-title { font-size: 17px; font-weight: 700; color: #064e3b; margin-bottom: 6px; }
+  .step-desc { font-size: 14px; color: #475569; line-height: 1.7; }
+
+  /* ─── SECURITY ─── */
+  .security-bg { background: linear-gradient(135deg, #042f2e 0%, #022c22 100%); page-break-before: always; }
+  .security-bg .section-label { color: #34d399; }
+  .security-bg .section-title { color: #ecfdf5; }
+  .security-bg .section-desc { color: rgba(255,255,255,0.55); }
+  .security-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-top: 32px; }
+  .security-item { display: flex; gap: 16px; align-items: flex-start; background: rgba(255,255,255,0.04); border: 1px solid rgba(52,211,153,0.15); border-radius: 14px; padding: 20px; }
+  .security-check { width: 36px; height: 36px; background: rgba(52,211,153,0.15); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .security-title { font-size: 14px; font-weight: 700; color: #ecfdf5; margin-bottom: 4px; }
+  .security-desc { font-size: 12px; color: rgba(255,255,255,0.45); line-height: 1.6; }
+
+  /* ─── PLANS ─── */
+  .plans-section { page-break-before: always; }
+  .plans-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px; }
+  .plan-card { border-radius: 20px; padding: 32px 28px; position: relative; overflow: hidden; }
+  .plan-basic { background: #f0fdfa; border: 2px solid #d1fae5; }
+  .plan-pro { background: linear-gradient(135deg, #064e3b 0%, #065f46 100%); border: 2px solid #10b981; }
+  .plan-ent { background: linear-gradient(135deg, #042f2e 0%, #0f3d2e 100%); border: 2px solid #14b8a6; }
+  .plan-badge { position: absolute; top: 20px; right: 20px; padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+  .plan-basic .plan-badge { background: #d1fae5; color: #059669; }
+  .plan-pro .plan-badge { background: #10b981; color: #fff; }
+  .plan-ent .plan-badge { background: #14b8a6; color: #fff; }
+  .plan-name { font-size: 26px; font-weight: 900; margin-bottom: 4px; }
+  .plan-basic .plan-name { color: #064e3b; }
+  .plan-pro .plan-name { color: #fff; }
+  .plan-ent .plan-name { color: #fff; }
+  .plan-tagline { font-size: 13px; margin-bottom: 24px; }
+  .plan-basic .plan-tagline { color: #6b7280; }
+  .plan-pro .plan-tagline { color: rgba(255,255,255,0.6); }
+  .plan-ent .plan-tagline { color: rgba(255,255,255,0.6); }
+  .plan-features { list-style: none; }
+  .plan-features li { padding: 7px 0; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+  .plan-basic .plan-features li { color: #334155; }
+  .plan-pro .plan-features li { color: rgba(255,255,255,0.85); }
+  .plan-ent .plan-features li { color: rgba(255,255,255,0.85); }
+  .plan-features li::before { content: '✓'; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .plan-basic .plan-features li::before { color: #10b981; }
+  .plan-pro .plan-features li::before { color: #34d399; }
+  .plan-ent .plan-features li::before { color: #2dd4bf; }
+  .plan-separator { width: 100%; height: 1px; margin: 20px 0; }
+  .plan-basic .plan-separator { background: #d1fae5; }
+  .plan-pro .plan-separator { background: rgba(255,255,255,0.1); }
+  .plan-ent .plan-separator { background: rgba(255,255,255,0.1); }
+  .plan-highlight { font-size: 12px; font-weight: 600; padding: 8px 14px; border-radius: 8px; margin-top: 20px; text-align: center; }
+  .plan-basic .plan-highlight { background: #d1fae5; color: #047857; }
+  .plan-pro .plan-highlight { background: rgba(16,185,129,0.3); color: #6ee7b7; }
+  .plan-ent .plan-highlight { background: rgba(20,184,166,0.3); color: #5eead4; }
+
+  /* ─── TECH ─── */
+  .tech-bg { background: #f0fdfa; }
+  .tech-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 36px; }
+  .tech-item { background: #fff; border: 1px solid #d1fae5; border-radius: 12px; padding: 20px 16px; text-align: center; }
+  .tech-icon { font-size: 28px; margin-bottom: 8px; }
+  .tech-name { font-size: 13px; font-weight: 700; color: #064e3b; margin-bottom: 4px; }
+  .tech-role { font-size: 11px; color: #6b7280; }
+
+  /* ─── CASES ─── */
+  .cases-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-top: 36px; }
+  .case-card { background: #fff; border-radius: 14px; padding: 24px; border-left: 4px solid; box-shadow: 0 2px 12px rgba(0,0,0,0.05); }
+  .case-title { font-size: 16px; font-weight: 700; color: #064e3b; margin-bottom: 8px; }
+  .case-desc { font-size: 13px; color: #475569; line-height: 1.7; }
+
+  /* ─── CTA ─── */
+  .cta-bg { background: linear-gradient(135deg, #064e3b 0%, #0f766e 50%, #14b8a6 100%); text-align: center; padding: 80px 40px; page-break-before: always; }
+  .cta-title { font-size: 40px; font-weight: 900; color: #fff; margin-bottom: 16px; }
+  .cta-sub { font-size: 18px; color: rgba(255,255,255,0.8); margin-bottom: 40px; font-weight: 300; }
+  .cta-buttons { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .cta-btn { padding: 14px 36px; border-radius: 50px; font-size: 15px; font-weight: 700; letter-spacing: 0.5px; text-decoration: none; display: inline-block; }
+  .cta-btn-primary { background: #fff; color: #047857; }
+  .cta-btn-secondary { background: rgba(255,255,255,0.15); color: #fff; border: 2px solid rgba(255,255,255,0.4); }
+  .cta-contact { margin-top: 40px; color: rgba(255,255,255,0.6); font-size: 14px; }
+
+  /* ─── FOOTER ─── */
+  .footer { background: #042f2e; color: rgba(255,255,255,0.4); text-align: center; padding: 32px; font-size: 12px; }
+  .footer strong { color: rgba(255,255,255,0.7); }
+
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .cover { min-height: 297mm; } .section { padding: 48px 60px; } }
+
+  /* ─── UTILS ─── */
+  blockquote { border-left: 4px solid #10b981; padding: 16px 24px; background: #f0fdfa; border-radius: 0 12px 12px 0; margin: 24px 0; font-size: 15px; color: #334155; font-style: italic; line-height: 1.8; }
+  table { width: 100%; border-collapse: collapse; margin-top: 24px; font-size: 14px; }
+  th { background: #f0fdf4; padding: 12px 16px; text-align: left; font-weight: 700; color: #064e3b; font-size: 13px; letter-spacing: 0.5px; }
+  td { padding: 12px 16px; border-bottom: 1px solid #f0fdf4; color: #475569; }
+  tr:last-child td { border-bottom: none; }
+  .td-yes { color: #10b981; font-weight: 700; }
+  .td-no { color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<div class="cover">
+  <div class="cover-logo">WAhubX</div>
+  <div class="cover-tagline">WhatsApp 自动化 · 多账号管理 · AI 智能互动</div>
+  <div class="cover-divider"></div>
+  <div class="cover-title">一站式 WhatsApp<br>账号运营自动化平台</div>
+  <div class="cover-subtitle">
+    专为私域营销团队、代理公司及独立运营者打造——<br>
+    让每一个 WhatsApp 账号 24 小时持续运作，无需人工盯守。
+  </div>
+  <div class="cover-badges">
+    <span class="cover-badge">🤖 AI 智能对话</span>
+    <span class="cover-badge">🛡 反检测技术</span>
+    <span class="cover-badge">📅 5 天养号</span>
+    <span class="cover-badge">📱 Baileys 注册</span>
+    <span class="cover-badge">🔒 多租户 SaaS</span>
+  </div>
+  <div class="cover-footer">产品介绍书 · 2026 年版 · 机密文件，仅供商业参考</div>
+</div>
+
+<!-- INTRO -->
+<div class="intro-bg section-full">
+<div class="section" style="padding-top:0; padding-bottom:0;">
+  <div class="section-label">关于 WAhubX</div>
+  <div class="section-title">为 WhatsApp 私域而生的<br><span>下一代自动化平台</span></div>
+  <div class="section-desc">
+    WAhubX 是一款专业级 WhatsApp 多账号自动化管理平台，帮助营销团队和运营者告别重复性手工操作。
+    无论是批量养号、智能对话、Status 分发，还是多账号健康监控，WAhubX 都能以稳定、安全、智能的方式替你完成。
+    核心引擎基于 Baileys 协议直连，每号独立设备指纹，从源头解决「一机一号」的硬件瓶颈。
+  </div>
+  <div class="intro-grid">
+    <div class="intro-stat"><div class="intro-stat-number">50</div><div class="intro-stat-label">每用户最多管理 WhatsApp 账号数（Enterprise 版）</div></div>
+    <div class="intro-stat"><div class="intro-stat-number">24/7</div><div class="intro-stat-label">全天候无间断自动执行任务，无需人工值守</div></div>
+    <div class="intro-stat"><div class="intro-stat-number">100+</div><div class="intro-stat-label">预置聊天剧本，覆盖问候、饮食、工作、娱乐全场景</div></div>
+    <div class="intro-stat"><div class="intro-stat-number">5</div><div class="intro-stat-label">天全自动养号，从注册到可投入业务只需 5 天</div></div>
+  </div>
+</div>
+</div>
+
+<!-- PAIN -->
+<div class="pain-bg section-full">
+<div class="section" style="padding-top:0; padding-bottom:0;">
+  <div class="section-label">行业痛点</div>
+  <div class="section-title" style="color:#ecfdf5;">你是否也面临<br><span>这些 WhatsApp 运营困境？</span></div>
+  <div class="pain-grid">
+    <div class="pain-card"><div class="pain-icon">📱</div><div class="pain-title">一机一号硬件瓶颈</div><div class="pain-desc">同一台手机注册一个号登出再注册就失败，要运营 50 个号就得准备 50 台手机，成本高到离谱。</div></div>
+    <div class="pain-card"><div class="pain-icon">⏰</div><div class="pain-title">时间成本极高</div><div class="pain-desc">每天手动登录几十个号、发消息、回复客户，切换账号就浪费大半天，效率低下。</div></div>
+    <div class="pain-card"><div class="pain-icon">🚫</div><div class="pain-title">新号频繁被封</div><div class="pain-desc">新号不养直接发消息，72 小时内必封；行为太规律被图谱识别，一号被封整批遭殃。</div></div>
+    <div class="pain-card"><div class="pain-icon">🔁</div><div class="pain-title">重复操作消耗精力</div><div class="pain-desc">同样的招呼、同样的推广文案，每天复制粘贴，容易出错且无法保证一致性。</div></div>
+    <div class="pain-card"><div class="pain-icon">🌙</div><div class="pain-title">无法 24 小时响应</div><div class="pain-desc">客户深夜或周末咨询，无人回复商机流失，竞争对手快一步就全拿走了。</div></div>
+    <div class="pain-card"><div class="pain-icon">👁</div><div class="pain-title">多账号难以统一管理</div><div class="pain-desc">账号分散不同设备不同浏览器，QR 掉线没人发现，封号没人处理，运营一盘散沙。</div></div>
+  </div>
+</div>
+</div>
+
+<!-- FEATURES -->
+<div class="section-full" style="padding: 72px 80px;">
+<div style="max-width:960px; margin:0 auto;">
+  <div class="section-label">核心功能</div>
+  <div class="section-title">六大核心模块，<br><span>覆盖 WhatsApp 运营全流程</span></div>
+  <div class="features-grid">
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#f0fdf4;">💬</div>
+      <div class="feature-title">智能聊天自动化</div>
+      <div class="feature-desc">内置 100+ 马来华语剧本（支持中英马夹杂 lah/leh/lor），AI 改写保证每次对话字面唯一，A/B 双角色自然互动。开启 AI 模式后自动接管偏离剧本的对话。</div>
+      <span class="feature-tag" style="background:#f0fdf4; color:#10b981;">AI 驱动</span>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#ecfeff;">📱</div>
+      <div class="feature-title">Baileys 协议注册</div>
+      <div class="feature-desc">突破「一机一号」限制，每个账号独立 noise-protocol keys + 独立设备指纹，WhatsApp 视为完全不同的手机，理论上一台电脑注册无限个号。</div>
+      <span class="feature-tag" style="background:#ecfeff; color:#0891b2;">突破瓶颈</span>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#fdf4ff;">🤖</div>
+      <div class="feature-title">5 天全自动养号</div>
+      <div class="feature-desc">一键启动后系统自动生成人设、AI 生成头像、30 张朋友圈素材、20 条语音，排入 5 天日历：从 72h 冷却到破壳期自动执行，第 5 天解锁业务能力。</div>
+      <span class="feature-tag" style="background:#fdf4ff; color:#a855f7;">一键托管</span>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#fff7ed;">📅</div>
+      <div class="feature-title">智能调度 + 执行组</div>
+      <div class="feature-desc">全局 6 并发槽位，同 IP 组互斥、同账号互斥、跨时段冲突检测。4–8 号组成执行组，按组选号创建定时任务，重复规则灵活（单次/每日/每周/每月）。</div>
+      <span class="feature-tag" style="background:#fff7ed; color:#f97316;">精准并发</span>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#f0fdfa;">🛡</div>
+      <div class="feature-title">反检测 & 健康档案</div>
+      <div class="feature-desc">每号独立 VPN/代理、独立设备指纹、独立作息画像。健康分实时评估（验证码/举报/失败率综合），封号危险指数 🟢🟡🔴 三档，高风险自动降速保号。</div>
+      <span class="feature-tag" style="background:#f0fdfa; color:#14b8a6;">全方位保护</span>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon" style="background:#f0fdf4;">📊</div>
+      <div class="feature-title">槽位锁定 & 手动接管</div>
+      <div class="feature-desc">50 槽位物理固定（a01 永远是 a01），配置永不丢失，支持清空/原厂重置/时间点恢复三档。桌面端一键打开 Chromium，租户随时接管聊天，bot 自动暂停。</div>
+      <span class="feature-tag" style="background:#f0fdf4; color:#10b981;">灵活可控</span>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- HOW IT WORKS -->
+<div class="how-bg section-full">
+<div class="section" style="padding-top:0; padding-bottom:0;">
+  <div class="section-label">使用流程</div>
+  <div class="section-title">从注册到全自动运营，<br><span>只需 7 个步骤</span></div>
+  <div class="steps">
+    <div class="step"><div class="step-line"></div><div class="step-num">1</div><div class="step-content"><div class="step-title">安装系统，激活 License Key</div><div class="step-desc">运行安装包完成部署，输入管理员发放的 License Key 激活，本地机器码绑定，开箱即用。</div></div></div>
+    <div class="step"><div class="step-line"></div><div class="step-num">2</div><div class="step-content"><div class="step-title">配置代理与 AI（可选）</div><div class="step-desc">为每个槽位分配独立住宅代理 IP（1 IP 可共享 3–5 号），填写 OpenAI/DeepSeek/Gemini Key 启用 AI 改写（一键测试连通）。</div></div></div>
+    <div class="step"><div class="step-line"></div><div class="step-num">3</div><div class="step-content"><div class="step-title">填入 SIM 卡信息，注册新号</div><div class="step-desc">录入手机号和 SIM 运营商信息，系统通过 Baileys 协议生成独立设备身份，发送验证码，输入后完成注册。全程无需实体手机。</div></div></div>
+    <div class="step"><div class="step-line"></div><div class="step-num">4</div><div class="step-content"><div class="step-title">一键启动 5 天自动养号</div><div class="step-desc">系统自动生成人设 JSON、AI 头像、30 张朋友圈图、20 条语音，排入 5 天日历：Day 0–3 冷却、Day 4–5 破壳接好友发 Status，第 5 天自动进入 Phase 1 解锁互聊。</div></div></div>
+    <div class="step"><div class="step-line"></div><div class="step-num">5</div><div class="step-content"><div class="step-title">组建执行组，配置定时任务</div><div class="step-desc">从 50 号里挑 4–8 号组成执行组（系统提示 IP 冲突），选剧本、设时间、设重复规则。系统检测时段冲突并建议错峰。</div></div></div>
+    <div class="step"><div class="step-line"></div><div class="step-num">6</div><div class="step-content"><div class="step-title">系统自动执行，实时监控</div><div class="step-desc">到点自动唤起账号执行剧本，全局 6 并发仲裁，健康分实时评估。任何异常桌面弹窗告警，日志可永久回看。</div></div></div>
+    <div class="step"><div class="step-num">7</div><div class="step-content"><div class="step-title">随时接管 + 定期备份</div><div class="step-desc">租户可随时打开账号手动聊天（bot 自动暂停）。每日 3 点自动备份 session/profile/数据库，换机只需 License + .wab 文件即可完整迁移。</div></div></div>
+  </div>
+</div>
+</div>
+
+<!-- SECURITY -->
+<div class="security-bg section-full">
+<div class="section" style="padding-top:0; padding-bottom:0;">
+  <div class="section-label">安全性 & 稳定性</div>
+  <div class="section-title" style="color:#ecfdf5;">你的账号安全，<br><span>是我们的第一优先级</span></div>
+  <div class="section-desc">WAhubX 在每一个技术层面都以保护账号安全为前提，从协议层到应用层，全方位防护。</div>
+  <div class="security-grid">
+    <div class="security-item"><div class="security-check">🔑</div><div><div class="security-title">独立 Device Identity</div><div class="security-desc">每号生成独立 noise-protocol keys + 随机设备指纹（UA/分辨率/时区/型号），WhatsApp 视为完全不同的物理手机，彻底解决设备关联封禁。</div></div></div>
+    <div class="security-item"><div class="security-check">🌐</div><div><div class="security-title">独立 VPN / 代理隔离</div><div class="security-desc">每号配置独立网络出口，1 IP 最多共享 3–5 号，同 IP 组成员互斥执行（不会同时在线），避免多号共享 IP 被关联。</div></div></div>
+    <div class="security-item"><div class="security-check">🧬</div><div><div class="security-title">真人行为模拟</div><div class="security-desc">每条消息带 typing 打字延迟（400–2500ms）+ 发送间隔（20–300s）随机，作息按本地时区自适应，避免机器人识别。</div></div></div>
+    <div class="security-item"><div class="security-check">🏥</div><div><div class="security-title">健康分 + 封号危险指数</div><div class="security-desc">多因子评分模型：验证码触发、举报次数、失败率、同 IP 连带风险。🟢 低 / 🟡 中（自动降速）/ 🔴 高（暂停任务+弹窗告警）。</div></div></div>
+    <div class="security-item"><div class="security-check">📅</div><div><div class="security-title">5 天养号 + 72h 冷却</div><div class="security-desc">Meta 服务端对新号有 72 小时硬冷却，系统严格遵守：前 3 天零主动行为，Day 4+ 逐步解锁，全程可视化倒数提示。</div></div></div>
+    <div class="security-item"><div class="security-check">⚙️</div><div><div class="security-title">任务自愈 + 冲突拦截</div><div class="security-desc">全局 6 并发仲裁，同账号/同 IP 组互斥，时段冲突自动检测。单任务失败不中断养号计划，系统重启后自动恢复。</div></div></div>
+    <div class="security-item"><div class="security-check">💾</div><div><div class="security-title">三层备份 + 换机迁移</div><div class="security-desc">每日自动快照（保留 7 天）+ 手动导出加密 .wab 包（绑 License Key）+ 原厂重置。槽位配置永不丢失，换机直接恢复。</div></div></div>
+    <div class="security-item"><div class="security-check">🔐</div><div><div class="security-title">JWT + License 双验证</div><div class="security-desc">API 走 JWT 双 Token，License 绑定机器码，每次启动联网校验，VPS 可随时吊销，有效防止盗版和越权。</div></div></div>
+    <div class="security-item"><div class="security-check">🛑</div><div><div class="security-title">强制停止 + 紧急熔断</div><div class="security-desc">任何正在执行的任务可一键强制停止，系统在下一个循环节点即刻响应，保护账号不受异常操作影响。</div></div></div>
+    <div class="security-item"><div class="security-check">📋</div><div><div class="security-title">完整审计日志</div><div class="security-desc">所有消息、任务、风险事件永久存储本地数据库，日志可回看不限期，每次"忽略风险提示"都记录在健康档案，便于封号复盘归因。</div></div></div>
+  </div>
+</div>
+</div>
+
+<!-- USE CASES -->
+<div class="section-full" style="padding: 72px 80px;">
+<div style="max-width:960px; margin:0 auto;">
+  <div class="section-label">适用场景</div>
+  <div class="section-title">哪些人最适合<br><span>使用 WAhubX？</span></div>
+  <div class="cases-grid">
+    <div class="case-card" style="border-color:#10b981;"><div class="case-title">🛒 电商 & 独立站卖家</div><div class="case-desc">WhatsApp 私域客服矩阵，AI 自动跟进咨询，自动接受好友请求，50 号同时在线响应订单。</div></div>
+    <div class="case-card" style="border-color:#14b8a6;"><div class="case-title">📢 营销代理公司</div><div class="case-desc">多客户账号统一管理，每位客户独立租户，数据完全隔离，一套系统服务多品牌。</div></div>
+    <div class="case-card" style="border-color:#f97316;"><div class="case-title">💼 跨境业务拓展</div><div class="case-desc">按国家分组的号矩阵（马来/新加坡/印尼），本地时区作息画像，本地化剧本包，精准渗透各区域市场。</div></div>
+    <div class="case-card" style="border-color:#a855f7;"><div class="case-title">🎓 教育 & 社群运营</div><div class="case-desc">课程咨询自动回复、社群话题维护、Status 推送活动，AI 模式维护社群活跃度。</div></div>
+    <div class="case-card" style="border-color:#0891b2;"><div class="case-title">🏢 品牌私域矩阵</div><div class="case-desc">多人设账号覆盖不同客户画像（年轻/中年/男/女），内容统一规划一键分发，节省大量人力成本。</div></div>
+    <div class="case-card" style="border-color:#ef4444;"><div class="case-title">🏪 本地服务商家</div><div class="case-desc">餐厅/美容/健身等本地商家，每门店一号，订位/咨询/回访自动化，客户 24 小时响应无空档。</div></div>
+  </div>
+</div>
+</div>
+
+<!-- PLANS -->
+<div class="plans-section section-full" style="background:#f0fdfa; padding: 72px 80px;">
+<div style="max-width:960px; margin:0 auto;">
+  <div class="section-label">订阅套餐</div>
+  <div class="section-title">选择适合你的<br><span>运营规模</span></div>
+  <div class="section-desc">三档套餐满足从个人运营者到企业级团队的需求。</div>
+
+  <div class="plans-grid">
+    <div class="plan-card plan-basic">
+      <span class="plan-badge">入门</span>
+      <div class="plan-name">Basic</div>
+      <div class="plan-tagline">个人运营者 & 小型团队</div>
+      <div class="plan-separator"></div>
+      <ul class="plan-features">
+        <li>最多 <strong>10 个</strong> WhatsApp 账号</li>
+        <li>全部任务类型</li>
+        <li>100+ 预设剧本</li>
+        <li>5 天全自动养号</li>
+        <li>Baileys 注册引擎</li>
+        <li>实时执行日志</li>
+        <li>VPN / 代理配置</li>
+        <li>反检测保护</li>
+        <li>桌面告警</li>
+      </ul>
+      <div class="plan-highlight">适合维护 1–10 个账号</div>
+    </div>
+
+    <div class="plan-card plan-pro">
+      <span class="plan-badge">🔥 推荐</span>
+      <div class="plan-name">Pro</div>
+      <div class="plan-tagline">专业团队 & 代理公司</div>
+      <div class="plan-separator"></div>
+      <ul class="plan-features">
+        <li>最多 <strong>30 个</strong> WhatsApp 账号</li>
+        <li>全部 Basic 功能</li>
+        <li>AI 对话引擎（多模型）</li>
+        <li>执行组批量管理</li>
+        <li>AI 素材生成（Flux + Piper）</li>
+        <li>云备份（增值）</li>
+        <li>完整健康档案</li>
+        <li>优先技术支持</li>
+      </ul>
+      <div class="plan-highlight">适合 10–30 个号的专业团队</div>
+    </div>
+
+    <div class="plan-card plan-ent">
+      <span class="plan-badge">企业</span>
+      <div class="plan-name">Enterprise</div>
+      <div class="plan-tagline">大规模 & 企业级</div>
+      <div class="plan-separator"></div>
+      <ul class="plan-features">
+        <li>最多 <strong>50+ 个</strong> WhatsApp 账号</li>
+        <li>全部 Pro 功能</li>
+        <li>多租户部署支持</li>
+        <li>自定义剧本包制作</li>
+        <li>ElevenLabs 高质语音</li>
+        <li>Webhook / 开放 API（Roadmap）</li>
+        <li>专属客户经理</li>
+        <li>SLA 保障</li>
+      </ul>
+      <div class="plan-highlight">适合 30–50+ 号的企业团队</div>
+    </div>
+  </div>
+
+  <div style="margin-top: 40px;">
+    <table>
+      <thead><tr><th>功能对比</th><th>Basic</th><th>Pro</th><th>Enterprise</th></tr></thead>
+      <tbody>
+        <tr><td>账号数上限</td><td>10</td><td>30</td><td>50+</td></tr>
+        <tr><td>Baileys 注册引擎</td><td class="td-yes">✓</td><td class="td-yes">✓</td><td class="td-yes">✓</td></tr>
+        <tr><td>5 天自动养号</td><td class="td-yes">✓</td><td class="td-yes">✓</td><td class="td-yes">✓</td></tr>
+        <tr><td>预置剧本包</td><td class="td-yes">✓</td><td class="td-yes">✓</td><td class="td-yes">✓</td></tr>
+        <tr><td>AI 对话（多模型）</td><td class="td-no">—</td><td class="td-yes">✓</td><td class="td-yes">✓</td></tr>
+        <tr><td>AI 素材生成</td><td class="td-no">基础</td><td class="td-yes">完整</td><td class="td-yes">完整</td></tr>
+        <tr><td>执行组管理</td><td class="td-yes">基础</td><td class="td-yes">高级</td><td class="td-yes">高级</td></tr>
+        <tr><td>ElevenLabs 高质语音</td><td class="td-no">—</td><td class="td-no">—</td><td class="td-yes">✓</td></tr>
+        <tr><td>自定义剧本包</td><td class="td-no">—</td><td class="td-no">—</td><td class="td-yes">✓</td></tr>
+        <tr><td>技术支持</td><td class="td-no">标准</td><td class="td-yes">优先</td><td class="td-yes">专属</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</div>
+
+<!-- TECH -->
+<div class="tech-bg section-full" style="padding: 72px 80px;">
+<div style="max-width:960px; margin:0 auto;">
+  <div class="section-label">技术架构</div>
+  <div class="section-title">企业级技术栈，<br><span>保障稳定可靠运行</span></div>
+  <div class="section-desc">WAhubX 采用现代化企业级技术构建，经过生产环境验证。</div>
+
+  <div class="tech-grid">
+    <div class="tech-item"><div class="tech-icon">⚡</div><div class="tech-name">NestJS</div><div class="tech-role">后端框架</div></div>
+    <div class="tech-item"><div class="tech-icon">⚛️</div><div class="tech-name">React + TS</div><div class="tech-role">前端框架</div></div>
+    <div class="tech-item"><div class="tech-icon">📱</div><div class="tech-name">Baileys</div><div class="tech-role">WA 协议引擎</div></div>
+    <div class="tech-item"><div class="tech-icon">🐘</div><div class="tech-name">PostgreSQL</div><div class="tech-role">关系型数据库</div></div>
+    <div class="tech-item"><div class="tech-icon">🔴</div><div class="tech-name">Redis + BullMQ</div><div class="tech-role">任务队列</div></div>
+    <div class="tech-item"><div class="tech-icon">🤖</div><div class="tech-name">多 AI 模型</div><div class="tech-role">OpenAI/DeepSeek/Gemini</div></div>
+    <div class="tech-item"><div class="tech-icon">🎨</div><div class="tech-name">Flux + Piper</div><div class="tech-role">AI 素材生成</div></div>
+    <div class="tech-item"><div class="tech-icon">📦</div><div class="tech-name">Inno Setup</div><div class="tech-role">一键安装包</div></div>
+  </div>
+
+  <blockquote style="margin-top: 40px;">
+    "WAhubX 的执行引擎基于 Baileys 协议直连而非 WhatsApp Web 浏览器模拟，每个账号拥有独立的设备身份（noise-protocol keys），在 WhatsApp 服务端看来就是不同的物理手机——这是从根本上解决『一机一号』封禁风险的关键设计。"
+  </blockquote>
+</div>
+</div>
+
+<!-- ADMIN -->
+<div class="section-full" style="background: linear-gradient(135deg,#f0fdfa,#fff); padding: 72px 80px; page-break-before: always;">
+<div style="max-width:960px; margin:0 auto;">
+  <div class="section-label">多租户管理</div>
+  <div class="section-title">Admin 后台，<br><span>轻松管理所有客户</span></div>
+  <div class="section-desc">WAhubX 内置双角色体系：<strong>管理员（Admin）</strong>负责创建与管理租户账号；<strong>租户（Tenant）</strong>专注于自己的 WhatsApp 账号运营。两者数据完全隔离，互不影响。</div>
+
+  <div class="intro-grid">
+    <div class="intro-stat">
+      <div class="intro-stat-number" style="font-size:28px; margin-bottom:12px;">👑 管理员功能</div>
+      <ul style="list-style:none; color:#475569; font-size:14px; line-height:2;">
+        <li>✓ 创建 / 编辑 / 删除租户账号</li>
+        <li>✓ 分配 Basic / Pro / Enterprise 套餐</li>
+        <li>✓ 生成与吊销 License Key</li>
+        <li>✓ 查看系统用户统计概览</li>
+        <li>✓ 重置租户密码</li>
+        <li>✓ 剧本包分发授权</li>
+        <li>✓ 版本升级包发布</li>
+      </ul>
+    </div>
+    <div class="intro-stat">
+      <div class="intro-stat-number" style="font-size:28px; margin-bottom:12px;">🏢 租户功能</div>
+      <ul style="list-style:none; color:#475569; font-size:14px; line-height:2;">
+        <li>✓ 管理 50 个槽位的 WA 账号</li>
+        <li>✓ 注册新号 / 扫码绑定</li>
+        <li>✓ 创建执行组与定时任务</li>
+        <li>✓ 一键启动 5 天自动养号</li>
+        <li>✓ 配置 VPN / AI Provider / 代理</li>
+        <li>✓ 编辑剧本 / 导入剧本包</li>
+        <li>✓ 实时接管聊天 + 监控健康分</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- CTA -->
+<div class="cta-bg">
+  <div class="cta-title">准备好让 WAhubX<br>为你的 WhatsApp 持续工作了吗？</div>
+  <div class="cta-sub">告别手动操作，告别深夜值班，告别账号封禁焦虑。<br>让 WAhubX 成为你最可靠的 WhatsApp 运营助手。</div>
+  <div class="cta-buttons">
+    <a href="#" class="cta-btn cta-btn-primary">立即开始免费试用</a>
+    <a href="#" class="cta-btn cta-btn-secondary">预约产品演示</a>
+  </div>
+  <div class="cta-contact">如需了解更多或洽谈企业合作，请联系我们的销售团队<br><strong style="color:rgba(255,255,255,0.8);">sales@wahubx.com</strong></div>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <strong>WAhubX</strong> — WhatsApp 自动化运营平台 &nbsp;|&nbsp;
+  本文件内容为商业机密，仅供合法商业评估用途，未经授权请勿转发或复制 &nbsp;|&nbsp;
+  © 2026 WAhubX. All rights reserved.
+</div>
+
+</body>
+</html>

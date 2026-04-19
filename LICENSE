@@ -1,0 +1,52 @@
+Copyright (c) 2026 Bryan Geh. All Rights Reserved.
+
+WAhubX — WhatsApp Multi-Account Automation Platform
+
+This software and all associated files, source code, documentation,
+assets, and configurations (collectively, the "Software") are the
+confidential and proprietary property of Bryan Geh ("Licensor").
+
+NO LICENSE IS GRANTED BY DEFAULT.
+
+Any use, reproduction, modification, distribution, sublicensing,
+public display, public performance, sale, lease, or transfer of the
+Software, in whole or in part, is strictly prohibited without the
+prior written consent of the Licensor.
+
+Authorized users must hold a valid, non-expired License Key issued
+by the Licensor. The License Key is bound to a specific machine
+fingerprint and is non-transferable. Use of the Software without a
+valid License Key, or on a machine different from the one the License
+Key was issued for, constitutes infringement.
+
+Reverse engineering, decompilation, disassembly, or any attempt to
+extract the source code from compiled binaries is expressly forbidden.
+
+The Software includes third-party open-source components, each
+governed by its own license. A list of such components and their
+respective licenses is maintained in the THIRD_PARTY_NOTICES file.
+The terms of those open-source licenses apply only to the respective
+third-party components, not to the Software as a whole.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.
+
+The Licensor reserves the right to revoke any License Key at any time
+for violations of these terms, including but not limited to:
+  - Use on unauthorized machines
+  - Attempts to bypass License verification
+  - Redistribution of the Software in any form
+  - Use in violation of WhatsApp Terms of Service or applicable law
+
+For licensing inquiries, please contact:
+  Email: bryangeh79@gmail.com
+
+---
+
+This notice must be included in all copies or substantial portions
+of the Software.
