@@ -4,6 +4,117 @@
 
 ---
 
+## [v0.5.0-m5] · 2026-04-20 · M5 养号日历 + Phase 机 + 4 种 warmup executor 交付
+
+M5 里程碑: 14 天 phase 机 (§5.3 严守) + 1h setInterval 日历引擎 + 4 层 Status 素材降级 + script_chat 运行时配对过滤链 + min_warmup_stage 真 gate (承接 M4 刻意延后的 gate) + §B.16 预置素材骨架.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | Phase 机: Day 1-3=0/4-7=1/8-14=2/15+=3 正确映射 + 阈值跨日升 phase | `computePhaseForDay` 3 ut + `tickDay` 5 ut |
+| 2 | `risk_level=high` → 强制 Phase 0 + day=1 + regress_reason 记录 | 6 ut covers high/medium/low/null/bottom 边界 + smoke verified |
+| 3 | `skip-to-next` 推到目标 phase 起始日, Mature 不能再升 | 2 ut + smoke API 0→1@day4 / 1→2@day8 |
+| 4 | M4 挂起的 min_warmup_stage gate 真开启 (双边都必须 ≥ min) | `ScriptRunnerService.run` gate + 3 ut 覆盖 reject/pass/single-side + live smoke: acc=stage0, script=min1 → `warmup_stage 不足` |
+| 5 | Pair 过滤链 5 条全生效 (exclude self + IP 组互斥 + takeover + !suspended + stage 门槛) | `WarmupPairService` + 7 ut covers base + 5 filters + null-proxy 保守 · smoke: 2 null-proxy slot → NO_PAIR_AVAILABLE ✓ |
+| 6 | 4 层 Status 素材降级 (persona → builtin → pack text → skip); Phase 0-1 硬 block | `StatusPostExecutor` · smoke: Phase 2 → layer4-skip 成功空过; Phase 0 → PHASE_GATE 拒 |
+| 7 | dev-only `/admin/debug/set-risk-level` 生产 build 自动 403 | `AdminDebugController.isProd` @ OnModuleInit + smoke |
+| 8 | Calendar 1h setInterval · tick 幂等 (payload _warmupPlanId+_planDay+_windowAt 去重) | `WarmupCalendarService.onModuleInit` 日志 + `isDuplicate` JSONB 查询 |
+| 9 | 56/56 unit test green | dispatcher 17 + pack-loader 9 + runner 10 + phase 13 + pair 7 |
+
+### Added (M5)
+
+**数据模型** — migration `CreateWarmupPlan1776700000000`
+- `warmup_plan`: SERIAL pk · account_id FK wa_account CASCADE uniq · template text default 'v1_14day' · current_phase int · current_day int · started_at · last_advanced_at · regressed_at · regress_reason · paused bool · history jsonb[] · idx_phase_day
+
+**Phase 机** (`warmup-phase.service.ts`)
+- `tickDay(planId)`: current_day + 1, 跨阈值升 phase, 同步更新 `wa_account.warmup_stage`
+- `maybeRegress(plan)`: 读 `account_health.risk_level`, high → 强制 Phase 0 · day=1 · 记 regress_reason
+- `skipToNextPhase(planId, reason)`: 手动跳, day 推到目标 phase 起始日
+- `pause` / `resume`: expert mode 暂停推进
+- `computePhaseForDay(day, thresholds)`: 纯函数, 单测易测
+- 所有变更落 `history` JSONB 流水 (上限 100 条)
+
+**Plan 模板** (`warmup-plan.templates.ts`)
+- `V1_14DAY_TEMPLATE`: 14 天完整日程, 每天 3-4 个窗口, windows 内嵌 `WarmupTaskSpec[]`
+- Phase 阈值: 0→Day1, 1→Day4, 2→Day8, 3→Day15
+- §B.2 Day 4 "破壳仪式" 的 status_post **去掉**, 改 `status_browse` reactive (对齐 §B.20 "Phase 0-1 禁 status_post")
+- `MATURE_DAILY_WINDOWS`: Phase 3 常态模板 (每天 1 status_post 上限, §B.20)
+
+**Pair 过滤链** (`warmup-pair.service.ts`, 技术决策 §B.15)
+- 候选池 = 同租户其他槽位. 硬过滤 5 条:
+  1. exclude self (accountId 相同跳过)
+  2. `takeoverActive=false` (M3 rejection #4 对齐)
+  3. `status != suspended/empty` (只要 active 或 warmup)
+  4. `proxy_id != initiator.proxy_id` (**IP 组互斥 §B.15 #1 — dev 里两个 null proxy 保守视为同组**)
+  5. `warmupStage >= requiredWarmupStage` (剧本门槛)
+- 空集返 `null`, 绝不强配. ScriptChatExecutor 接 `NO_PAIR_AVAILABLE` error_code.
+
+**Calendar 引擎** (`warmup-calendar.service.ts`)
+- 1h setInterval (和 M3 dispatcher 风格一致, 不引 BullMQ repeatable — M3 也没用, 保持一致)
+- 每 tick: regress check → 跨 24h 推 day → 读今日 schedule → 找 [now, now+1h) 窗口 → 创建 task 带 ±15-30min jitter
+- 幂等: `_warmupPlanId + _planDay + _windowAt` JSONB 条件去重
+- env 开关 `WARMUP_CALENDAR_ENABLED=false` + `WARMUP_CALENDAR_INTERVAL_MS=...` (smoke/test 调 600s)
+
+**4 种 Executor**
+- `WarmupExecutor` (从 M3 stub 升级): presence tick, 更新 `wa_account.last_online_at`
+- `StatusPostExecutor` (新): Phase gate (<2 → PHASE_GATE) + 4 层素材降级硬编码 1→2→3→4
+- `StatusBrowseExecutor` (新, stub): Day 4-5 reactive 动作占位. Baileys status feed API 在 M5 scope 内留 stub, M8 健康分接真 ws listener
+- `ScriptChatExecutor` (M4 扩展): 新增 `_needPair=true` 模式, 运行时调 `WarmupPairService.pickPartner`. 兼容 M4 手动 `roleBaccountId` 模式
+
+**Runner gate** (`script-runner.service.ts`)
+- 承接 M4 刻意延后的 `min_warmup_stage` gate — 现 **真开启**
+- 双边 (A + B) `warmupStage` 必须 ≥ `script.minWarmupStage`, 否则 throw `warmup_stage 不足: script=... 要求≥X, A=... B=...`
+- 单测覆盖: reject-both-low / reject-single-side / pass-exactly-at-threshold
+
+**API**
+- `GET /warmup/plans` — 租户视角 list (join 手机号)
+- `GET /warmup/plans/:accountId` — 单 plan 详情含 history
+- `POST /warmup/plans/:accountId/init` — 建 Day 1 plan
+- `POST /warmup/plans/:accountId/skip-phase` — 手动跳
+- `POST /warmup/plans/:accountId/pause` / `resume`
+- `POST /warmup/calendar/tick` — 手动触发 tick (仅 platform admin, dev 验证用)
+- **DEV-ONLY** `POST /admin/debug/set-risk-level` — `NODE_ENV='production'` 自动 403, 否则接受 `{accountId, riskLevel}` 写 `account_health`. M5 期间 regress 链路唯一可测入口; M8 真健康分引擎上线后此端点保留作模拟工具
+
+**Admin UI `WarmupTab`** (`packages/frontend/src/pages/admin/WarmupTab.tsx`)
+- Table 列租户所有 plan · 列 Phase tag / Day 进度条 / 暂停/回退 badge / 回退原因
+- 行内按钮: 详情 (Modal 显 history JSON) / 跳到下一 Phase / 暂停 / 恢复
+- `AdminPage.tsx` Tabs 新增 "养号计划"
+
+**§B.16 预置素材骨架** (`data/assets/_builtin/`)
+- 10 空子目录 (personas / voices/zh / voices/en / images/{food,life,scenery,shopping,pets,selfies} / stickers) · 每个含 `.gitkeep`
+- 总 README 说明命名约定 + 4 层消费顺序 + installer M11 打包 TODO
+- 实物素材 (200MB) 留给 M7 `asset-studio` 生成并填充
+
+### Verified (smoke)
+
+- 5 executor 注册: `chat, warmup, script_chat, status_post, status_browse`
+- Plan init API: account 1/2 各建 Day 1 Phase 0 计划
+- Skip-phase chain: 0→1@day=4, 1→2@day=8 (threshold 对齐)
+- dev debug endpoint: 设 `risk_level=high` → calendar tick 自动 regress account 1 到 Phase 0 day 1, `regressReason='risk_level=high · score=20'` ✓
+- status_post PHASE_GATE: Phase 0 下创建 status_post → error_code=PHASE_GATE
+- status_post 4 层降级: Phase 2 下, 所有池空 → layer4-skip success (不算失败, 空过)
+- script_chat runner gate: account stage=0, script=s001 min=1 → error_code=RUNNER_THREW / `warmup_stage 不足`
+- script_chat _needPair: 两 slot 都 null proxy_id → NO_PAIR_AVAILABLE (per §B.15 保守规则)
+
+### Constraints (M5 范围边界)
+
+- **dev 两 slot 同 null proxy_id 配对必失败** — 按 §B.15 设计正确. 真生产每个 slot 绑不同代理就解锁 pair 流
+- **Baileys Status feed API 未接真** — `StatusBrowseExecutor` 当前是 stub · M8 健康分阶段接 ws `messages.upsert` / `presence.update` 监听
+- **Phase 3 (Mature) 无 day-by-day 模板** — 用 `MATURE_DAILY_WINDOWS` 固定套餐 · 个性化日历 (按 persona peak_hours 动态生成) 留给 M6+
+- **账号注册后 auto-init plan 未接入** — M2 W3.5 新号注册推迟到 V1.1, 所以 M5 只开 `/warmup/plans/:accountId/init` 手动端点. V1.1 注册流程收尾时 auto-init 加到 `slots.service.registerAccount`
+- **calendar setInterval 不是 BullMQ repeatable** — 偏离最初 M5 plan A (BullMQ repeatable 1h). 原因: M3 dispatcher 也用 setInterval, BullMQ 装了没用, 保持一致不引额外复杂度
+
+### Rationale (存档关键决策)
+
+- **Phase 升级同步写 wa_account.warmup_stage** — 让 ScriptRunner gate 只读 `wa_account` 一张表, 不跨 `warmup_plan` 查. 保 hot path 快
+- **history JSONB 上限 100 条 slice** — 防 JSONB 膨胀. Phase 事件一年才 ~20 条, 100 条覆盖账号整个生命周期 + 几次 regress
+- **pair null-proxy 保守归同组** — §B.15 不允许"我猜它们真实出口 IP 可能不同". dev 必须用显式 proxy_id (哪怕同一代理分 2 row) 才能跑多槽互聊
+- **status_post layer4-skip 视为 success** — executor 成功完成 "今天不发" 的判定, 不是失败. 失败视角只留给 SEND_FAILED / PHASE_GATE / NO_PLAN 这些需要 retry/alert 的情况
+- **dev debug endpoint 单独 controller, 不藏在现有 admin** — `NODE_ENV=production` 检查只保护写方法, M8 或 staging 要插入健康事件有稳定端点. 合并到 admin-tenants 会让"dev 入口"被意外暴露
+
+---
+
 ## [v0.4.0-m4] · 2026-04-19 · M4 剧本引擎 + 包导入交付
 
 M4 里程碑: 剧本包结构化存储 (pack_id 主包 + pack_ref 增量 batch) + 内容池运行时随机抽 + AI 改写缓存 schema (M6 换真 AI) + 资源池 on_disabled 降级 + script_chat 执行器替代 M3 chat stub.

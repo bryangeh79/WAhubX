@@ -41,7 +41,11 @@ logs/
 *.log
 
 # ───────── Runtime data (local execution plane) ─────────
-data/
+data/*
+# 例外: §B.16 预置素材骨架随仓库走 (M7 填实物时再收尾)
+!data/assets/
+data/assets/*
+!data/assets/_builtin/
 backups/
 tmp/
 temp/

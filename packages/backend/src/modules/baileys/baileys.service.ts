@@ -349,6 +349,40 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return { waMessageId };
   }
 
+  /**
+   * 发纯文本 Status (24h WA 动态). M5 养号日历 Phase 2+ 用.
+   * Baileys: jid = 'status@broadcast', 消息本身是 text/image/video.
+   * 返 null waMessageId 仍写 chat_message (msg_type=status) 便于日历幂等与统计.
+   */
+  async sendStatusText(slotId: number, text: string): Promise<{ waMessageId: string | null }> {
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      throw new BadRequestException(
+        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+      );
+    }
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+
+    // 'status@broadcast' 是 WA 协议约定 jid · Baileys 透传
+    const sendResult = await sock.sendMessage('status@broadcast', { text });
+    const waMessageId = sendResult?.key?.id ?? null;
+
+    await this.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: 'status@broadcast',
+      direction: MessageDirection.Out,
+      msgType: MessageType.Text,
+      content: `[STATUS] ${text}`,
+      sentAt: new Date(),
+      waMessageId,
+    });
+
+    return { waMessageId };
+  }
+
   // ── 读取 (controller 用) ───────────────────────────────
   async listContacts(accountId: number) {
     return this.contactRepo.find({

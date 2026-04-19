@@ -14,6 +14,7 @@ import { SlotsModule } from './modules/slots/slots.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
+import { WarmupModule } from './modules/warmup/warmup.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { UsersModule } from './modules/users/users.module';
     SlotsModule,
     TenantsModule,
     LicenseModule,
+    WarmupModule,
     TasksModule,
     HealthModule,
   ],

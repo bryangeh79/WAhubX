@@ -74,6 +74,15 @@ export class ScriptRunnerService {
     ]);
     if (!accA || !accB) throw new NotFoundException('A/B 账号不存在');
 
+    // M5 gate: 双方 warmup_stage 必须 >= script.min_warmup_stage
+    // 用户 2026-04-20 定: "gate 真开启, 不允许再临时关闭"
+    const minStage = script.minWarmupStage ?? 0;
+    if (accA.warmupStage < minStage || accB.warmupStage < minStage) {
+      throw new Error(
+        `warmup_stage 不足: script=${script.scriptId} 要求 ≥ ${minStage}, A=${accA.warmupStage} B=${accB.warmupStage}`,
+      );
+    }
+
     const result: ScriptRunResult = { turnsExecuted: 0, turnsSkipped: 0, errors: [] };
 
     for (const turn of session.turns) {

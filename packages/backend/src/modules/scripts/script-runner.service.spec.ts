@@ -22,6 +22,8 @@ function buildRunner(opts: {
   scriptContent: Record<string, unknown>;
   existingCache?: Array<Partial<RewriteCacheEntity>>;
   assets?: Array<Partial<AssetEntity>>;
+  minWarmupStage?: number; // M5 gate
+  accountWarmupStage?: number | ((id: number) => number);
 } = { scriptContent: {} }) {
   const sent: Sent[] = [];
   const cache: Array<Partial<RewriteCacheEntity>> = [...(opts.existingCache ?? [])];
@@ -32,8 +34,12 @@ function buildRunner(opts: {
     packId: 1,
     scriptId: 's_test',
     content: opts.scriptContent,
+    minWarmupStage: opts.minWarmupStage ?? 0,
     pack: { id: 1, packId: 'p', enabled: true } as ScriptEntity['pack'],
   };
+  const stageResolver = typeof opts.accountWarmupStage === 'function'
+    ? opts.accountWarmupStage
+    : () => (opts.accountWarmupStage ?? 3); // 默认 Mature, 不触发 gate
 
   const scriptRepo = {
     findOne: async () => script as ScriptEntity,
@@ -69,7 +75,11 @@ function buildRunner(opts: {
 
   const accountRepo = {
     findOne: async ({ where: { id } }: { where: { id: number } }) =>
-      ({ id, phoneNumber: `6018${id.toString().padStart(7, '0')}` }) as WaAccountEntity,
+      ({
+        id,
+        phoneNumber: `6018${id.toString().padStart(7, '0')}`,
+        warmupStage: stageResolver(id),
+      }) as WaAccountEntity,
   } as unknown as Repository<WaAccountEntity>;
 
   const baileys = {
@@ -239,6 +249,61 @@ describe('ScriptRunnerService.run', () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].turn).toBe(2);
     expect(result.errors[0].error).toBe('wa session dead');
+  });
+
+  // ── M5 min_warmup_stage gate ─────────────────────────────
+  it('rejects run when sender warmupStage < script.minWarmupStage', async () => {
+    const { service, sent } = buildRunner({
+      scriptContent: {
+        sessions: [
+          {
+            name: 'main',
+            turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }],
+          },
+        ],
+      },
+      minWarmupStage: 2,
+      accountWarmupStage: 0, // 双方都 < 2
+    });
+    await expect(
+      service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true }),
+    ).rejects.toThrow(/warmup_stage 不足/);
+    expect(sent).toHaveLength(0); // 彻底不发
+  });
+
+  it('rejects run when only partner (B) is below gate', async () => {
+    const { service } = buildRunner({
+      scriptContent: {
+        sessions: [
+          {
+            name: 'main',
+            turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }],
+          },
+        ],
+      },
+      minWarmupStage: 2,
+      accountWarmupStage: (id) => (id === 1 ? 3 : 0), // A ok, B 不够
+    });
+    await expect(
+      service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true }),
+    ).rejects.toThrow(/warmup_stage 不足/);
+  });
+
+  it('accepts run when both sides >= minWarmupStage', async () => {
+    const { service } = buildRunner({
+      scriptContent: {
+        sessions: [
+          {
+            name: 'main',
+            turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }],
+          },
+        ],
+      },
+      minWarmupStage: 1,
+      accountWarmupStage: 1, // 恰好
+    });
+    const result = await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(result.turnsExecuted).toBe(1);
   });
 
   it('different personas (different sender accounts) get different cache entries', async () => {
