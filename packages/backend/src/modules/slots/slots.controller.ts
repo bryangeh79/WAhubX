@@ -11,14 +11,17 @@ import {
 import { SlotsService } from './slots.service';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
+import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
 
 @Controller({ path: 'slots', version: '1' })
 export class SlotsController {
-  constructor(private readonly slots: SlotsService) {}
+  constructor(
+    private readonly slots: SlotsService,
+    private readonly baileys: BaileysService,
+  ) {}
 
   @Get()
   async list(@CurrentUser() cur: RequestUser): Promise<SlotResponseDto[]> {
-    // 平台超管没租户, 不应该直接看"某租户"的槽位 (未来走 /admin/tenants/:id/slots)
     if (cur.tenantId === null) {
       throw new BadRequestException('平台超管请通过 /admin/tenants/:id/slots 访问具体租户槽位');
     }
@@ -33,7 +36,6 @@ export class SlotsController {
     return this.slots.findOne(id, cur.tenantId);
   }
 
-  // 清空槽位 (admin 或 operator 都能操作自己租户的槽位, viewer 不行 — 靠 role 守卫? 先简化: 都允许, 精细化留 M2)
   @Post(':id/clear')
   @HttpCode(HttpStatus.OK)
   async clear(
@@ -41,5 +43,36 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ): Promise<SlotResponseDto> {
     return this.slots.clear(id, cur.tenantId);
+  }
+
+  // ── M2 W1 扫码绑定现有号 (takeover) ────────────────────
+  @Post(':id/bind-existing')
+  @HttpCode(HttpStatus.OK)
+  async startBind(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<BindStatusView> {
+    // RBAC 先过一遍 findOne (租户隔离已做)
+    await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.startBind(id);
+  }
+
+  @Get(':id/bind-existing/status')
+  async bindStatus(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<BindStatusView> {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.getStatus(id);
+  }
+
+  @Post(':id/bind-existing/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancelBind(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<BindStatusView> {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.cancelBind(id);
   }
 }

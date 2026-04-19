@@ -6,6 +6,7 @@ import { SimInfoEntity } from './sim-info.entity';
 import { AccountHealthEntity } from './account-health.entity';
 import { SlotsService } from './slots.service';
 import { SlotsController } from './slots.controller';
+import { BaileysModule } from '../baileys/baileys.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { SlotsController } from './slots.controller';
       SimInfoEntity,
       AccountHealthEntity,
     ]),
+    BaileysModule,
   ],
   controllers: [SlotsController],
   providers: [SlotsService],

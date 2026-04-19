@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Badge, Button, Card, Col, Empty, Row, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Badge, Button, Card, Col, Dropdown, Empty, Row, Space, Spin, Tag, Typography } from 'antd';
+import type { MenuProps } from 'antd';
 import { api, extractErrorMessage } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
+import { BindExistingModal } from './bind/BindExistingModal';
 
 const { Title, Text } = Typography;
 
@@ -33,6 +35,7 @@ export function SlotsPage() {
   const [slots, setSlots] = useState<SlotItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [bindTarget, setBindTarget] = useState<SlotItem | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -98,24 +101,42 @@ export function SlotsPage() {
         <Row gutter={[12, 12]}>
           {slots.map((slot) => (
             <Col key={slot.id} xs={24} sm={12} md={8} lg={6} xl={4}>
-              <SlotCard slot={slot} />
+              <SlotCard slot={slot} onBindExisting={() => setBindTarget(slot)} />
             </Col>
           ))}
         </Row>
+      )}
+
+      {bindTarget && (
+        <BindExistingModal
+          slotId={bindTarget.id}
+          slotIndex={bindTarget.slotIndex}
+          open={!!bindTarget}
+          onClose={() => setBindTarget(null)}
+          onSuccess={() => {
+            setBindTarget(null);
+            void load();
+          }}
+        />
       )}
     </div>
   );
 }
 
-function SlotCard({ slot }: { slot: SlotItem }) {
+function SlotCard({ slot, onBindExisting }: { slot: SlotItem; onBindExisting: () => void }) {
   const meta = STATUS_META[slot.status];
   const isEmpty = slot.status === 'empty';
+
+  const emptyMenu: MenuProps['items'] = [
+    { key: 'bind-existing', label: '扫码绑定现有号 (M2 W1 ✓)', onClick: onBindExisting },
+    { key: 'register-new', label: '新号注册 (M2 W3)', disabled: true },
+  ];
 
   return (
     <Card
       size="small"
       style={{
-        opacity: isEmpty ? 0.75 : 1,
+        opacity: isEmpty ? 0.85 : 1,
         borderStyle: isEmpty ? 'dashed' : 'solid',
         minHeight: 160,
       }}
@@ -126,11 +147,13 @@ function SlotCard({ slot }: { slot: SlotItem }) {
         </Space>
       }
       extra={
-        <Tooltip title="M2 Baileys 集成后可用">
-          <Button size="small" type="link" disabled>
-            {isEmpty ? '注册' : '管理'}
-          </Button>
-        </Tooltip>
+        isEmpty ? (
+          <Dropdown menu={{ items: emptyMenu }} trigger={['click']}>
+            <Button size="small" type="link">启用 ▾</Button>
+          </Dropdown>
+        ) : (
+          <Button size="small" type="link" disabled title="M2 W2 实装发消息 / 管理">管理</Button>
+        )
       }
     >
       {isEmpty ? (
@@ -138,7 +161,7 @@ function SlotCard({ slot }: { slot: SlotItem }) {
           空槽位
           <br />
           <Text type="secondary" style={{ fontSize: 11 }}>
-            等待注册 WhatsApp 账号
+            点右上 "启用" → 扫码
           </Text>
         </div>
       ) : (
