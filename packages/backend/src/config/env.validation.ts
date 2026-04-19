@@ -49,11 +49,38 @@ export class EnvSchema {
   @IsString()
   DB_DATABASE!: string;
 
-  // ───────── JWT (M1 Week 2, 暂留可选) ─────────
-  @IsOptional() @IsString() JWT_ACCESS_SECRET?: string;
-  @IsOptional() @IsString() JWT_REFRESH_SECRET?: string;
-  @IsOptional() @IsString() JWT_ACCESS_TTL?: string;
-  @IsOptional() @IsString() JWT_REFRESH_TTL?: string;
+  // ───────── JWT (required) ─────────
+  @IsString()
+  JWT_ACCESS_SECRET!: string;
+
+  @IsString()
+  JWT_REFRESH_SECRET!: string;
+
+  @IsString()
+  JWT_ACCESS_TTL: string = '15m';
+
+  @IsString()
+  JWT_REFRESH_TTL: string = '7d';
+
+  // ───────── Auth lockout ─────────
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  LOGIN_MAX_ATTEMPTS: number = 5;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  @Max(86400)
+  LOGIN_LOCKOUT_SECONDS: number = 900;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(4)
+  @Max(15)
+  BCRYPT_ROUNDS?: number;
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvSchema {

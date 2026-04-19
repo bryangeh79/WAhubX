@@ -1,7 +1,9 @@
 import { Controller, Get, HttpCode, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { Public } from '../auth/decorators/public.decorator';
 
+@Public()
 @Controller({ path: 'health', version: '1' })
 export class HealthController {
   private readonly startedAt = Date.now();
