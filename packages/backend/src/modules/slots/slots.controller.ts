@@ -63,6 +63,17 @@ export class SlotsController {
     return this.slots.assignProxy(id, cur.tenantId, body?.proxyId ?? null);
   }
 
+  // POST /slots/backfill-fingerprints — 一次性回填老数据的 fingerprint.json + DB
+  // 幂等: 已存在文件/字段的不动, 只补 null 的
+  @Post('backfill-fingerprints')
+  @HttpCode(HttpStatus.OK)
+  async backfillFingerprints(@CurrentUser() cur: RequestUser) {
+    if (cur.tenantId === null) {
+      throw new BadRequestException('平台超管需指定租户 — 当前只支持租户 admin 自行回填');
+    }
+    return this.slots.backfillFingerprintsForTenant(cur.tenantId);
+  }
+
   // ── Bind 现有号 (M2 W1 扫码 / M2 W3 pairing code) ─────
   // Body { phoneNumber } 可选: 提供则走 pairing code 路径 (返 8 位码); 否则走 QR
   @Post(':id/bind-existing')

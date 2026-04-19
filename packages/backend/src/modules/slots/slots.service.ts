@@ -68,18 +68,29 @@ export class SlotsService {
     this.logger.log(`Seeded ${slotLimit} empty slots + fingerprints for tenant ${tenantId}`);
   }
 
-  // 已存在的槽位 (活数据) 补 fingerprint — 用于升级后一次性回填, 幂等
-  async backfillFingerprintsForTenant(tenantId: number): Promise<number> {
-    const slots = await this.slotRepo.find({ where: { tenantId } });
+  // 已存在的槽位 (活数据) 补 fingerprint — 用于升级后一次性回填, 幂等.
+  // 既补 fingerprint.json 文件, 也把 JSON 内容写回 wa_account.device_fingerprint DB 列
+  // (老版本 binding 时 DB 列为 null, 新版本 binding 会填).
+  async backfillFingerprintsForTenant(tenantId: number): Promise<{ fsWritten: number; dbUpdated: number }> {
+    const slots = await this.slotRepo.find({ where: { tenantId }, relations: ['account'] });
     const tenant = await this.slotRepo.manager.findOne(TenantEntity, { where: { id: tenantId } });
     const tz = tenant?.timezone ?? 'Asia/Kuala_Lumpur';
-    let touched = 0;
+    let fsWritten = 0;
+    let dbUpdated = 0;
     for (const s of slots) {
       const before = fs.existsSync(`${getSlotDir(s.slotIndex)}/fingerprint.json`);
-      ensureFingerprint({ slotIndex: s.slotIndex, tenantId, timezone: tz });
-      if (!before) touched++;
+      const fp = ensureFingerprint({ slotIndex: s.slotIndex, tenantId, timezone: tz });
+      if (!before) fsWritten++;
+
+      // 如果该槽位有绑定账号且 device_fingerprint 为空, 回填
+      if (s.accountId && s.account && !s.account.deviceFingerprint) {
+        const patch = { deviceFingerprint: fp as unknown } as Parameters<typeof this.accountRepo.update>[1];
+        await this.accountRepo.update(s.accountId, patch);
+        dbUpdated++;
+      }
     }
-    return touched;
+    this.logger.log(`Backfill tenant=${tenantId}: fsWritten=${fsWritten}, dbUpdated=${dbUpdated}`);
+    return { fsWritten, dbUpdated };
   }
 
   // ── 查询 (带 tenant 隔离) ────────────────────────────────────

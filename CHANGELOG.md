@@ -4,7 +4,21 @@
 
 ---
 
-## [Unreleased] · M2 进行中
+## [v0.2.0-m2] · 2026-04-19 · M2 Baileys 集成 + 槽位独立交付
+
+M2 里程碑: 可绑真实 WA 号并收发消息 · 每槽位独立 (fingerprint + proxy + session) · 具备 M3 调度所需的隔离基础.
+
+### 收工标准 (所有绿)
+
+| # | 项 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | Baileys 协议层 (消息/连接/重连/媒体) | ✅ | 真机扫码 2 号 · 收发文本 + 收图片 · restartRequired 自动重启处理 |
+| 2 | 槽位创建生成 fingerprint.json 注入 Baileys browser | ✅ | `data/slots/<N>/fingerprint.json` · DEVICE_POOL 10 机型 · `baileysBrowser` 喂 makeWASocket |
+| 3 | Baileys socket 按 slot.proxy_id 走代理 | ✅ | `resolveIsolation` + `HttpsProxyAgent` / `SocksProxyAgent` · `agent/fetchAgent` 传 Baileys |
+| 4 | 2 个本地 dev-proxy 验证槽位走不同代理 | ✅ | `scripts/dev-proxy.ts` · P8080 / P8081 各自独立 CONNECT 日志 |
+| 5 | Smoke: 两槽 Baileys 连接路径不相同 | ✅ | 独立进程 · 独立 TCP socket · 不同 client:port 不同 upstream:port · 见下方"技术细节" |
+
+### Added (M2 W1-W3)
 
 ### Added (M2 W1-W3)
 
@@ -31,9 +45,55 @@
 - **媒体消息发送 (W3.4)**: `POST /slots/:id/send-media { to, type, contentBase64, mimeType?, filename?, caption? }` · 支持 image/voice/file · 16MB WA 限 · JSON body 上限调至 25MB (`app.useBodyParser`)
 - 前端 `ChatModal` 新增"发图片" tab · antd Upload + base64 转换
 
-### Deferred
+**W3.5 · 槽位独立基础 (fingerprint + proxy wiring)**
+- `common/fingerprint.ts`: DEVICE_POOL 10 机型 (Samsung/Xiaomi/Oppo/Vivo) · seed-based 稳定生成 · `baileysBrowser: [model · S{slotIndex}, Desktop, chromeMajor]`
+- `common/proxy-config.ts`: `ProxyDescriptor` + `buildProxyAgent` (HttpsProxyAgent / SocksProxyAgent)
+- `slots.service.seedForTenant`: 租户激活时为 N 个槽位各生成一份 `data/slots/<N>/fingerprint.json` (幂等)
+- `PATCH /slots/:id/proxy { proxyId }`: 绑定/解绑代理 · 租户隔离 · 切换自动踢 pool
+- `BaileysService.resolveIsolation`: bind + rehydrate 两路径统一读 fingerprint + proxy, 喂 `makeWASocket({ browser, agent, fetchAgent })`
+- `onBindConnectionOpen` 同步把 fingerprint JSON 写 `wa_account.device_fingerprint` DB 列
+- `POST /slots/backfill-fingerprints`: 升级回填 — 幂等补齐 fingerprint.json + DB 字段
 
-- **W3.5 新号注册**: 推迟到单独里程碑 / V1.1. 每次失败永久烧 SIM 卡, 需实物 SIM 及谨慎测试流程才能真机验证. 代码已留占位; 当前 empty slot 的"新号注册"菜单项仍 disabled.
+**W3.6 · Admin 代理 CRUD**
+- `POST /admin/proxies` · `GET /admin/proxies` · `DELETE /admin/proxies/:id` (RolesGuard=admin + 租户隔离)
+- `CreateProxyDto` (proxyType / host / port / username? / password? / country? / city?)
+
+**开发工具**
+- `scripts/dev-proxy.ts`: 轻量 HTTP CONNECT 转发代理, 记录每条 CONNECT 的 client/upstream src-dst. 用法:
+  ```
+  LABEL=P8080 PORT=8080 npx ts-node scripts/dev-proxy.ts
+  LABEL=P8081 PORT=8081 npx ts-node scripts/dev-proxy.ts
+  ```
+
+### 技术细节 · 槽位路由隔离实测
+
+真实 smoke (commit `TBD`):
+```
+P8080 CONNECT web.whatsapp.com:443 · client=127.0.0.1:54021 · upstream=[IPv6]:54022 → WA
+P8081 CONNECT web.whatsapp.com:443 · client=127.0.0.1:54026 · upstream=[IPv6]:54027 → WA
+
+→ 2 个 slot 经 2 个独立代理进程 · 2 条独立 TCP 连接 · 不同 client port + 不同 upstream port
+→ 从代码到网络栈完整隔离链通
+```
+
+**真实生产中"不同出口 IP 到 WA"的来源**:
+- dev smoke 两代理都在 localhost → WA 看到同一个 NAT 出口. **不是 bug, 是 dev 限制**.
+- 生产部署: 每个 proxy 行的 host/port 对应真实住宅代理供应商, 每个供应商给出独立 IP. WA 侧看到的 source IP 自然 distinct.
+- 代码层面已保证: 不同 proxy_id → 不同 proxy row → 不同 HttpsProxyAgent 实例 → 不同 TCP 上游目标主机.
+
+**M3 仲裁的 "IP 组" 判定**:
+- 用 `proxy_id` / `proxy.bound_slot_ids` DB 字段决定组, 非实时 IP 比对
+- 相同 proxy_id 的 slots = 同 IP 组 (M3 互斥)
+- 不同 proxy_id 的 slots = 不同 IP 组 (可并发)
+- dev 测试: 分配同一 proxy_id 给多槽即可构造"同组"场景, 无需真实 IP 相同
+
+### Deferred (明确推迟)
+
+- **W3.5 新号注册**: 推迟到 V1.1 单独里程碑. 每次失败永久烧 SIM 卡, 需实物 SIM 及谨慎测试流程.
+- **多代理池健康检查 Cron**: M3 调度器阶段做
+- **代理 IP 组错峰调度**: M3 仲裁器做
+- **指纹轮换策略 / 深度反检测 stealth**: M5 养号日历阶段做
+- **接管 UI**: M9
 
 ### Known Issues (M2)
 
@@ -41,6 +101,20 @@
 - 没有消息去重 (接收方 `wa_message_id` 重复 upsert 会入多条) — M9 加唯一索引
 - 没做发消息速率限制 / 养号节流 — M3 调度器 + M5 养号日历会统一管
 - 视频消息当前归到 Image 枚举 — 待 MessageType 枚举扩展 Video
+- Windows dev: `scripts/dev-proxy.ts` 的 BIND_ADDR 选项 EINVAL (Linux 可用)
+
+### 真机验收 (带用户一起实测)
+
+- 扫码绑定 2 个真号: 60168160836 + 60186888168 — 两个独立槽位, 独立 Oppo Reno11 / A78 指纹
+- 接收文本消息 · 发送文本消息 (loopback slot1 → slot2) · 接收图片
+- ChatModal UI 三 Tab 全部展示正确 (发文本 / 发图片 / 联系人 / 最近消息)
+- 遇到并修复的坑:
+  1. `restartRequired(515)` 误判失败 → 改为自动 respawn socket
+  2. 同 DEVICE_POOL 条目碰撞 → browser label 加 `· S{slotIndex}` 后缀去重
+  3. `requestPairingCode` 太早调返 "Connection Closed" → 改到首次 qr 事件触发
+  4. getLocalStatus 返回已吊销 license → 加 `revoked ASC, issued_at DESC` 排序
+  5. express 直接 import 崩溃 → 改用 `app.useBodyParser`
+  6. Windows net.connect localAddress EINVAL → BIND_ADDR 文档注明 Linux only
 
 ---
 

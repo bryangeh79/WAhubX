@@ -9,6 +9,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { HealthModule } from './modules/health/health.module';
 import { LicenseModule } from './modules/licenses/license.module';
+import { ProxiesModule } from './modules/proxies/proxies.module';
 import { SlotsModule } from './modules/slots/slots.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
@@ -25,6 +26,7 @@ import { UsersModule } from './modules/users/users.module';
     DatabaseModule,
     UsersModule,
     AuthModule,
+    ProxiesModule,
     SlotsModule,
     TenantsModule,
     LicenseModule,

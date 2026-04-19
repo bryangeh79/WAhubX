@@ -85,7 +85,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private readonly bindContexts = new Map<number, BindContext>();
   // 已绑定账号的常驻 socket 池: key=slotId
   private readonly pool = new Map<number, WASocket>();
-  private readonly baileysLogger = pino({ level: 'silent' });
+  // dev 排查代理时暴露 Baileys 内部错误; M3 走 config 按 NODE_ENV 切回 silent
+  private readonly baileysLogger = pino({ level: 'warn' });
   // 动态拉来的 WA 版本, 进程生命周期复用避免反复请求
   private waVersion: number[] | null = null;
   // 自动重连状态: key=slotId, value={attempts, nextRetryTimer}
