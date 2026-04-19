@@ -71,6 +71,11 @@ export class AccountSlotEntity {
   @Column({ type: 'text', name: 'profile_path', nullable: true })
   profilePath!: string | null;
 
+  // M3 仲裁 rejection path #4: 手动接管中的槽位不能被 dispatcher 分派任务
+  // M9 接管 UI 会通过 /takeover/:accountId/acquire 置 true, /release 置 false
+  @Column({ type: 'boolean', name: 'takeover_active', default: false })
+  takeoverActive!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;
 

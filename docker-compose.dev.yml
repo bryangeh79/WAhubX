@@ -1,11 +1,9 @@
-# WAhubX 本地开发依赖（仅 M1 需要的服务）
+# WAhubX 本地开发依赖
 # 启动: docker compose -f docker-compose.dev.yml up -d
 # 停止: docker compose -f docker-compose.dev.yml down
 # 清库: docker compose -f docker-compose.dev.yml down -v
 #
-# 注意:
-# - 生产环境用租户本机原生 PG，不用 Docker (详见 WAhubX_技术交接文档 § 9)
-# - Redis 将在 M3 任务队列阶段追加进来
+# 注意: 生产环境用租户本机原生服务, 不用 Docker (详见 WAhubX_技术交接文档 § 9)
 
 services:
   postgres:
@@ -19,7 +17,6 @@ services:
       TZ: Asia/Kuala_Lumpur
       PGTZ: Asia/Kuala_Lumpur
     # 主机端口 5433 (避开 FAhubX 本机 PG 在 5432 的占用)
-    # 容器内仍是 5432
     ports:
       - '5433:5432'
     volumes:
@@ -30,6 +27,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # M3 任务调度: BullMQ 需要 Redis 作为队列后端
+  redis:
+    image: redis:7-alpine
+    container_name: wahubx-dev-redis
+    restart: unless-stopped
+    # 主机端口 6380 (避开 FAhubX / 其他项目可能占用的 6379)
+    ports:
+      - '6380:6379'
+    volumes:
+      - wahubx-redis-data:/data
+    command: ['redis-server', '--appendonly', 'yes', '--save', '60', '1000']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   wahubx-pg-data:
     name: wahubx-dev-pg-data
+  wahubx-redis-data:
+    name: wahubx-dev-redis-data

@@ -81,6 +81,46 @@ export class EnvSchema {
   @Min(4)
   @Max(15)
   BCRYPT_ROUNDS?: number;
+
+  // ───────── Redis / BullMQ (M3) ─────────
+  @IsString()
+  REDIS_HOST: string = 'localhost';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  REDIS_PORT: number = 6380;
+
+  @IsOptional()
+  @IsString()
+  REDIS_PASSWORD?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(15)
+  REDIS_DB?: number;
+
+  // ───────── 调度器 (M3) ─────────
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  SCHEDULER_MAX_CONCURRENCY: number = 6;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(500)
+  @Max(60000)
+  SCHEDULER_POLL_INTERVAL_MS: number = 3000;
+
+  @IsString()
+  SCHEDULER_NIGHT_WINDOW_START: string = '02:00';
+
+  @IsString()
+  SCHEDULER_NIGHT_WINDOW_END: string = '06:00';
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvSchema {

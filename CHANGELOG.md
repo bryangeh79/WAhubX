@@ -4,6 +4,102 @@
 
 ---
 
+## [v0.3.0-m3] · 2026-04-19 · M3 任务调度 + 6 并发仲裁交付
+
+M3 里程碑: BullMQ 基础设施 + 3s 轮询 dispatcher + 5 种拒绝路径 + 夜间窗口 + executor registry 抽象.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | Redis 7 加入 docker-compose.dev.yml, 不污染系统 | host :6380 (避 6379 占用) · wahubx-dev-redis-data 卷 · healthcheck PONG |
+| 2 | Executor registry 模式, 未知 type 保 pending + warn | `ExecutorRegistry.get()` 返 null, dispatcher `leave-pending-unknown-type` |
+| 3 | 5 rejection paths + 夜间窗口 + unknown type 全部单测覆盖 | 17/17 tests in `dispatcher.service.spec.ts` ✅ |
+| 4 | Admin '任务队列' Tab: 6 并发槽 + 排队 + 最近失败 · 3s 轮询 | `QueueTab.tsx` · 无 WebSocket · 无 CRUD |
+
+### Added (M3)
+
+**基础设施**
+- `redis:7-alpine` 加到 `docker-compose.dev.yml`, 主机 :6380 (避 6379 已占), 命名卷 `wahubx-dev-redis-data`, `redis-cli ping` healthcheck
+- 依赖: `bullmq@5` + `ioredis@5`
+- env: `REDIS_HOST/REDIS_PORT/REDIS_DB/REDIS_PASSWORD` + `SCHEDULER_MAX_CONCURRENCY=6` + `SCHEDULER_POLL_INTERVAL_MS=3000` + `SCHEDULER_NIGHT_WINDOW_START/END`
+
+**数据模型** — migration `CreateTasksAndTakeover1776612590751`
+- `task`: SERIAL pk · tenant_id · task_type (varchar, 非 enum 方便扩展) · priority · scheduled_at · repeat_rule · target_type enum · target_ids int[] · payload jsonb · status enum (pending/queued/running/done/failed/cancelled/skipped) · last_error · 2 索引 (status+scheduled, tenant+status)
+- `task_run`: SERIAL pk · task_id FK CASCADE · account_id · started_at · finished_at · status enum · error_code/error_message · logs jsonb (结构化步骤: [{at, step, ok, meta}])
+- `account_slot.takeover_active` boolean (rejection #4 用; M9 接管 UI 置 true)
+
+**Executor 抽象**
+- `executor.interface.ts`: `TaskExecutor` 接口 (taskType / allowedInNightWindow / execute) · `TaskExecutorContext` (task + accountId + log fn) · `TASK_EXECUTORS` Symbol DI token
+- `ExecutorRegistry`: Map<taskType, TaskExecutor> · `get/has/isAllowedInNightWindow/listTypes` · 重复注册抛
+- **约束**: 未注册 type → dispatcher 保 pending + warn log, 绝不 reject (用户 2A 约束)
+- M3 内置 stubs: `ChatExecutor` (dev stub, M4 剧本引擎接真逻辑) · `WarmupExecutor` (dev stub, M5 养号日历接真逻辑)
+
+**Dispatcher (技术交接文档 § 5.2)**
+- 3s `setInterval` 轮询 · 防并发 `busy` 锁 · `tick(now?)` 纯函数风格便于测试
+- `decide(task, ctx, now)` 返 union type, 8 种可能:
+  - `run` · `skip-global-capacity` (#1) · `skip-account-busy` (#2) · `skip-ip-group-busy` (#3) · `skip-takeover-active` (#4) · `skip-night-window` · `leave-pending-unknown-type` · `soft-warn-warmup-stage` (#5)
+- IP 组判定: `slot.proxy_id` 相同 = 同组 mutex; `proxy_id=null` 归到 "-1 null 组" (dev 直连多槽会互斥)
+- `warmup_stage` 软锁: `MIN_WARMUP_STAGE_BY_TASK_TYPE` 表 (warmup=0, chat=Prewarm, status=Active), 不够只 warn 不拒
+- 夜间窗口: `SCHEDULER_NIGHT_WINDOW_START/END` 默认 02:00-06:00 · 跨午夜支持 (22:00→04:00)
+- `buildContext` 一次 tick 内快照所有 running state, 避免同轮决策交叉
+- `executeInBackground` 真正执行 executor, 异步不阻塞 tick
+
+**API**
+- `POST /api/v1/tasks` 创建任务 (CreateTaskDto)
+- `GET  /api/v1/tasks?status=xxx` 列表
+- `GET  /api/v1/tasks/:id` 详情
+- `POST /api/v1/tasks/:id/cancel` 取消
+- `GET  /api/v1/tasks/queue/running` 运行中 (admin queue tab 用)
+- `GET  /api/v1/tasks/queue/pending` 排队
+- `GET  /api/v1/tasks/queue/failed-recent` 最近 20 条失败
+
+**Admin UI · "任务队列" Tab** (`pages/admin/QueueTab.tsx`)
+- **6 并发槽视图**: 6 格 Card, 每格显示 idle / running · task_id · account · 运行时长 mm:ss
+- **排队列表**: id/type/target/priority/scheduled_at/created_at · 按优先级排序
+- **最近失败 20 条**: id/type/target/updated_at/error
+- **3s 轮询** (setInterval, 无 WebSocket 按 4A 约束)
+- 不做: CRUD / search / filter / pagination (留 M11)
+
+### 实测证据 (M3 smoke)
+
+```
+Registered 2 executors: chat, warmup
+Dispatcher started, poll interval=3000ms, max concurrency=6
+
+POST /tasks chat (account 2 = warmup_stage 0 < Prewarm)  → status=pending (soft warn)
+POST /tasks warmup (account 1)                            → status=pending
+POST /tasks mystery_type                                  → status=pending
+
+[3s tick]
+  task 1 (chat, account 2) → running → success (stub, 300ms)
+  task 3 (mystery_type)    → WARN "Unknown task_type... left pending"
+[6s tick — task 1 已完]
+  task 2 (warmup, account 1) → running → success (stub, 500ms)
+  # 关键: task 2 没在 tick-1 跑, 因 account 1 和 account 2 都 proxy_id=null = 同 null IP 组互斥 (rejection #3)
+
+DB task_run.logs:
+  task 1: [{step: "chat-prepared"}, {step: "chat-sent"}]
+  task 2: [{step: "warmup-start"}, {step: "warmup-tick"}]
+```
+
+Unit tests: **17 passed, 17 total** (`pnpm test dispatcher`)
+- 5 rejection paths (#1 global / #2 account / #3 proxy group incl. null / #4 takeover / #5 soft-warmup)
+- 夜间窗口 (chat 拒 / warmup 放行 / 跨午夜)
+- Unknown task_type 不 reject
+- Ghost account (slot 找不到) 保 pending
+- Group target (M4 才支持) 保 pending
+- Registry 重复注册抛
+
+### Known Issues (M3)
+
+- 任务取消当前只改 status, 不中断已跑 executor (长任务无强制中止). 可接受: M3 stubs 都 <1s.
+- 定时任务 (repeat_rule cron) 未实装; 字段已在, M5 养号日历会接.
+- Dispatcher 单例, 多实例部署未做 Redis 分布式锁. V1 本地单进程可以, V2 拆 VPS 调度器时补.
+- BullMQ 当前未实际用 (Redis 已起). 第一版 dispatcher 直接走 DB 查询 + 异步 executeInBackground 足够; M11 前若并发规模上去再接 BullMQ 真正的 Queue/Worker.
+
+---
+
 ## [v0.2.0-m2] · 2026-04-19 · M2 Baileys 集成 + 槽位独立交付
 
 M2 里程碑: 可绑真实 WA 号并收发消息 · 每槽位独立 (fingerprint + proxy + session) · 具备 M3 调度所需的隔离基础.

@@ -11,6 +11,7 @@ import { HealthModule } from './modules/health/health.module';
 import { LicenseModule } from './modules/licenses/license.module';
 import { ProxiesModule } from './modules/proxies/proxies.module';
 import { SlotsModule } from './modules/slots/slots.module';
+import { TasksModule } from './modules/tasks/tasks.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
 
@@ -30,6 +31,7 @@ import { UsersModule } from './modules/users/users.module';
     SlotsModule,
     TenantsModule,
     LicenseModule,
+    TasksModule,
     HealthModule,
   ],
   providers: [
