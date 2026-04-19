@@ -2,8 +2,8 @@
 
 > WhatsApp 多账号自动化运营平台 · 本地桌面应用 · SaaS 授权
 
-**状态**: 🚧 M1 基础骨架开发中 (2026-04-19 启动)
-**版本**: v0.1.0-dev
+**状态**: 🚧 M1 Week 1 完成 · Week 2 进行中
+**版本**: v0.1.0-m1-w1
 **授权**: Proprietary — All Rights Reserved (见 [LICENSE](./LICENSE))
 
 ---
@@ -44,26 +44,24 @@ WAhubX/
 └── WAhubX_产品介绍书.html  产品全景
 ```
 
-## 开发
-
-> ⚠️ 尚未初始化 packages/，M1 Week 1 任务进行中。
+## 快速启动
 
 ```bash
-# 安装依赖 (M1 完成后可用)
+docker compose -f docker-compose.dev.yml up -d          # PG on :5433
 pnpm install
-
-# 后端开发
-pnpm --filter backend dev
-
-# 前端开发
-pnpm --filter frontend dev
+cp packages/backend/.env.example packages/backend/.env
+pnpm --filter @wahubx/backend migration:run
+pnpm dev:backend                                        # http://localhost:3000/api/v1
+pnpm dev:frontend                                       # http://localhost:5173
 ```
+
+完整说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 里程碑
 
 | 阶段 | 周数 | 进度 |
 |---|---|---|
-| M1 · 基础骨架 | 4 | 🟡 进行中 |
+| M1 · 基础骨架 | 4 | 🟡 Week 1 ✅ / Week 2–4 进行中 |
 | M2 · Baileys 集成 | 3 | ⚪ |
 | M3 · 任务调度 | 3 | ⚪ |
 | M4 · 剧本引擎 | 3 | ⚪ |
