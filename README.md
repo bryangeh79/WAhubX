@@ -2,8 +2,8 @@
 
 > WhatsApp 多账号自动化运营平台 · 本地桌面应用 · SaaS 授权
 
-**状态**: 🚧 M1 Week 1 完成 · Week 2 进行中
-**版本**: v0.1.0-m1-w1
+**状态**: ✅ M1 基础骨架已交付 · 🟡 M2 Baileys 集成待启动
+**版本**: v0.1.0-m1
 **授权**: Proprietary — All Rights Reserved (见 [LICENSE](./LICENSE))
 
 ---
@@ -61,8 +61,8 @@ pnpm dev:frontend                                       # http://localhost:5173
 
 | 阶段 | 周数 | 进度 |
 |---|---|---|
-| M1 · 基础骨架 | 4 | 🟡 Week 1 ✅ / Week 2–4 进行中 |
-| M2 · Baileys 集成 | 3 | ⚪ |
+| M1 · 基础骨架 | 4 | ✅ 完成 (2026-04-19, `v0.1.0-m1`) |
+| M2 · Baileys 集成 | 3 | ⏭️ 下一站 |
 | M3 · 任务调度 | 3 | ⚪ |
 | M4 · 剧本引擎 | 3 | ⚪ |
 | M5 · 养号日历 | 2 | ⚪ |
@@ -73,7 +73,7 @@ pnpm dev:frontend                                       # http://localhost:5173
 | M10 · 备份/更新 | 2 | ⚪ |
 | M11 · Admin/打包 | 2 | ⚪ |
 
-完整规格见 [WAhubX_技术交接文档.md](./WAhubX_技术交接文档.md)。
+完整规格见 [WAhubX_技术交接文档.md](./WAhubX_技术交接文档.md)；历代变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## License
 
