@@ -5,6 +5,8 @@ import { HealthPage } from '@/pages/HealthPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { ActivatePage } from '@/pages/ActivatePage';
 import { SlotsPage } from '@/pages/SlotsPage';
+import { SettingsPage } from '@/pages/SettingsPage';
+import { AdminPage } from '@/pages/AdminPage';
 import { useAuth } from '@/auth/AuthContext';
 import { ActivateGuard, LoginGuard, ProtectedRoute } from '@/auth/RouteGate';
 
@@ -14,16 +16,27 @@ function Shell({ children }: { children: React.ReactNode }) {
   const { user, licenseStatus, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const selected = location.pathname.startsWith('/health')
-    ? ['health']
-    : location.pathname.startsWith('/slots')
-      ? ['slots']
-      : ['dashboard'];
+
+  let selected: string[] = ['dashboard'];
+  if (location.pathname.startsWith('/slots')) selected = ['slots'];
+  else if (location.pathname.startsWith('/health')) selected = ['health'];
+  else if (location.pathname.startsWith('/settings')) selected = ['settings'];
+  else if (location.pathname.startsWith('/admin')) selected = ['admin'];
 
   const handleLogout = async () => {
     await logout();
     navigate('/login', { replace: true });
   };
+
+  const isAdmin = user?.role === 'admin';
+
+  const items = [
+    { key: 'dashboard', label: <Link to="/">仪表盘</Link> },
+    { key: 'slots', label: <Link to="/slots">账号槽位</Link> },
+    ...(isAdmin ? [{ key: 'admin', label: <Link to="/admin">Admin 后台</Link> }] : []),
+    { key: 'settings', label: <Link to="/settings">设置</Link> },
+    { key: 'health', label: <Link to="/health">系统健康</Link> },
+  ];
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -33,11 +46,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           theme="dark"
           mode="horizontal"
           selectedKeys={selected}
-          items={[
-            { key: 'dashboard', label: <Link to="/">仪表盘</Link> },
-            { key: 'slots', label: <Link to="/slots">账号槽位</Link> },
-            { key: 'health', label: <Link to="/health">系统健康</Link> },
-          ]}
+          items={items}
           style={{ flex: 1, minWidth: 0 }}
         />
         <Space>
@@ -91,6 +100,26 @@ export function App() {
           <ProtectedRoute>
             <Shell>
               <SlotsPage />
+            </Shell>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute>
+            <Shell>
+              <AdminPage />
+            </Shell>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <Shell>
+              <SettingsPage />
             </Shell>
           </ProtectedRoute>
         }
