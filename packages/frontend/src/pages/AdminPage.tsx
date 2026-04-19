@@ -19,6 +19,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useAuth } from '@/auth/AuthContext';
 import { api, extractErrorMessage } from '@/lib/api';
 import { QueueTab } from './admin/QueueTab';
+import { ScriptsTab } from './admin/ScriptsTab';
 
 const { Text, Paragraph } = Typography;
 
@@ -74,6 +75,7 @@ export function AdminPage() {
         { key: 'tenants', label: '租户管理', children: <TenantsTab /> },
         { key: 'licenses', label: 'License 管理', children: <LicensesTab /> },
         { key: 'users', label: '用户管理', children: <UsersTab /> },
+        { key: 'scripts', label: '剧本包', children: <ScriptsTab /> },
         { key: 'queue', label: '任务队列', children: <QueueTab /> },
       ]}
     />

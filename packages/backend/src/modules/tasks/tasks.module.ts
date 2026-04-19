@@ -9,9 +9,11 @@ import { ExecutorRegistry } from './executor-registry.service';
 import { TASK_EXECUTORS } from './executor.interface';
 import { ChatExecutor } from './executors/chat.executor';
 import { WarmupExecutor } from './executors/warmup.executor';
+import { ScriptsModule } from '../scripts/scripts.module';
+import { ScriptChatExecutor } from '../scripts/script-chat.executor';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([TaskEntity, TaskRunEntity])],
+  imports: [TypeOrmModule.forFeature([TaskEntity, TaskRunEntity]), ScriptsModule],
   controllers: [TasksController],
   providers: [
     TasksService,
@@ -19,11 +21,15 @@ import { WarmupExecutor } from './executors/warmup.executor';
     ExecutorRegistry,
     ChatExecutor,
     WarmupExecutor,
-    // 用 symbol token 汇集所有 executor; 加新 type 只需在此 providers 数组加 class + token useFactory
+    // 加新 type 在此 providers 加 class, 然后下方 factory 加入 array
     {
       provide: TASK_EXECUTORS,
-      useFactory: (chat: ChatExecutor, warmup: WarmupExecutor) => [chat, warmup],
-      inject: [ChatExecutor, WarmupExecutor],
+      useFactory: (chat: ChatExecutor, warmup: WarmupExecutor, scriptChat: ScriptChatExecutor) => [
+        chat,
+        warmup,
+        scriptChat,
+      ],
+      inject: [ChatExecutor, WarmupExecutor, ScriptChatExecutor],
     },
   ],
   exports: [TasksService],

@@ -4,6 +4,87 @@
 
 ---
 
+## [v0.4.0-m4] · 2026-04-19 · M4 剧本引擎 + 包导入交付
+
+M4 里程碑: 剧本包结构化存储 (pack_id 主包 + pack_ref 增量 batch) + 内容池运行时随机抽 + AI 改写缓存 schema (M6 换真 AI) + 资源池 on_disabled 降级 + script_chat 执行器替代 M3 chat stub.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | 剧本 JSON 落 DB, schema 允许 100+ 剧本无膨胀 | `script_pack` + `script` 两表, content JSONB · 导入仓库自带 5 文件 → 100 scripts · migration `CreateScriptTables` |
+| 2 | 增量包格式 (pack_ref) 不独立成包, 追加已有 pack | `PackBatchJson` + `importBatchJson` + 两遍扫 (主包先, batch 后) · batch2-5 追加 80 scripts 到 official_my_zh_basic_v1 |
+| 3 | 内容池随机抽 + 同 persona cache 命中 | `ScriptRunnerService.resolveText` · `rewrite_cache` uniq(script_id,turn,persona_hash) · 二次跑命中复用 `used_count++` (7 ut covers) |
+| 4 | 资源池空时按 on_disabled 降级 (skip / send_fallback_text) | `pickAsset` 返 null + `caption_fallback` 分支 · 2 ut 覆盖两条路径 |
+| 5 | script_chat executor 接 runner, 单 turn 失败不中断 session | `ScriptChatExecutor` · runner `turnsExecuted/turnsSkipped/errors[]` · smoke: 28 chat_message 真发出, 9 cache 条目, task status=done |
+| 6 | 33/33 unit test green | dispatcher 17 + pack-loader 9 + runner 7 |
+
+### Added (M4)
+
+**数据模型** — migration `CreateScriptTables1776614410555`
+- `script_pack`: SERIAL pk · pack_id uniq text · name · version · language · country text[] · author · asset_pools_required text[] · signature text · enabled bool · installed_at
+- `script`: SERIAL pk · pack_id FK CASCADE · script_id text · uniq(pack_id, script_id) · name · category · total_turns · min_warmup_stage · ai_rewrite · content jsonb (完整剧本, 含 sessions/turns/safety) · idx_category
+- `rewrite_cache`: SERIAL pk · script_id · turn_index · persona_hash text · uniq 三联 · variant_text · used_count · source text default 'm4_pool_pick' · idx_used
+- `asset`: SERIAL pk · pool_name text · kind enum(voice/image/file/sticker) · file_path text (相对 data/) · meta jsonb · source enum · generated_for_slot int · 2 索引
+
+**PackLoaderService** (`packages/backend/src/modules/scripts/pack-loader.service.ts`)
+- `importJson(PackJson)`: 主包 (pack_id 必需). 幂等 — 存在则更新 version + upsert scripts (按 pack_id + script_id 唯一)
+- `importBatchJson(PackBatchJson)`: 增量 batch (pack_ref 必需). 找不到主包抛 404
+- `importFromDirectory(dir)`: 两遍扫. 主包先, batch 后 — 保证主包先落盘 batch 才能 attach
+- 校验: pack_id/version/language/country 必填, 包内 script_id 去重, total_turns 正整数, sessions 数组
+- 测试: 9/9 (`pack-loader.service.spec.ts`) — minimal valid / missing field reject / dup script id / 幂等 version 升级 / 追加 script
+
+**ScriptRunnerService** (`packages/backend/src/modules/scripts/script-runner.service.ts`)
+- `run({scriptId, roleAaccountId, roleBaccountId, sessionIndex?, fastMode?})` — 跑 session 下所有 turns, 返 `{turnsExecuted, turnsSkipped, errors[]}`
+- `resolveText`: cache 命中复用 + `used_count++`; miss 则 `content_pool` 随机抽 + 写 cache (source=`m4_pool_pick`, M6 换真 AI 只改 source + 抽法)
+- `pickAsset`: `asset_pool` 查表随机抽; 空池按 `on_disabled` 降级 (skip / send_fallback_text 发 caption_fallback)
+- `personaHash`: sha1(accountId|scriptDbId|turnIndex).substring(0,16) — 不同 A 账号走不同 cache 槽
+- `typing_delay_ms` + `send_delay_sec`: fastMode=true (dev smoke) 跳过, 生产永开
+- 单 turn 失败记入 `errors[]` 不中断整 session
+- 测试: 7/7 (`script-runner.service.spec.ts`) — pool 抽 + cache miss 写 / 二次命中 + used_count++ / 空 pool skip / asset 空+skip / asset 空+fallback / turn 失败不中断 / 不同 persona 不同 cache 条目
+
+**ScriptChatExecutor** (`packages/backend/src/modules/scripts/script-chat.executor.ts`)
+- taskType=`script_chat` · allowedInNightWindow=false
+- payload: `{scriptId, roleAaccountId, roleBaccountId, sessionIndex?, fastMode?}`
+- 验 payload 缺字段 → `INVALID_PAYLOAD`; runner 抛 → `RUNNER_THREW`; 有 turn 错 → `TURN_ERRORS` (附明细)
+- 注册进 `TASK_EXECUTORS` (tasks.module.ts) — 替代 M3 chat stub 真跑剧本
+
+**API** (`packages/backend/src/modules/scripts/scripts.controller.ts`)
+- `GET /script-packs` · `GET /script-packs/:id/scripts` · `PATCH /script-packs/:id/toggle` · `DELETE /script-packs/:id`
+- `POST /script-packs/import-bundled` — 扫 `scripts/` 目录导入
+- `POST /script-packs/import` body 传 PackJson / PackBatchJson
+- Guard: 平台超管 (tenantId === null) 才能改, 普通 admin 只读
+
+**Admin UI** (`packages/frontend/src/pages/admin/ScriptsTab.tsx`)
+- Collapse 列所有包 · 行内 enable/disable Switch · 删除 Popconfirm
+- "导入仓库自带包" 按钮一键灌数据
+- 展开后按需加载包内剧本 Table · 每行 `预览 JSON` Modal 显示完整 content
+
+### Verified (smoke)
+
+导入仓库自带 5 文件 → `official_my_zh_basic_v1` v1.0.0 合计 **100 scripts** (主包 20 + batch2-5 各 20).
+
+真 script_chat 任务: `scriptId=1` (s001_morning_simple) · slot #1 ↔ slot #2 (delta 租户, 真绑号) · fastMode=true.
+- task.status = `done` · lastError = null
+- `chat_message` +28 行 (out/in 双写, session 共 ~14 text turns 双向)
+- `rewrite_cache` +9 行 (session turns, source=m4_pool_pick, persona_hash 对齐 A/B 各自)
+
+### Constraints (M4 范围边界)
+
+- **无真 AI 改写** — `source='m4_pool_pick'` 仅 content_pool 随机抽. M6 接入真 AI (OpenAI / DeepSeek / Gemini / Claude) 时只替换 resolveText 的 miss 分支 + cache source 改对应引擎名, schema 不改
+- **无真资源文件** — asset 表 schema 就位, 实际文件生成留给 M7 asset-studio. 当前 voice/image/file turn 按 on_disabled 降级 (fallback 文本 / skip)
+- **单 session 执行** — 目前只跑 `sessionIndex` 指定的一个 session, 多 session 自动衔接 + delay_from_start 留给 M5 养号日历接 (跨 task 串)
+- **warmup_stage 未 gate** — min_warmup_stage 只存没强制. M5 养号推进器会按 warmup_day 自动放开剧本池
+
+### Rationale (存档关键决策)
+
+- **turns 不拆表** — 剧本是"原子包", 跨 turn 编辑极少. 拆表后加载 100 剧本 × 20 turns = 2000 行, JSONB 单列查询 < 100ms. 详 script.entity.ts 头注释
+- **content_pool + cache 双写而非只 cache** — content_pool 是人工写的底稿, cache 是运行时产物. M6 换 AI 也只改 miss 路径, content_pool 仍是 ground truth, 用户可 UI 编辑
+- **script_chat 分开 chat** — chat executor 是 M3 dev stub (TaskExecutor 契约验证), M4 不是"接 chat 逻辑", 是引入真剧本引擎新 type. 未来 chat 可能演化去掉 (任何真对话都应过剧本)
+- **两遍扫主包 + batch** — batch 必须 attach 已存在 pack, 一遍扫容易排序依赖出错. 两遍保主包必先落
+
+---
+
 ## [v0.3.0-m3] · 2026-04-19 · M3 任务调度 + 6 并发仲裁交付
 
 M3 里程碑: BullMQ 基础设施 + 3s 轮询 dispatcher + 5 种拒绝路径 + 夜间窗口 + executor registry 抽象.
