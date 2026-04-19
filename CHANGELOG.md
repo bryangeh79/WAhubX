@@ -4,6 +4,113 @@
 
 ---
 
+## [v0.6.0-m6] · 2026-04-20 · M6 AI 层 + Provider 抽象 + 改写缓存 + 三维降级交付
+
+M6 里程碑: OpenAI-compat adapter (覆盖 openai / deepseek / custom 5+ endpoints) + AES-256-GCM key 加密 (MasterKeyProvider DI 抽象) + pino 递归日志脱敏 + ScriptRunner miss 接 AI + 全链路失败降级到 content_pool (§B.4).
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | API key AES-256-GCM 加密落 DB, 密文格式 `gcm:v1:iv:ct:tag` | `AiEncryptionService` · 6 ut (roundtrip / 随 IV / 篡改失败 / 错密钥 / 格式校验 / maskKey) |
+| 2 | MasterKeyProvider DI 抽象, M6 用 Env 版, M10 可换 MachineBound 不改 AiTextService | `master-key.provider.ts` · Symbol token + interface + `EnvMasterKeyProvider` |
+| 3 | OpenAI-compat adapter 一把梭覆盖 openai / deepseek / custom_openai_compat (Ollama / SiliconFlow / Azure / OpenRouter) | `OpenAICompatAdapter` · 6 ut (200 ok / 401 / 429 / 5xx / empty / abort-timeout) |
+| 4 | ScriptRunner miss 分支接 AI + 失败降级 pool · source 落 provider type | `resolveText` 重写 · 6 ut (enabled / disabled / 200 / 401 / timeout / throw / cache 命中不再调) |
+| 5 | Gemini / Claude adapter skeleton 就位, 返 NOT_IMPLEMENTED, runner 自动降级 | `GeminiAdapter` + `ClaudeAdapter` · enum 值保留 · runner 统一 fallback |
+| 6 | API key 任何深度任何字段名不进日志 | `formatters.log` + `redactSensitive` 递归函数 · 7 ut (深度嵌套 / 蛇形/驼峰命名 / ciphertext / master key / header) · live smoke 227 log lines 0 泄漏 |
+| 7 | 81/81 unit test green (+25 M6) | dispatcher 17 + pack-loader 9 + runner 16 + phase 13 + pair 7 + encryption 6 + adapter 6 + redaction 7 |
+| 8 | /ai-providers REST + /ai-settings + connectivity test + Admin UI AiTab | controllers + AiTab.tsx · key 脱敏 `sk-a***xyz` 显示 |
+
+### Added (M6)
+
+**数据模型** — migration `CreateAiProviders1776800000000`
+- `ai_provider`: SERIAL pk · provider_type enum (openai/deepseek/custom_openai_compat/gemini/claude) · name · model · base_url · api_key_encrypted · enabled · last_tested_at · last_test_ok · last_test_error · default_params jsonb
+- `ai_setting`: K-V 表 (text_enabled 唯一 key · V1.1 扩 persona_enabled 等)
+
+**加密层**
+- `MasterKeyProvider` interface + `MASTER_KEY_PROVIDER` Symbol DI token · `getKey() / source()`
+- `EnvMasterKeyProvider`: 读 env `APP_ENCRYPTION_KEY` (必须 64 hex chars · openssl rand -hex 32). 启动时验格式, 错抛
+- `AiEncryptionService`: AES-256-GCM · encrypt() 每次随机 12B IV · decrypt() 校验 16B authtag, 篡改抛错
+- 格式: `gcm:v1:{iv_hex}:{ciphertext_hex}:{authtag_hex}` · 版本位 v1 保未来算法轮换
+- `maskKey(plain)` 给 UI 用: `sk-ab***cde` 脱敏
+
+**Provider adapter 层**
+- `RewriteAdapter` 契约 · `rewrite({baseUrl, apiKey, model}, input) → RewriteResult` · `ping()` 最小请求
+- `AdapterErrorCode` 6 类: Timeout / NetworkError / AuthFailure / QuotaExceeded / BadResponse / EmptyResult / NotImplemented
+- `OpenAICompatAdapter`: `POST {base}/chat/completions` · fetch + AbortController timeout · status → code 映射
+- `GeminiAdapter` / `ClaudeAdapter`: skeleton · 返 NOT_IMPLEMENTED (runner 自动降级, 不抛)
+
+**AiTextService**
+- `rewrite(input, enabled)`: 检查 enabled + 选 enabled=true 的 provider (id 最小胜出) + decryptKey + 调 adapter
+- `test(providerId)`: ping + 落 last_tested_at / last_test_ok / last_test_error
+- 日志只带 `type/model/ok/latency`, **永不打 key / response body**
+
+**ScriptRunner miss 路径重写** (`resolveText`)
+- cache miss → 先抽 pool 原文 `seed` (保底)
+- AI 开 + provider 可用 → rewrite(seed, personaHint) → ok=true 用 AI 文本 · source=provider type
+- AI 任何失败 / 未实装 / 抛 → `variantText = seed` · source='m4_pool_pick'
+- cache 写入后下次同 persona 同 turn 命中免 AI 钱
+- **运行不中断**: AI 异常包括 adapter throw 都被捕获, turn 记为 executed
+
+**日志安全** (`config/logger.config.ts`)
+- `formatters.log` hook 接 `redactSensitive` 递归 (max depth 8) · 剥除 `apiKey/api_key/apiKeyEncrypted/API_ENCRYPTION_KEY/password/license_key/authorization/cookie` 字段名任意深度
+- pino `redact.paths` 作双保险
+- 7 ut 覆盖 req.body / nested / ciphertext / master key / Authorization header
+
+**API** (`ai.controller.ts`)
+- `/ai-providers` CRUD (platform admin only, tenantId=null 检查)
+- `POST /ai-providers/:id/test` — 连通性 ping 更新 last_tested_at
+- `/ai-settings` GET + `/ai-settings/text-enable` POST body `{enabled}`
+- DTO `ProviderDTO` 外暴 `apiKeyMasked` 不含密文 (通过 decrypt + maskKey)
+- PATCH 时只提供 apiKey 字段才重加密, 不动其他字段
+
+**Admin UI `AiTab`** (`packages/frontend/src/pages/admin/AiTab.tsx`)
+- 顶部全局 "AI 文本改写" Switch
+- Providers Table: 类型 tag / 脱敏 key / 最近测试结果 (绿勾/红叉带 tooltip) / 启用开关 / 测试 / 删除
+- "新增" Modal: 5 种 provider type · 每种带 base_url 提示 (OpenAI/DeepSeek/Ollama hints)
+- **备份/迁移 gotcha tooltip** (ℹ️ 图标 hover): 4 条安全提醒 · DB 备份含密文但主密钥须单独备份 / .wab 不含主密钥 / 轮换密钥须重录 provider
+
+**env / config**
+- 新增 env: `APP_ENCRYPTION_KEY` (必填 · 32B hex) · `AI_TEXT_ENABLED` (default 'false')
+- `.env.example` 补两行, 指明 `openssl rand -hex 32` 生成
+
+**文档**
+- `packages/backend/src/modules/ai/README.md`: 架构图 / 安全模型 / 降级链 / 加 provider 指南
+- 技术交接文档 §6: `ai-providers.json` → `ai-providers.json.backup` (人工导出 opt-in), 主线改走 DB
+- CHANGELOG gotchas 段同步 Admin UI tooltip
+
+### Verified (smoke)
+
+启动时 `master key loaded · source=env:APP_ENCRYPTION_KEY · len=32B` 日志确认主密钥加载.
+
+- Create provider (custom_openai_compat · dev-ollama · http://127.0.0.1:11434/v1): 返回 `apiKeyMasked='sk-n***red'`, 密文入 DB
+- List: masked 同 create, 不泄漏
+- Test (Ollama 离线): 返 `ok=false · error=NETWORK_ERROR · latencyMs=7` · DB `last_test_ok=false, last_test_error='fetch failed'` 持久化
+- Enable AI text global switch → `/ai-settings` 返 `text_enabled='true'`
+- script_chat 任务 (ai enabled, provider 不通): task status=success · 9 rewrite_cache 全 `source='m4_pool_pick'` → **降级链确认**
+- PATCH apiKey 新值: DB 密文 prefix 变 (iv 不同) · 旧密文被覆盖
+- live 227 log lines grep: 0 次 old key / 0 次 new key / 0 次 master key hex · **脱敏全覆盖**
+
+### Constraints (M6 范围边界)
+
+- **只做 AI 文本改写** — AI 对话接管 (偏离剧本时 hand-off) 留 M9 · AI 人设生成 / image / voice 留 M7 asset-studio
+- **Gemini / Claude 未实装** — 用户建这两 provider 会直接 NOT_IMPLEMENTED, runner 自动降级. M7+ 按需补
+- **没有自动批量重加密** — 主密钥轮换 = 所有 provider 密文失效, 需手工逐条 PATCH 更新 key. 设计理由: 避免半成品中间态, 宁可显式重录
+- **全局一份配置, 不做租户级** — 对齐 tech doc §6 单租户安装假设, M1 多租户 dev 里 platform admin 统一配. V1.1+ 视需求拆租户级
+- **没装 4 个 provider SDK** — 全 fetch, 减依赖. OpenAI SDK 版本锁相关风险绕过. 代价: error code 映射自己做
+- **provider 选择策略简单** — `id ASC` 第一个 enabled=true 胜出. 未来扩 "按 persona 语言 / cost 策略" 至少 V1.1
+
+### Rationale (存档关键决策)
+
+- **AES-256-GCM v1 明确版本标记** — 格式 `gcm:v1:...` 为将来换算法/调参数保留扩展空间, 不会出现"旧密文解不动但版本号没办法升"的困境
+- **MasterKeyProvider 抽象而非直接 env** — 用户 2026-04-20 的 M6 接受条款里明确提: M10 要接机器指纹派生密钥, 提前抽象避免后期硬拆 AiEncryptionService 的构造函数
+- **formatters.log hook 胜过 pino redact paths** — fast-redact 的 `*.apiKey` 只一级, 为 ctx.provider.apiKey 这种深度嵌套 3 级字段得加 `*.*.apiKey` 多个 pattern, 不如直接 hook 递归清理一刀切
+- **id ASC 选 provider** — 简单可预测, dev/prod 行为一致. 加"cost/latency-based routing" 属于分布式特性, 单机 installer 用不上
+- **失败降级硬编码到 runner** — 不做"AI 失败标记上升"让上游处理. 养号剧本的可用性 > AI 增强质量, §B.4 降级矩阵的哲学就是"AI 是增强, 不是依赖"
+- **custom_openai_compat 作为一级公民 provider type** — 用户 2026-04-20 洞察正确: OpenRouter / Ollama / Azure OpenAI / SiliconFlow / Together / Fireworks 都 OpenAI-compat, 一个 adapter 5+ provider 免费获得. 比 4 家各自写 SDK adapter 成本低 10 倍
+
+---
+
 ## [v0.5.0-m5] · 2026-04-20 · M5 养号日历 + Phase 机 + 4 种 warmup executor 交付
 
 M5 里程碑: 14 天 phase 机 (§5.3 严守) + 1h setInterval 日历引擎 + 4 层 Status 素材降级 + script_chat 运行时配对过滤链 + min_warmup_stage 真 gate (承接 M4 刻意延后的 gate) + §B.16 预置素材骨架.

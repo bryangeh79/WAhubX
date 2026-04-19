@@ -121,6 +121,18 @@ export class EnvSchema {
 
   @IsString()
   SCHEDULER_NIGHT_WINDOW_END: string = '06:00';
+
+  // ───────── AI 层 (M6) ─────────
+  // 主密钥: 32 bytes hex (64 hex chars). M6 用 EnvMasterKeyProvider 读本值;
+  // M10 计划接入 MachineBoundMasterKeyProvider 派生自机器指纹, 不再强依赖 env.
+  // 生产必填; dev / test 缺失会抛, prompt 用户生成 openssl rand -hex 32
+  @IsString()
+  APP_ENCRYPTION_KEY!: string;
+
+  // 全局开关: AI 文本改写. false → ScriptRunner.resolveText 永走 content_pool.
+  // 运行时改通过 /ai-settings/text-enable API (M6), env 是冷启动默认.
+  @IsString()
+  AI_TEXT_ENABLED: string = 'false';
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvSchema {

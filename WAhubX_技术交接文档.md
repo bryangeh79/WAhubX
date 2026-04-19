@@ -497,7 +497,7 @@ C:\WAhubX\
 │  ├─ config\
 │  │  ├─ license.json
 │  │  ├─ machine-fingerprint.txt
-│  │  ├─ ai-providers.json       (加密存储 API Key)
+│  │  ├─ ai-providers.json.backup (可选, 人工导出; M6 起运行时 keys 存 DB ai_provider.api_key_encrypted)
 │  │  └─ settings.json
 │  ├─ db\                        PostgreSQL/SQLite
 │  ├─ slots\

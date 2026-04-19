@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ScriptEntity } from './script.entity';
@@ -8,6 +8,8 @@ import { AssetEntity } from './asset.entity';
 import { BaileysService } from '../baileys/baileys.service';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
+import { AiTextService } from '../ai/ai-text.service';
+import { AiSettingsService } from '../ai/ai-settings.service';
 
 // 剧本 JSON 的最小运行时结构 (从 ScriptEntity.content 解析)
 interface SessionJson {
@@ -55,6 +57,9 @@ export class ScriptRunnerService {
     @InjectRepository(AccountSlotEntity) private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WaAccountEntity) private readonly accountRepo: Repository<WaAccountEntity>,
     private readonly baileys: BaileysService,
+    // M6 · AiModule 是 Global, runtime 必有. @Optional 用来给 M4 spec fixture 的无 AI 场景留路
+    @Optional() private readonly aiText?: AiTextService,
+    @Optional() private readonly aiSettings?: AiSettingsService,
   ) {}
 
   async run(params: ScriptRunParams): Promise<ScriptRunResult> {
@@ -178,8 +183,10 @@ export class ScriptRunnerService {
   }
 
   /**
-   * 拿文本: AI rewrite cache → 命中复用; miss → content_pool 随机抽 + 写 cache.
-   * M6 真 AI 上线后, cache miss 会触发生成而不是随机抽.
+   * 拿文本: AI rewrite cache → 命中复用; miss → 按降级链决定:
+   *   1. ai enabled + provider 可用 → AI rewrite · cache source = provider type
+   *   2. AI 关 / provider 无 / AI 失败 → content_pool 随机抽 · cache source = 'm4_pool_pick'
+   * M6: 真 AI 在 cache miss 触发生成, 失败自动降级 (§B.4 AI 三维降级矩阵)
    */
   private async resolveText(scriptDbId: number, senderAccountId: number, turn: TurnJson): Promise<string | null> {
     if (!turn.content_pool || turn.content_pool.length === 0) return null;
@@ -194,19 +201,57 @@ export class ScriptRunnerService {
       return hit.variantText;
     }
 
-    // miss: M4 stub — 从 content_pool 随机抽 (不改写)
-    const picked = turn.content_pool[this.randomInt(0, turn.content_pool.length - 1)];
+    // miss: 先抽 pool 原文 (保底)
+    const seed = turn.content_pool[this.randomInt(0, turn.content_pool.length - 1)];
+
+    // 尝试 AI rewrite · §B.4 降级: AI 失败永不抛, 降回 pool 原文
+    let variantText = seed;
+    let source: string = 'm4_pool_pick';
+    try {
+      const enabled = this.aiSettings ? await this.aiSettings.isTextEnabled() : false;
+      if (this.aiText && enabled) {
+        const personaHint = await this.buildPersonaHint(senderAccountId);
+        const result = await this.aiText.rewrite({ originalText: seed, personaHint }, true);
+        if (result && result.ok) {
+          variantText = result.text;
+          source = result.providerUsed; // e.g. 'openai_compat'
+        } else if (result && !result.ok) {
+          this.logger.debug(`AI rewrite miss · err=${result.error} · fallback pool`);
+        }
+      }
+    } catch (err) {
+      // 最后防线: AI 任意异常都不影响 script 执行
+      this.logger.warn(`AI rewrite threw, fallback pool: ${err instanceof Error ? err.message : err}`);
+    }
+
     await this.cacheRepo.save(
       this.cacheRepo.create({
         scriptId: scriptDbId,
         turnIndex: turn.turn,
         personaHash,
-        variantText: picked,
+        variantText,
         usedCount: 1,
-        source: 'm4_pool_pick',
+        source,
       }),
     );
-    return picked;
+    return variantText;
+  }
+
+  /**
+   * 把 account.persona (slot.persona) 压成一行简要, 给 AI system prompt.
+   * 无 persona 返 空 (prompt 就不带 persona 段).
+   */
+  private async buildPersonaHint(senderAccountId: number): Promise<string | undefined> {
+    const slot = await this.slotRepo.findOne({ where: { accountId: senderAccountId } });
+    if (!slot || !slot.persona) return undefined;
+    const p = slot.persona as Record<string, unknown>;
+    const parts: string[] = [];
+    if (p.gender) parts.push(String(p.gender));
+    if (p.age) parts.push(`${p.age}岁`);
+    if (p.occupation) parts.push(String(p.occupation));
+    if (p.language_style) parts.push(`${p.language_style}口吻`);
+    if (p.location) parts.push(String(p.location));
+    return parts.length > 0 ? parts.join(' · ') : undefined;
   }
 
   private async pickAsset(poolName: string | undefined) {

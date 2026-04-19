@@ -11,6 +11,10 @@ import type { AssetEntity } from './asset.entity';
 import type { AccountSlotEntity } from '../slots/account-slot.entity';
 import type { WaAccountEntity } from '../slots/wa-account.entity';
 import type { BaileysService } from '../baileys/baileys.service';
+import type { AiTextService } from '../ai/ai-text.service';
+import type { AiSettingsService } from '../ai/ai-settings.service';
+import type { RewriteResult } from '../ai/adapters/provider.interface';
+import { AdapterErrorCode } from '../ai/adapters/provider.interface';
 
 interface Sent {
   slotId: number;
@@ -24,6 +28,9 @@ function buildRunner(opts: {
   assets?: Array<Partial<AssetEntity>>;
   minWarmupStage?: number; // M5 gate
   accountWarmupStage?: number | ((id: number) => number);
+  // M6 · AI 注入
+  aiEnabled?: boolean;
+  aiRewrite?: (text: string) => RewriteResult; // 自定义 AI 行为
 } = { scriptContent: {} }) {
   const sent: Sent[] = [];
   const cache: Array<Partial<RewriteCacheEntity>> = [...(opts.existingCache ?? [])];
@@ -88,8 +95,25 @@ function buildRunner(opts: {
     },
   } as unknown as BaileysService;
 
+  const aiText = {
+    rewrite: async (input: { originalText: string }) =>
+      opts.aiRewrite ? opts.aiRewrite(input.originalText) : null,
+  } as unknown as AiTextService;
+  const aiSettings = {
+    isTextEnabled: async () => !!opts.aiEnabled,
+  } as unknown as AiSettingsService;
+
   return {
-    service: new ScriptRunnerService(scriptRepo, cacheRepo, assetRepo, slotRepo, accountRepo, baileys),
+    service: new ScriptRunnerService(
+      scriptRepo,
+      cacheRepo,
+      assetRepo,
+      slotRepo,
+      accountRepo,
+      baileys,
+      aiText,
+      aiSettings,
+    ),
     sent,
     cache,
   };
@@ -321,5 +345,116 @@ describe('ScriptRunnerService.run', () => {
     await service.run({ scriptId: 1, roleAaccountId: 7, roleBaccountId: 2, fastMode: true }); // 不同 A 账号
     expect(cache).toHaveLength(2);
     expect(cache[0]?.personaHash).not.toBe(cache[1]?.personaHash);
+  });
+
+  // ── M6 AI rewrite integration ──────────────────────────────
+  it('AI disabled → pool pick 原路 (source=m4_pool_pick)', async () => {
+    const { service, cache, sent } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }] }],
+      },
+      aiEnabled: false,
+    });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(sent[0].text).toBe('hi');
+    expect(cache[0]?.source).toBe('m4_pool_pick');
+  });
+
+  it('AI enabled + provider ok → 用 AI 文本 · source=provider type', async () => {
+    const { service, cache, sent } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['早上好'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: () => ({
+        ok: true,
+        text: '早鸭',
+        providerUsed: 'openai_compat',
+        modelUsed: 'gpt-4o-mini',
+        latencyMs: 120,
+      }),
+    });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(sent[0].text).toBe('早鸭');
+    expect(cache[0]?.source).toBe('openai_compat');
+    expect(cache[0]?.variantText).toBe('早鸭');
+  });
+
+  it('AI enabled + AUTH_FAILURE → 降级 pool', async () => {
+    const { service, cache, sent } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['早上好'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: () => ({
+        ok: false,
+        error: AdapterErrorCode.AuthFailure,
+        message: 'HTTP 401',
+        providerUsed: 'openai_compat',
+        latencyMs: 90,
+      }),
+    });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(sent[0].text).toBe('早上好'); // 原 pool 文
+    expect(cache[0]?.source).toBe('m4_pool_pick');
+  });
+
+  it('AI enabled + TIMEOUT → 降级 pool (运行不中断)', async () => {
+    const { service, cache } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['a'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: () => ({
+        ok: false,
+        error: AdapterErrorCode.Timeout,
+        message: 'aborted',
+        providerUsed: 'openai_compat',
+        latencyMs: 8000,
+      }),
+    });
+    const result = await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(result.turnsExecuted).toBe(1);
+    expect(cache[0]?.source).toBe('m4_pool_pick');
+  });
+
+  it('AI enabled + adapter throws → 降级 pool 不传染到 turn 错', async () => {
+    const { service, cache } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['a'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: () => {
+        throw new Error('provider explode');
+      },
+    });
+    const result = await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(result.turnsExecuted).toBe(1);
+    expect(result.errors).toHaveLength(0); // AI 异常不进 runner errors
+    expect(cache[0]?.source).toBe('m4_pool_pick');
+  });
+
+  it('second run after AI miss 命中 cache · 不再调 AI', async () => {
+    const aiCalls: string[] = [];
+    const { service, cache } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: (text) => {
+        aiCalls.push(text);
+        return {
+          ok: true,
+          text: `rewritten-${aiCalls.length}`,
+          providerUsed: 'openai_compat',
+          modelUsed: 'x',
+          latencyMs: 50,
+        };
+      },
+    });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(aiCalls).toHaveLength(1); // 第二轮命中 cache, 不调 AI
+    expect(cache[0]?.usedCount).toBe(2);
   });
 });
