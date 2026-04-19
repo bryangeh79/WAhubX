@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -48,6 +49,18 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ): Promise<SlotResponseDto> {
     return this.slots.clear(id, cur.tenantId);
+  }
+
+  // PATCH /slots/:id/proxy { proxyId: number | null } — 绑定/解绑代理
+  // 切换会踢出现有 socket, 下次 bind/rehydrate 走新 agent
+  @Patch(':id/proxy')
+  @HttpCode(HttpStatus.OK)
+  async assignProxy(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { proxyId: number | null },
+  ): Promise<SlotResponseDto> {
+    return this.slots.assignProxy(id, cur.tenantId, body?.proxyId ?? null);
   }
 
   // ── Bind 现有号 (M2 W1 扫码 / M2 W3 pairing code) ─────

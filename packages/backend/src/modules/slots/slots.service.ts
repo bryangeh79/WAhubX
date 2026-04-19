@@ -11,9 +11,13 @@ import { EntityManager, Repository } from 'typeorm';
 import * as fs from 'node:fs';
 import { AccountSlotEntity, AccountSlotStatus } from './account-slot.entity';
 import { WaAccountEntity } from './wa-account.entity';
+import { TenantEntity } from '../tenants/tenant.entity';
+import { ProxyEntity } from '../proxies/proxy.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { BaileysService } from '../baileys/baileys.service';
 import { getSlotDir } from '../../common/storage';
+import { ensureFingerprint } from '../../common/fingerprint';
+import { writeProxyConf, type ProxyDescriptor } from '../../common/proxy-config';
 
 @Injectable()
 export class SlotsService {
@@ -24,6 +28,8 @@ export class SlotsService {
     private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WaAccountEntity)
     private readonly accountRepo: Repository<WaAccountEntity>,
+    @InjectRepository(ProxyEntity)
+    private readonly proxyRepo: Repository<ProxyEntity>,
     @Inject(forwardRef(() => BaileysService))
     private readonly baileys: BaileysService,
   ) {}
@@ -37,6 +43,10 @@ export class SlotsService {
       return;
     }
 
+    // 读 tenant 的 timezone 给 fingerprint 用
+    const tenant = await manager.findOne(TenantEntity, { where: { id: tenantId } });
+    const tz = tenant?.timezone ?? 'Asia/Kuala_Lumpur';
+
     const rows = Array.from({ length: slotLimit }, (_, i) =>
       manager.create(AccountSlotEntity, {
         tenantId,
@@ -49,7 +59,27 @@ export class SlotsService {
       }),
     );
     await manager.save(AccountSlotEntity, rows);
-    this.logger.log(`Seeded ${slotLimit} empty slots for tenant ${tenantId}`);
+
+    // 技术交接文档 § 6: 槽位一建出来 data/slots/<N>/fingerprint.json 就存在
+    // 稳定不漂移 (跨重连/重启保持), 不同 slot 落不同 model (DEVICE_POOL 抽)
+    for (let i = 1; i <= slotLimit; i++) {
+      ensureFingerprint({ slotIndex: i, tenantId, timezone: tz });
+    }
+    this.logger.log(`Seeded ${slotLimit} empty slots + fingerprints for tenant ${tenantId}`);
+  }
+
+  // 已存在的槽位 (活数据) 补 fingerprint — 用于升级后一次性回填, 幂等
+  async backfillFingerprintsForTenant(tenantId: number): Promise<number> {
+    const slots = await this.slotRepo.find({ where: { tenantId } });
+    const tenant = await this.slotRepo.manager.findOne(TenantEntity, { where: { id: tenantId } });
+    const tz = tenant?.timezone ?? 'Asia/Kuala_Lumpur';
+    let touched = 0;
+    for (const s of slots) {
+      const before = fs.existsSync(`${getSlotDir(s.slotIndex)}/fingerprint.json`);
+      ensureFingerprint({ slotIndex: s.slotIndex, tenantId, timezone: tz });
+      if (!before) touched++;
+    }
+    return touched;
   }
 
   // ── 查询 (带 tenant 隔离) ────────────────────────────────────
@@ -114,6 +144,41 @@ export class SlotsService {
     }
 
     this.logger.log(`Cleared slot ${id} (tenant ${slot.tenantId}, index ${slot.slotIndex})`);
+    return this.toResponse(slot);
+  }
+
+  // ── 绑代理 (M2 W3.5: 槽位级出口隔离) ──────────────────────────
+  // proxyId=null 取消绑定 (dev 直连); 否则必须是本租户拥有的 proxy
+  async assignProxy(id: number, requesterTenantId: number | null, proxyId: number | null): Promise<SlotResponseDto> {
+    const slot = await this.slotRepo.findOne({ where: { id }, relations: ['account'] });
+    if (!slot) throw new NotFoundException(`槽位 ${id} 不存在`);
+    this.assertCanAccess(slot, requesterTenantId);
+
+    if (proxyId !== null) {
+      const proxy = await this.proxyRepo.findOne({ where: { id: proxyId } });
+      if (!proxy) throw new NotFoundException(`代理 ${proxyId} 不存在`);
+      if (requesterTenantId !== null && proxy.tenantId !== requesterTenantId) {
+        throw new ForbiddenException('无权限使用该代理');
+      }
+      // 代理切换会断开现有 socket, 下次 bind/rehydrate 走新代理
+      await this.baileys.evictFromPool(slot.id);
+
+      const desc: ProxyDescriptor = {
+        type: proxy.proxyType as ProxyDescriptor['type'],
+        host: proxy.host,
+        port: proxy.port,
+        username: proxy.username,
+        password: proxy.password,
+      };
+      writeProxyConf(slot.slotIndex, desc);
+    } else {
+      writeProxyConf(slot.slotIndex, null);
+      await this.baileys.evictFromPool(slot.id);
+    }
+
+    slot.proxyId = proxyId;
+    await this.slotRepo.save(slot);
+    this.logger.log(`slot ${id} proxy_id → ${proxyId}`);
     return this.toResponse(slot);
   }
 

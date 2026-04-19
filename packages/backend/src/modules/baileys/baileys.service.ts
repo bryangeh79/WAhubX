@@ -37,9 +37,12 @@ import * as path from 'node:path';
 import { AccountSlotEntity, AccountSlotStatus } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
+import { ProxyEntity } from '../proxies/proxy.entity';
 import { WaContactEntity } from './wa-contact.entity';
 import { ChatMessageEntity, MessageDirection, MessageType } from './chat-message.entity';
 import { getMediaDir, getWaSessionDir } from '../../common/storage';
+import { ensureFingerprint, type SlotFingerprint } from '../../common/fingerprint';
+import { buildProxyAgent, type ProxyDescriptor } from '../../common/proxy-config';
 
 export type BindState =
   | 'idle'
@@ -376,19 +379,78 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return version;
   }
 
+  // 统一组装 makeWASocket 共用的隔离参数: fingerprint (browser[0]=model) + proxy agent
+  // 所有 spawn 路径 (bind / rehydrate) 都经这里走
+  private async resolveIsolation(params: {
+    slotId: number;
+    slotIndex: number;
+    tenantId: number;
+    proxyId: number | null;
+  }): Promise<{
+    fingerprint: SlotFingerprint;
+    agent: ReturnType<typeof buildProxyAgent>;
+    proxyDesc: ProxyDescriptor | null;
+  }> {
+    const fingerprint = ensureFingerprint({
+      slotIndex: params.slotIndex,
+      tenantId: params.tenantId,
+    });
+
+    let proxyDesc: ProxyDescriptor | null = null;
+    if (params.proxyId !== null) {
+      const proxy = await this.dataSource
+        .getRepository(ProxyEntity)
+        .findOne({ where: { id: params.proxyId } });
+      if (!proxy) {
+        this.logger.warn(`slot ${params.slotId} proxy_id=${params.proxyId} 不存在 DB, 回退直连`);
+      } else {
+        proxyDesc = {
+          type: proxy.proxyType as ProxyDescriptor['type'],
+          host: proxy.host,
+          port: proxy.port,
+          username: proxy.username,
+          password: proxy.password,
+        };
+      }
+    }
+    const agent = buildProxyAgent(proxyDesc);
+    if (proxyDesc) {
+      this.logger.log(
+        `slot ${params.slotId} using proxy ${proxyDesc.type}://${proxyDesc.host}:${proxyDesc.port} (${fingerprint.model})`,
+      );
+    } else {
+      this.logger.log(`slot ${params.slotId} direct egress (no proxy) (${fingerprint.model})`);
+    }
+    return { fingerprint, agent, proxyDesc };
+  }
+
   private async spawnBindSocket(ctx: BindContext, pairingPhoneNumber?: string): Promise<void> {
     const sessionDir = getWaSessionDir(ctx.slotIndex);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const version = await this.ensureWaVersion();
 
+    // 读 slot 的 proxy_id 决定出口 IP
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: ctx.slotId } });
+    const isolation = await this.resolveIsolation({
+      slotId: ctx.slotId,
+      slotIndex: ctx.slotIndex,
+      tenantId: ctx.tenantId,
+      proxyId: slot?.proxyId ?? null,
+    });
+
     const sock = makeWASocket({
       version: version as [number, number, number],
       auth: state,
-      // Pairing code 模式时, Baileys 需要 printQRInTerminal=false (它会提示 QR 但我们不显示)
-      // 且需要 state.creds.registered 为 false. useMultiFileAuthState 初次空目录时默认就是 false.
       printQRInTerminal: false,
       logger: this.baileysLogger,
-      browser: ['WAhubX', 'Desktop', '1.0.0'],
+      // fingerprint.baileysBrowser = [model, 'Desktop', chromeMajor] — 每槽独立, 跨会话稳定
+      browser: isolation.fingerprint.baileysBrowser,
+      // HttpsProxyAgent / SocksProxyAgent 运行时兼容 http.Agent 接口, TS 类型对不上 https.Agent 但
+      // 功能等价 — 用 as never 绕开严格匹配
+      agent: (isolation.agent ?? undefined) as never,
+      fetchAgent: (isolation.agent ?? undefined) as never,
       syncFullHistory: false,
       markOnlineOnConnect: false,
     });
@@ -430,6 +492,28 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
             ? (lastDisconnect.error as Boom).output.statusCode
             : 0;
         const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown';
+
+        // restartRequired(515): 扫码/配对成功后 WA 要求拿新凭证重开连接.
+        // Baileys 不会自动重启, 我们必须手动关旧 sock + 用同 auth state (现在 registered=true) spawn 新 sock.
+        // 新 sock 会直接 open → onBindConnectionOpen 继续流程.
+        if (code === DisconnectReason.restartRequired) {
+          this.logger.log(`slot ${ctx.slotId} got restartRequired(515), respawning socket with registered creds`);
+          ctx.status.state = 'connecting';
+          ctx.status.lastEventAt = new Date().toISOString();
+          try {
+            ctx.sock?.end(undefined);
+          } catch {
+            // ignore
+          }
+          ctx.sock = null;
+          // pairingPhoneNumber 传 undefined: 配对码只首次需要, 重启时 creds 已登记, 直接走 open 流
+          void this.spawnBindSocket(ctx, undefined).catch((err) => {
+            this.logger.error(`slot ${ctx.slotId} restart respawn failed: ${err}`);
+            void this.teardownBind(ctx, 'failed', `重启 socket 失败 (${err})`);
+          });
+          return;
+        }
+
         this.logger.warn(`slot ${ctx.slotId} bind connection closed: ${reason} (${code})`);
         void this.teardownBind(ctx, 'failed', `连接关闭 (${reason})`);
       }
@@ -489,6 +573,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           registeredAt: new Date(),
           lastOnlineAt: new Date(),
           waNickname: sock.user?.name ?? null,
+          // 槽位指纹入库 (fingerprint.json 已存在磁盘; DB 里也放一份便于查询 / 审计)
+          deviceFingerprint: ensureFingerprint({ slotIndex: ctx.slotIndex, tenantId: ctx.tenantId }) as unknown as Record<string, unknown>,
         });
         const savedAccount = await manager.save(waAccount);
         accountId = savedAccount.id;
@@ -542,23 +628,34 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const version = await this.ensureWaVersion();
 
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    const isolation = await this.resolveIsolation({
+      slotId,
+      slotIndex,
+      tenantId: slot?.tenantId ?? -1,
+      proxyId: slot?.proxyId ?? null,
+    });
+
+    if (!slot?.accountId) {
+      throw new Error(`slot ${slotId} missing accountId during rehydrate`);
+    }
+
     const sock = makeWASocket({
       version: version as [number, number, number],
       auth: state,
       printQRInTerminal: false,
       logger: this.baileysLogger,
-      browser: ['WAhubX', 'Desktop', '1.0.0'],
+      browser: isolation.fingerprint.baileysBrowser,
+      // HttpsProxyAgent / SocksProxyAgent 运行时实现了 http.Agent 的接口但 TS 类型是 http.Agent;
+      // Baileys 声明需要 https.Agent — 用 any 断言绕开 TS 严格匹配
+      agent: (isolation.agent ?? undefined) as never,
+      fetchAgent: (isolation.agent ?? undefined) as never,
       syncFullHistory: false,
       markOnlineOnConnect: false,
     });
 
-    const slot = await this.dataSource
-      .getRepository(AccountSlotEntity)
-      .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) {
-      sock.end(undefined);
-      throw new Error(`slot ${slotId} missing accountId during rehydrate`);
-    }
     this.attachPoolListeners(slotId, slotIndex, slot.accountId, sock, saveCreds);
     this.pool.set(slotId, sock);
   }

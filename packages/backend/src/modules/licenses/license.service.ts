@@ -183,10 +183,15 @@ export class LicenseService {
 
   // ── 本机当前绑定状态 (前端启动时调用) ─────────────────────────────
   async getLocalStatus(): Promise<LicenseStatusView> {
-    const license = await this.licenseRepo.findOne({
-      where: { machineFingerprint: this.machineId },
-      relations: ['tenant'],
-    });
+    // 一台机器理论上只应有 1 个有效 license, 但开发过程中可能累积多条历史绑定 (revoked / 重绑).
+    // 优先级: 未吊销 > 最新 issued_at
+    const license = await this.licenseRepo
+      .createQueryBuilder('l')
+      .leftJoinAndSelect('l.tenant', 't')
+      .where('l.machine_fingerprint = :fp', { fp: this.machineId })
+      .orderBy('l.revoked', 'ASC')
+      .addOrderBy('l.issued_at', 'DESC')
+      .getOne();
 
     if (!license) {
       return {
