@@ -25,6 +25,13 @@ export function getWaSessionDir(slotIndex: number): string {
   return dir;
 }
 
+// 媒体文件落盘: data/slots/<slotIndex>/media/<filename>
+export function getMediaDir(slotIndex: number): string {
+  const dir = path.join(getSlotDir(slotIndex), 'media');
+  ensureDir(dir);
+  return dir;
+}
+
 export function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }

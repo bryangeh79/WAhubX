@@ -14,6 +14,7 @@ import {
 import { SlotsService } from './slots.service';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { SendTextMessageDto } from './dto/send-message.dto';
+import { SendMediaMessageDto } from './dto/send-media.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
 import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
 
@@ -49,15 +50,17 @@ export class SlotsController {
     return this.slots.clear(id, cur.tenantId);
   }
 
-  // ── Bind 现有号 (M2 W1) ──────────────────────────────
+  // ── Bind 现有号 (M2 W1 扫码 / M2 W3 pairing code) ─────
+  // Body { phoneNumber } 可选: 提供则走 pairing code 路径 (返 8 位码); 否则走 QR
   @Post(':id/bind-existing')
   @HttpCode(HttpStatus.OK)
   async startBind(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
+    @Body() body: { phoneNumber?: string } = {},
   ): Promise<BindStatusView> {
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.startBind(id);
+    return this.baileys.startBind(id, body.phoneNumber);
   }
 
   @Get(':id/bind-existing/status')
@@ -89,6 +92,22 @@ export class SlotsController {
   ) {
     await this.slots.findOne(id, cur.tenantId);
     return this.baileys.sendText(id, dto.to, dto.text);
+  }
+
+  // W3: image/voice/file 发送, body 带 base64
+  @Post(':id/send-media')
+  @HttpCode(HttpStatus.OK)
+  async sendMedia(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SendMediaMessageDto,
+  ) {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.sendMedia(id, dto.to, dto.type, dto.contentBase64, {
+      mimeType: dto.mimeType,
+      filename: dto.filename,
+      caption: dto.caption,
+    });
   }
 
   @Get(':id/contacts')

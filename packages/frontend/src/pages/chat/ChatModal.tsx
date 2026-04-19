@@ -13,8 +13,10 @@ import {
   Tabs,
   Tag,
   Typography,
+  Upload,
   message as antdMessage,
 } from 'antd';
+import type { UploadFile } from 'antd';
 import { api, extractErrorMessage } from '@/lib/api';
 
 const { Text, Paragraph } = Typography;
@@ -74,7 +76,8 @@ export function ChatModal({ slotId, slotIndex, phoneNumber, open, onClose }: Pro
       <Tabs
         defaultActiveKey="send"
         items={[
-          { key: 'send', label: '发消息', children: <SendTab slotId={slotId} /> },
+          { key: 'send', label: '发文本', children: <SendTab slotId={slotId} /> },
+          { key: 'send-image', label: '发图片', children: <SendImageTab slotId={slotId} /> },
           { key: 'contacts', label: '联系人', children: <ContactsTab slotId={slotId} /> },
           { key: 'messages', label: '最近消息', children: <MessagesTab slotId={slotId} /> },
         ]}
@@ -146,6 +149,96 @@ function SendTab({ slotId }: { slotId: number }) {
       </Form>
     </div>
   );
+}
+
+// ── Send image tab (W3) ───────────────────────────────────
+function SendImageTab({ slotId }: { slotId: number }) {
+  const [form] = Form.useForm();
+  const [submitting, setSubmitting] = useState(false);
+  const [fileList, setFileList] = useState<UploadFile[]>([]);
+
+  const beforeUpload = (file: File): boolean => {
+    const ok = file.size <= 16 * 1024 * 1024;
+    if (!ok) antdMessage.error(`文件超过 WA 16MB 上限 (${(file.size / 1024 / 1024).toFixed(1)}MB)`);
+    return false; // 阻止 antd 自动上传, 我们手动在 submit 时读
+  };
+
+  const onFinish = async (values: { to: string; caption?: string }) => {
+    const file = fileList[0]?.originFileObj as File | undefined;
+    if (!file) {
+      antdMessage.warning('请先选择图片');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const res = await api.post<{ waMessageId: string | null; mediaPath: string | null }>(
+        `/slots/${slotId}/send-media`,
+        {
+          to: values.to,
+          type: 'image',
+          contentBase64: base64,
+          mimeType: file.type || 'image/jpeg',
+          filename: file.name,
+          caption: values.caption,
+        },
+      );
+      antdMessage.success(`已发送 · WA msg id: ${res.data.waMessageId ?? '—'}`);
+      form.resetFields(['caption']);
+      setFileList([]);
+    } catch (err) {
+      antdMessage.error(extractErrorMessage(err, '发送失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div>
+      <Paragraph type="secondary" style={{ fontSize: 12 }}>
+        JPG/PNG/WebP ≤ 16MB. 原始文件会同步落到 <code>data/slots/&lt;N&gt;/media/</code>.
+      </Paragraph>
+      <Form form={form} layout="vertical" onFinish={onFinish} requiredMark={false}>
+        <Form.Item label="收件人" name="to" rules={[{ required: true, message: '请输入收件人' }]}>
+          <Input placeholder="60123456789" autoComplete="off" />
+        </Form.Item>
+        <Form.Item label="图片">
+          <Upload
+            beforeUpload={beforeUpload}
+            fileList={fileList}
+            onChange={({ fileList: fl }) => setFileList(fl.slice(-1))}
+            accept="image/*"
+            maxCount={1}
+            listType="picture"
+          >
+            <Button>选择图片</Button>
+          </Upload>
+        </Form.Item>
+        <Form.Item label="说明 (caption, 选填)" name="caption" rules={[{ max: 1024 }]}>
+          <Input.TextArea rows={2} />
+        </Form.Item>
+        <Form.Item>
+          <Button type="primary" htmlType="submit" loading={submitting} block>
+            发送图片
+          </Button>
+        </Form.Item>
+      </Form>
+    </div>
+  );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // result 形如 "data:image/jpeg;base64,...."
+      const base64 = result.split(',')[1] ?? '';
+      resolve(base64);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 // ── Contacts tab ──────────────────────────────────────────

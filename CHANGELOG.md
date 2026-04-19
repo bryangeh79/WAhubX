@@ -4,6 +4,46 @@
 
 ---
 
+## [Unreleased] · M2 进行中
+
+### Added (M2 W1-W3)
+
+**W1 · 扫码绑定**
+- `BaileysService` 扫码绑定现有号 (takeover 模式)
+- `GET/POST /slots/:id/bind-existing{/status,/cancel}`
+- 2 分钟绑定超时 + QR 轮询 + `fetchLatestBaileysVersion` 动态协议版本
+- 前端 `BindExistingModal` · QR 渲染 · 5 态状态机
+
+**W2 · 常驻 socket + 文本消息**
+- 新表: `wa_contact` (UNIQUE account_id+remote_jid) · `chat_message` (BIGSERIAL · direction/msg_type enum)
+- migration `CreateChatMessages1776600662633`
+- Pool: `Map<slotId, WASocket>` 常驻 socket
+- `onModuleInit` rehydrate: `status in (warmup, active)` + session 文件存在 → 自动续连
+- `sendText` 发文本 · `messages.upsert` 入库 (去重 fromMe)
+- `slots.clear` 完整清理: pool 踢出 + CASCADE 删 wa_account + rm -rf `data/slots/<N>/`
+- 新端点: `POST /send` · `GET /contacts` · `GET /messages` · `GET /online-status`
+- 前端 `ChatModal` 3 tab: 发消息 / 联系人 / 最近消息
+
+**W3 · 自动重连 + 配对码 + 媒体消息**
+- **自动重连**: 非 loggedOut 断线自动重连 · 指数退避 5s/10s/20s/40s/80s · 5 次达上限标 suspended · 重连成功清计数
+- **Pairing Code (W3.2)**: `POST /slots/:id/bind-existing { phoneNumber }` 走 8 位配对码 (WA 原生替代 QR, 相机不便时用); 前端 `BindExistingModal` 加模式选择 Radio
+- **媒体消息接收 (W3.3)**: `messages.upsert` 自动 `downloadMediaMessage` → 落 `data/slots/<N>/media/<msgId>.<ext>` → `chat_message.media_path` 存相对路径
+- **媒体消息发送 (W3.4)**: `POST /slots/:id/send-media { to, type, contentBase64, mimeType?, filename?, caption? }` · 支持 image/voice/file · 16MB WA 限 · JSON body 上限调至 25MB (`app.useBodyParser`)
+- 前端 `ChatModal` 新增"发图片" tab · antd Upload + base64 转换
+
+### Deferred
+
+- **W3.5 新号注册**: 推迟到单独里程碑 / V1.1. 每次失败永久烧 SIM 卡, 需实物 SIM 及谨慎测试流程才能真机验证. 代码已留占位; 当前 empty slot 的"新号注册"菜单项仍 disabled.
+
+### Known Issues (M2)
+
+- 媒体文件无 HTTP 服务入口 (前端暂无法直接看/下载) — M9 接管 UI 时加 `/slots/:id/media/<file>` 端点
+- 没有消息去重 (接收方 `wa_message_id` 重复 upsert 会入多条) — M9 加唯一索引
+- 没做发消息速率限制 / 养号节流 — M3 调度器 + M5 养号日历会统一管
+- 视频消息当前归到 Image 枚举 — 待 MessageType 枚举扩展 Video
+
+---
+
 ## [v0.1.0-m1] · 2026-04-19 · M1 基础骨架交付
 
 M1 里程碑：从零搭到"单租户可登录、看到自己的 N 个空槽位"的骨架。不含 Baileys / 任务调度 / 剧本引擎（后续里程碑）。

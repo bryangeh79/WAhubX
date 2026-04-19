@@ -27,17 +27,19 @@ import {
   type WASocket,
   DisconnectReason,
   default as makeWASocket,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { AccountSlotEntity, AccountSlotStatus } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
 import { WaContactEntity } from './wa-contact.entity';
 import { ChatMessageEntity, MessageDirection, MessageType } from './chat-message.entity';
-import { getWaSessionDir } from '../../common/storage';
+import { getMediaDir, getWaSessionDir } from '../../common/storage';
 
 export type BindState =
   | 'idle'
@@ -51,7 +53,12 @@ export type BindState =
 
 export interface BindStatusView {
   state: BindState;
+  // QR mode: raw string; 前端用 qrcode lib 渲图
   qr: string | null;
+  // Pairing code mode: 8 位字母数字 (e.g. "ABCD-1234"); 用户在 WA → 链接设备 → 用手机号连接 输入
+  pairingCode: string | null;
+  // 绑定模式, 给前端决定显示 QR 还是 pairing code
+  mode: 'qr' | 'pairing-code';
   phoneNumber: string | null;
   startedAt: string;
   lastEventAt: string;
@@ -78,6 +85,12 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private readonly baileysLogger = pino({ level: 'silent' });
   // 动态拉来的 WA 版本, 进程生命周期复用避免反复请求
   private waVersion: number[] | null = null;
+  // 自动重连状态: key=slotId, value={attempts, nextRetryTimer}
+  // 策略: 指数退避 5s → 10s → 20s → 40s → 80s (cap), 累计 5 次还连不上则 suspend
+  private readonly reconnectState = new Map<number, { attempts: number; timer: NodeJS.Timeout | null }>();
+  private static readonly MAX_RECONNECT_ATTEMPTS = 5;
+  private static readonly RECONNECT_BASE_MS = 5000;
+  private static readonly RECONNECT_CAP_MS = 80_000;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -130,6 +143,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       }
       this.pool.delete(slotId);
     }
+    for (const slotId of [...this.reconnectState.keys()]) {
+      this.clearReconnect(slotId);
+    }
   }
 
   // ── Bind 流程 ─────────────────────────────────────────
@@ -139,6 +155,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       return {
         state: 'idle',
         qr: null,
+        pairingCode: null,
+        mode: 'qr',
         phoneNumber: null,
         startedAt: new Date().toISOString(),
         lastEventAt: new Date().toISOString(),
@@ -148,7 +166,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return { ...ctx.status };
   }
 
-  async startBind(slotId: number): Promise<BindStatusView> {
+  async startBind(slotId: number, pairingPhoneNumber?: string): Promise<BindStatusView> {
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
@@ -165,6 +183,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }
     if (existing) await this.teardownBind(existing, 'cancelled', 'restarted');
 
+    // pairingPhoneNumber 给定 → 走 pairing code 模式; 否则 QR
+    const mode: 'qr' | 'pairing-code' = pairingPhoneNumber ? 'pairing-code' : 'qr';
+
     const ctx: BindContext = {
       slotId,
       slotIndex: slot.slotIndex,
@@ -173,7 +194,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       status: {
         state: 'starting',
         qr: null,
-        phoneNumber: null,
+        pairingCode: null,
+        mode,
+        phoneNumber: pairingPhoneNumber ?? null,
         startedAt: new Date().toISOString(),
         lastEventAt: new Date().toISOString(),
         error: null,
@@ -182,7 +205,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     };
     this.bindContexts.set(slotId, ctx);
 
-    void this.spawnBindSocket(ctx).catch((err) => {
+    void this.spawnBindSocket(ctx, pairingPhoneNumber).catch((err) => {
       this.logger.error(`slot ${slotId} spawnBindSocket failed: ${err}`);
       ctx.status.state = 'failed';
       ctx.status.error = err instanceof Error ? err.message : String(err);
@@ -203,7 +226,96 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return { ...ctx.status };
   }
 
-  // ── 发消息 (M2 W2 只支持 text) ─────────────────────────
+  // ── 发消息: text (W2) + media (W3) ──────────────────────
+  async sendMedia(
+    slotId: number,
+    to: string,
+    type: 'image' | 'voice' | 'file',
+    contentBase64: string,
+    options: { mimeType?: string; filename?: string; caption?: string } = {},
+  ): Promise<{ waMessageId: string | null; mediaPath: string | null }> {
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      throw new BadRequestException(`槽位 ${slotId} 未在线 (pool 无 socket)`);
+    }
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+
+    const buffer = Buffer.from(contentBase64, 'base64');
+    if (buffer.length === 0) throw new BadRequestException('contentBase64 解码后为空');
+    if (buffer.length > 16 * 1024 * 1024) {
+      throw new BadRequestException(`媒体大小超过 WA 16MB 上限 (${buffer.length} bytes)`);
+    }
+    const jid = this.normalizeJid(to);
+
+    let sendPayload: Parameters<WASocket['sendMessage']>[1];
+    let msgTypeEnum: MessageType;
+    switch (type) {
+      case 'image':
+        sendPayload = { image: buffer, caption: options.caption };
+        msgTypeEnum = MessageType.Image;
+        break;
+      case 'voice':
+        sendPayload = {
+          audio: buffer,
+          ptt: true,
+          mimetype: options.mimeType ?? 'audio/ogg; codecs=opus',
+        };
+        msgTypeEnum = MessageType.Voice;
+        break;
+      case 'file':
+        sendPayload = {
+          document: buffer,
+          fileName: options.filename ?? 'file.bin',
+          mimetype: options.mimeType ?? 'application/octet-stream',
+          caption: options.caption,
+        };
+        msgTypeEnum = MessageType.File;
+        break;
+    }
+
+    const sendResult = await sock.sendMessage(jid, sendPayload);
+    const waMessageId = sendResult?.key?.id ?? null;
+
+    // 落盘便于审计 (可选)
+    let mediaPath: string | null = null;
+    try {
+      const ext = this.guessExtFromType(type, options.mimeType, options.filename);
+      const filename = `${waMessageId ?? Date.now()}-out${ext}`;
+      const abs = path.join(getMediaDir(slot.slotIndex), filename);
+      fs.writeFileSync(abs, buffer);
+      mediaPath = path.relative(process.cwd(), abs);
+    } catch (err) {
+      this.logger.warn(`slot ${slotId} outbound media 落盘失败: ${err}`);
+    }
+
+    await this.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: jid,
+      direction: MessageDirection.Out,
+      msgType: msgTypeEnum,
+      content: options.caption ?? null,
+      mediaPath,
+      sentAt: new Date(),
+      waMessageId,
+    });
+
+    return { waMessageId, mediaPath };
+  }
+
+  private guessExtFromType(type: 'image' | 'voice' | 'file', mime?: string, filename?: string): string {
+    if (filename && filename.includes('.')) return `.${filename.split('.').pop()}`;
+    if (mime) {
+      const sub = mime.split('/')[1]?.split(';')[0];
+      if (sub) return `.${sub}`;
+    }
+    if (type === 'image') return '.jpg';
+    if (type === 'voice') return '.ogg';
+    return '.bin';
+  }
+
   async sendText(slotId: number, to: string, text: string): Promise<{ waMessageId: string | null }> {
     const sock = this.pool.get(slotId);
     if (!sock) {
@@ -264,7 +376,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return version;
   }
 
-  private async spawnBindSocket(ctx: BindContext): Promise<void> {
+  private async spawnBindSocket(ctx: BindContext, pairingPhoneNumber?: string): Promise<void> {
     const sessionDir = getWaSessionDir(ctx.slotIndex);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const version = await this.ensureWaVersion();
@@ -272,6 +384,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const sock = makeWASocket({
       version: version as [number, number, number],
       auth: state,
+      // Pairing code 模式时, Baileys 需要 printQRInTerminal=false (它会提示 QR 但我们不显示)
+      // 且需要 state.creds.registered 为 false. useMultiFileAuthState 初次空目录时默认就是 false.
       printQRInTerminal: false,
       logger: this.baileysLogger,
       browser: ['WAhubX', 'Desktop', '1.0.0'],
@@ -282,15 +396,29 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // Pairing code 要等 socket 完成 noise handshake (WA 开始请求 auth → qr 事件触发) 才能调,
+    // 早调会 "Connection Closed". 用 flag 保证只调一次.
+    let pairingRequested = false;
+
     sock.ev.on('connection.update', (update) => {
       const { connection, qr, lastDisconnect } = update;
       ctx.status.lastEventAt = new Date().toISOString();
 
-      if (qr) {
+      // QR 模式: 推给前端渲图
+      if (qr && ctx.status.mode === 'qr') {
         ctx.status.state = 'qr';
         ctx.status.qr = qr;
       }
-      if (connection === 'connecting') ctx.status.state = 'connecting';
+
+      // Pairing code 模式: qr 事件是"WA 准备接受 auth"的信号, 此时调 requestPairingCode 最稳
+      if (qr && ctx.status.mode === 'pairing-code' && !pairingRequested && pairingPhoneNumber) {
+        pairingRequested = true;
+        void this.requestPairingCode(ctx, sock, pairingPhoneNumber);
+      }
+
+      if (connection === 'connecting') {
+        if (ctx.status.state !== 'qr') ctx.status.state = 'connecting';
+      }
 
       if (connection === 'open') {
         void this.onBindConnectionOpen(ctx, sock, saveCreds);
@@ -306,6 +434,29 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         void this.teardownBind(ctx, 'failed', `连接关闭 (${reason})`);
       }
     });
+  }
+
+  private async requestPairingCode(
+    ctx: BindContext,
+    sock: WASocket,
+    pairingPhoneNumber: string,
+  ): Promise<void> {
+    try {
+      if (sock.authState.creds.registered) return; // 已注册号不走配对码流
+      const digits = pairingPhoneNumber.replace(/[^0-9]/g, '');
+      if (!digits) throw new Error(`手机号 "${pairingPhoneNumber}" 无效`);
+      const code = await sock.requestPairingCode(digits);
+      const formatted = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+      ctx.status.state = 'qr'; // 复用 'qr' 态, UI 按 mode 展示配对码或 QR
+      ctx.status.pairingCode = formatted;
+      ctx.status.lastEventAt = new Date().toISOString();
+      this.logger.log(`slot ${ctx.slotId} pairing code ready for ${digits}: ${formatted}`);
+    } catch (err) {
+      this.logger.error(`slot ${ctx.slotId} requestPairingCode failed: ${err}`);
+      ctx.status.state = 'failed';
+      ctx.status.error = err instanceof Error ? err.message : String(err);
+      await this.teardownBind(ctx, 'failed', ctx.status.error);
+    }
   }
 
   /**
@@ -364,7 +515,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       ctx.status.lastEventAt = new Date().toISOString();
       this.logger.log(`slot ${ctx.slotId} bound phone ${phone}, handing off to pool`);
 
-      this.attachPoolListeners(ctx.slotId, accountId, sock, saveCreds);
+      this.attachPoolListeners(ctx.slotId, ctx.slotIndex, accountId, sock, saveCreds);
       this.pool.set(ctx.slotId, sock);
 
       if (ctx.timeoutHandle) {
@@ -408,12 +559,13 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       sock.end(undefined);
       throw new Error(`slot ${slotId} missing accountId during rehydrate`);
     }
-    this.attachPoolListeners(slotId, slot.accountId, sock, saveCreds);
+    this.attachPoolListeners(slotId, slotIndex, slot.accountId, sock, saveCreds);
     this.pool.set(slotId, sock);
   }
 
   private attachPoolListeners(
     slotId: number,
+    slotIndex: number,
     accountId: number,
     sock: WASocket,
     saveCreds: () => Promise<void>,
@@ -422,6 +574,17 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect } = update;
+      if (connection === 'open') {
+        // 连上就重置重连计数
+        const rs = this.reconnectState.get(slotId);
+        if (rs) {
+          rs.attempts = 0;
+          if (rs.timer) {
+            clearTimeout(rs.timer);
+            rs.timer = null;
+          }
+        }
+      }
       if (connection === 'close') {
         const code =
           lastDisconnect?.error instanceof Boom
@@ -430,17 +593,19 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         if (code === DisconnectReason.loggedOut) {
           this.logger.warn(`slot ${slotId} logged out remotely — removing from pool + marking suspended`);
           this.pool.delete(slotId);
+          this.clearReconnect(slotId);
           void this.markSlotSuspended(slotId);
         } else {
-          this.logger.warn(`slot ${slotId} pool socket closed (code=${code}), removing from pool (无自动重连, M2 W3)`);
+          // M2 W3: 短暂断线 → 指数退避重连; 超出 MAX 才降级 suspended
           this.pool.delete(slotId);
+          this.scheduleReconnect(slotId, accountId, code);
         }
       }
     });
 
     sock.ev.on('messages.upsert', (evt) => {
       for (const msg of evt.messages) {
-        void this.persistIncomingMessage(accountId, msg, evt.type === 'notify').catch((err) => {
+        void this.persistIncomingMessage(slotIndex, accountId, msg, evt.type === 'notify').catch((err) => {
           this.logger.error(`slot ${slotId} persist inbound failed: ${err}`);
         });
       }
@@ -453,7 +618,73 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       .update(slotId, { status: AccountSlotStatus.Suspended });
   }
 
+  // ── 自动重连 (W3.1) ────────────────────────────────────
+  private scheduleReconnect(slotId: number, accountId: number, closeCode: number): void {
+    const rs = this.reconnectState.get(slotId) ?? { attempts: 0, timer: null };
+    if (rs.timer) clearTimeout(rs.timer);
+
+    if (rs.attempts >= BaileysService.MAX_RECONNECT_ATTEMPTS) {
+      this.logger.error(
+        `slot ${slotId} reached MAX reconnect attempts (${rs.attempts}), suspending. Last close code=${closeCode}`,
+      );
+      this.reconnectState.delete(slotId);
+      void this.markSlotSuspended(slotId);
+      return;
+    }
+
+    // 5s * 2^attempts, cap 80s: 5, 10, 20, 40, 80
+    const delayMs = Math.min(
+      BaileysService.RECONNECT_BASE_MS * Math.pow(2, rs.attempts),
+      BaileysService.RECONNECT_CAP_MS,
+    );
+    rs.attempts += 1;
+    this.logger.warn(
+      `slot ${slotId} scheduling reconnect #${rs.attempts}/${BaileysService.MAX_RECONNECT_ATTEMPTS} in ${Math.round(delayMs / 1000)}s (close code=${closeCode})`,
+    );
+
+    rs.timer = setTimeout(() => {
+      rs.timer = null;
+      void this.attemptReconnect(slotId, accountId);
+    }, delayMs);
+
+    this.reconnectState.set(slotId, rs);
+  }
+
+  private async attemptReconnect(slotId: number, accountId: number): Promise<void> {
+    try {
+      const slot = await this.dataSource
+        .getRepository(AccountSlotEntity)
+        .findOne({ where: { id: slotId } });
+      if (!slot || !slot.accountId || slot.accountId !== accountId) {
+        // 槽被清过或换号了, 停止重连
+        this.logger.log(`slot ${slotId} no longer owned by account ${accountId}, abort reconnect`);
+        this.clearReconnect(slotId);
+        return;
+      }
+      if (slot.status === AccountSlotStatus.Suspended || slot.status === AccountSlotStatus.Empty) {
+        this.logger.log(`slot ${slotId} status=${slot.status}, abort reconnect`);
+        this.clearReconnect(slotId);
+        return;
+      }
+      this.logger.log(`slot ${slotId} attempting reconnect...`);
+      await this.spawnPooledSocket(slotId, slot.slotIndex);
+      // 成功后 connection=open 事件会在 listener 里清 reconnectState
+    } catch (err) {
+      this.logger.error(`slot ${slotId} reconnect attempt failed: ${err}`);
+      // 重试下一轮 (attempts 已自增, 靠下次 connection close 触发 scheduleReconnect 继续退避)
+      // 但如果 spawn 压根没起成功 socket, 不会再 emit close 事件 → 主动再调度
+      this.scheduleReconnect(slotId, accountId, -1);
+    }
+  }
+
+  private clearReconnect(slotId: number): void {
+    const rs = this.reconnectState.get(slotId);
+    if (rs?.timer) clearTimeout(rs.timer);
+    this.reconnectState.delete(slotId);
+  }
+
   private async persistIncomingMessage(
+    slotIndex: number,
     accountId: number,
     msg: WAMessage,
     isLive: boolean,
@@ -465,11 +696,24 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       msg.message?.conversation ??
       msg.message?.extendedTextMessage?.text ??
       msg.message?.imageMessage?.caption ??
+      msg.message?.videoMessage?.caption ??
+      msg.message?.documentMessage?.caption ??
       null;
     const msgType = this.inferMsgType(msg);
     const sentAt = msg.messageTimestamp
       ? new Date(Number(msg.messageTimestamp) * 1000)
       : new Date();
+
+    // 媒体消息: 同步下载到 data/slots/<N>/media/, 把相对路径存 media_path
+    // 下载失败不阻塞 DB 落库 — 可能是网络 / 媒体已过期, 文本内容和元数据照样进表
+    let mediaPath: string | null = null;
+    if (msgType !== MessageType.Text && msgType !== MessageType.Other) {
+      try {
+        mediaPath = await this.downloadAndSaveMedia(slotIndex, msg, msgType);
+      } catch (err) {
+        this.logger.warn(`slot-index ${slotIndex} media download failed (msgId=${msg.key.id}): ${err}`);
+      }
+    }
 
     await this.persistMessage({
       accountId,
@@ -477,11 +721,68 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       direction: MessageDirection.In,
       msgType,
       content: text,
+      mediaPath,
       sentAt,
       waMessageId: msg.key.id ?? null,
       pushName: msg.pushName ?? null,
       updateContactLastMessageAt: isLive,
     });
+  }
+
+  private async downloadAndSaveMedia(
+    slotIndex: number,
+    msg: WAMessage,
+    msgType: MessageType,
+  ): Promise<string | null> {
+    // downloadMediaMessage 返回 Buffer (默认) 或 stream
+    const buffer = (await downloadMediaMessage(
+      msg,
+      'buffer',
+      {},
+      {
+        logger: this.baileysLogger,
+        // reuploadRequest 在需要 re-fetch URL 时调用; 简单用: 直接抛, Baileys 内部重试
+        reuploadRequest: (async () => {
+          throw new Error('reuploadRequest not implemented');
+        }) as never,
+      },
+    )) as Buffer;
+
+    if (!buffer || buffer.length === 0) return null;
+
+    const ext = this.guessExt(msg, msgType);
+    const filename = `${msg.key.id ?? Date.now()}${ext}`;
+    const mediaDir = getMediaDir(slotIndex);
+    const abs = path.join(mediaDir, filename);
+    fs.writeFileSync(abs, buffer);
+
+    // 存相对路径, 便于 data dir 迁移. 前端若要访问需走后端 serve-static (M9 接管 UI 再做)
+    return path.relative(process.cwd(), abs);
+  }
+
+  private guessExt(msg: WAMessage, msgType: MessageType): string {
+    const m = msg.message;
+    if (!m) return '.bin';
+    const mime =
+      m.imageMessage?.mimetype ??
+      m.audioMessage?.mimetype ??
+      m.videoMessage?.mimetype ??
+      m.documentMessage?.mimetype ??
+      null;
+    if (mime) {
+      const sub = mime.split('/')[1]?.split(';')[0];
+      if (sub) return `.${sub}`;
+    }
+    switch (msgType) {
+      case MessageType.Image:
+        return '.jpg';
+      case MessageType.Voice:
+        return '.ogg';
+      case MessageType.File:
+        return '.bin';
+      default:
+        return '.bin';
+    }
   }
 
   private async persistMessage(params: {
@@ -490,6 +791,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     direction: MessageDirection;
     msgType: MessageType;
     content: string | null;
+    mediaPath?: string | null;
     sentAt: Date;
     waMessageId: string | null;
     pushName?: string | null;
@@ -522,6 +824,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         direction: params.direction,
         msgType: params.msgType,
         content: params.content,
+        mediaPath: params.mediaPath ?? null,
         sentAt: params.sentAt,
         waMessageId: params.waMessageId,
       });
@@ -534,6 +837,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     if (!m) return MessageType.Other;
     if (m.conversation || m.extendedTextMessage) return MessageType.Text;
     if (m.imageMessage) return MessageType.Image;
+    if (m.videoMessage) return MessageType.Image; // 先归到 image 大类; MessageType 枚举暂无 video
     if (m.audioMessage) return MessageType.Voice;
     if (m.documentMessage) return MessageType.File;
     return MessageType.Other;
@@ -575,8 +879,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }, 30_000);
   }
 
-  // slots.clear 用: 把 pool 中的 socket 强制退出
+  // slots.clear 用: 把 pool 中的 socket 强制退出 + 取消重连
   async evictFromPool(slotId: number): Promise<void> {
+    this.clearReconnect(slotId);
     const sock = this.pool.get(slotId);
     if (!sock) return;
     try {
