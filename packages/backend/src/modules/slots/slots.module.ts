@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountSlotEntity } from './account-slot.entity';
 import { WaAccountEntity } from './wa-account.entity';
@@ -16,7 +16,7 @@ import { BaileysModule } from '../baileys/baileys.module';
       SimInfoEntity,
       AccountHealthEntity,
     ]),
-    BaileysModule,
+    forwardRef(() => BaileysModule),
   ],
   controllers: [SlotsController],
   providers: [SlotsService],

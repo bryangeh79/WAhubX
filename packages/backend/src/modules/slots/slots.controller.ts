@@ -1,15 +1,19 @@
 import {
   BadRequestException,
+  Body,
   Controller,
+  DefaultValuePipe,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { SlotsService } from './slots.service';
 import type { SlotResponseDto } from './dto/slot-response.dto';
+import { SendTextMessageDto } from './dto/send-message.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
 import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
 
@@ -45,14 +49,13 @@ export class SlotsController {
     return this.slots.clear(id, cur.tenantId);
   }
 
-  // ── M2 W1 扫码绑定现有号 (takeover) ────────────────────
+  // ── Bind 现有号 (M2 W1) ──────────────────────────────
   @Post(':id/bind-existing')
   @HttpCode(HttpStatus.OK)
   async startBind(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
   ): Promise<BindStatusView> {
-    // RBAC 先过一遍 findOne (租户隔离已做)
     await this.slots.findOne(id, cur.tenantId);
     return this.baileys.startBind(id);
   }
@@ -74,5 +77,53 @@ export class SlotsController {
   ): Promise<BindStatusView> {
     await this.slots.findOne(id, cur.tenantId);
     return this.baileys.cancelBind(id);
+  }
+
+  // ── 消息收发 (M2 W2) ──────────────────────────────────
+  @Post(':id/send')
+  @HttpCode(HttpStatus.OK)
+  async sendText(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SendTextMessageDto,
+  ) {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.sendText(id, dto.to, dto.text);
+  }
+
+  @Get(':id/contacts')
+  async contacts(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    const slot = await this.slots.findOne(id, cur.tenantId);
+    if (!slot.accountId) return [];
+    return this.baileys.listContacts(slot.accountId);
+  }
+
+  @Get(':id/messages')
+  async messages(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Query('contactId', new DefaultValuePipe(0), ParseIntPipe) contactId: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+    @Query('beforeId') beforeId?: string,
+  ) {
+    const slot = await this.slots.findOne(id, cur.tenantId);
+    if (!slot.accountId) return [];
+    return this.baileys.listMessages(slot.accountId, {
+      contactId: contactId || undefined,
+      limit,
+      beforeId,
+    });
+  }
+
+  @Get(':id/online-status')
+  async onlineStatus(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<{ online: boolean }> {
+    await this.slots.findOne(id, cur.tenantId);
+    return { online: this.baileys.isInPool(id) };
   }
 }

@@ -1,13 +1,19 @@
 import {
   ForbiddenException,
+  forwardRef,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
+import * as fs from 'node:fs';
 import { AccountSlotEntity, AccountSlotStatus } from './account-slot.entity';
+import { WaAccountEntity } from './wa-account.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
+import { BaileysService } from '../baileys/baileys.service';
+import { getSlotDir } from '../../common/storage';
 
 @Injectable()
 export class SlotsService {
@@ -16,6 +22,10 @@ export class SlotsService {
   constructor(
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
+    @InjectRepository(WaAccountEntity)
+    private readonly accountRepo: Repository<WaAccountEntity>,
+    @Inject(forwardRef(() => BaileysService))
+    private readonly baileys: BaileysService,
   ) {}
 
   // ── 初始化: 租户激活时调用, 预填 N 条 empty 槽位 ──────────────
@@ -62,8 +72,13 @@ export class SlotsService {
     return this.toResponse(slot);
   }
 
-  // ── clear: 置空槽位 (删 wa_account 关联 + 回到 empty 状态) ────
-  // M2 Baileys 接入前只做 DB 层清理, M2 后加文件系统清理 (profile_path 目录)
+  // ── clear: 置空槽位 (M2 W2 实装完整 FS + 在线 socket 清理) ────
+  // 步骤:
+  //   1. RBAC 检查
+  //   2. Pool 里有 socket 则先踢出 (end)
+  //   3. 删 wa_account 行 (CASCADE 触发 sim_info / account_health / wa_contact / chat_message 级联删)
+  //   4. rm -rf data/slots/<slotIndex>/ (Baileys creds + keys + 未来 media 缓存)
+  //   5. slot 回 empty, 保留 proxy_id (代理绑定不随账号清空)
   async clear(id: number, requesterTenantId: number | null): Promise<SlotResponseDto> {
     const slot = await this.slotRepo.findOne({
       where: { id },
@@ -72,14 +87,32 @@ export class SlotsService {
     if (!slot) throw new NotFoundException(`槽位 ${id} 不存在`);
     this.assertCanAccess(slot, requesterTenantId);
 
+    // 1. 踢出 pool socket (如果在线)
+    await this.baileys.evictFromPool(id);
+
+    // 2. 删 wa_account (CASCADE 带走 sim_info / account_health / wa_contact / chat_message)
+    const accountIdToDelete = slot.accountId;
     slot.accountId = null;
     slot.account = null;
     slot.status = AccountSlotStatus.Empty;
     slot.persona = null;
     slot.profilePath = null;
-    // proxyId 保留 (代理绑定不随账号清除)
     await this.slotRepo.save(slot);
-    // TODO(M2): 删 data/slots/<slotIndex>/ 目录, 删 wa_account 行 + 级联 sim_info/account_health
+    if (accountIdToDelete) {
+      await this.accountRepo.delete(accountIdToDelete);
+    }
+
+    // 3. rm -rf data/slots/<slotIndex>/
+    const slotDir = getSlotDir(slot.slotIndex);
+    try {
+      if (fs.existsSync(slotDir)) {
+        fs.rmSync(slotDir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      this.logger.warn(`slot ${id} 文件系统清理失败 (${slotDir}): ${err}`);
+      // 不阻塞: DB 已清干净, 磁盘残留留给用户手工处理
+    }
+
     this.logger.log(`Cleared slot ${id} (tenant ${slot.tenantId}, index ${slot.slotIndex})`);
     return this.toResponse(slot);
   }

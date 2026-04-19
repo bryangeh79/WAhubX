@@ -4,6 +4,7 @@ import type { MenuProps } from 'antd';
 import { api, extractErrorMessage } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { BindExistingModal } from './bind/BindExistingModal';
+import { ChatModal } from './chat/ChatModal';
 
 const { Title, Text } = Typography;
 
@@ -36,6 +37,7 @@ export function SlotsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bindTarget, setBindTarget] = useState<SlotItem | null>(null);
+  const [chatTarget, setChatTarget] = useState<SlotItem | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -101,7 +103,11 @@ export function SlotsPage() {
         <Row gutter={[12, 12]}>
           {slots.map((slot) => (
             <Col key={slot.id} xs={24} sm={12} md={8} lg={6} xl={4}>
-              <SlotCard slot={slot} onBindExisting={() => setBindTarget(slot)} />
+              <SlotCard
+                slot={slot}
+                onBindExisting={() => setBindTarget(slot)}
+                onManage={() => setChatTarget(slot)}
+              />
             </Col>
           ))}
         </Row>
@@ -119,11 +125,28 @@ export function SlotsPage() {
           }}
         />
       )}
+      {chatTarget && (
+        <ChatModal
+          slotId={chatTarget.id}
+          slotIndex={chatTarget.slotIndex}
+          phoneNumber={chatTarget.phoneNumber}
+          open={!!chatTarget}
+          onClose={() => setChatTarget(null)}
+        />
+      )}
     </div>
   );
 }
 
-function SlotCard({ slot, onBindExisting }: { slot: SlotItem; onBindExisting: () => void }) {
+function SlotCard({
+  slot,
+  onBindExisting,
+  onManage,
+}: {
+  slot: SlotItem;
+  onBindExisting: () => void;
+  onManage: () => void;
+}) {
   const meta = STATUS_META[slot.status];
   const isEmpty = slot.status === 'empty';
 
@@ -152,7 +175,7 @@ function SlotCard({ slot, onBindExisting }: { slot: SlotItem; onBindExisting: ()
             <Button size="small" type="link">启用 ▾</Button>
           </Dropdown>
         ) : (
-          <Button size="small" type="link" disabled title="M2 W2 实装发消息 / 管理">管理</Button>
+          <Button size="small" type="link" onClick={onManage}>管理</Button>
         )
       }
     >

@@ -1,16 +1,29 @@
-// M2 Week 1: 扫码绑定现有号 (takeover 模式)
-// 不做: 新号注册 (M2 W3), 发/收消息业务逻辑 (M2 W2), 队列并发仲裁 (M3)
+// M2 Week 2: 在 W1 bind-existing 基础上加常驻 socket pool + 消息收发
 //
 // 职责:
-//   1. 管理 slot 级 Baileys socket (每槽位独立 socket + 独立 auth state 目录)
-//   2. 捕获 connection.update.qr → 存内存供前端轮询
-//   3. connection.update.connection=open → 写 wa_account / 绑定 slot / close socket (takeover 模式默认不常驻; M2 W2 再做 online 常驻)
-//   4. 取消 / 超时 / 断线自清理
-import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { Boom } from '@hapi/boom';
-import { DataSource } from 'typeorm';
+//   1. BindContext Map — 进行中的 bind (QR 轮询) 短生命周期
+//   2. Pool Map<slotId, WASocket> — 已绑定账号的常驻 socket, 进程运行期保持在线
+//   3. onModuleInit: 读 DB 所有 slot.status in (warmup, active) + session_path 存在的, 批量 rehydrate
+//   4. bind 成功后: 不再 end(), 交给 pool; 持续监听 messages.upsert 入 DB
+//   5. sendText(slotId, to, text): 通过 pool 里的 socket 发
+//
+// 不做 (留后续):
+//   - 自动重连策略 (目前断线后直接移出 pool, 需手动 rebind) — M2 W3
+//   - 图片/语音/文件 — M2 W3 / M7
+//   - 消息去重 / 撤回 — M9
 import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { Boom } from '@hapi/boom';
+import { DataSource, Repository } from 'typeorm';
+import {
+  type WAMessage,
   type WASocket,
   DisconnectReason,
   default as makeWASocket,
@@ -18,17 +31,28 @@ import {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
+import * as fs from 'node:fs';
 import { AccountSlotEntity, AccountSlotStatus } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
+import { WaContactEntity } from './wa-contact.entity';
+import { ChatMessageEntity, MessageDirection, MessageType } from './chat-message.entity';
 import { getWaSessionDir } from '../../common/storage';
 
-export type BindState = 'idle' | 'starting' | 'qr' | 'connecting' | 'connected' | 'failed' | 'cancelled' | 'timeout';
+export type BindState =
+  | 'idle'
+  | 'starting'
+  | 'qr'
+  | 'connecting'
+  | 'connected'
+  | 'failed'
+  | 'cancelled'
+  | 'timeout';
 
 export interface BindStatusView {
   state: BindState;
-  qr: string | null;          // Baileys 生成的 raw 字符串, 前端用 qrcode lib 渲成图
-  phoneNumber: string | null; // connection=open 后填
+  qr: string | null;
+  phoneNumber: string | null;
   startedAt: string;
   lastEventAt: string;
   error: string | null;
@@ -43,27 +67,74 @@ interface BindContext {
   timeoutHandle: NodeJS.Timeout | null;
 }
 
-const BIND_TIMEOUT_MS = 2 * 60 * 1000; // 2 分钟没扫 = 超时
+const BIND_TIMEOUT_MS = 2 * 60 * 1000;
 
 @Injectable()
-export class BaileysService implements OnModuleDestroy {
+export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BaileysService.name);
-  private readonly contexts = new Map<number, BindContext>();
-  // Baileys 要一个 pino logger 实例; 用 silent 避免 noise, 错误走自己的 Nest Logger
+  private readonly bindContexts = new Map<number, BindContext>();
+  // 已绑定账号的常驻 socket 池: key=slotId
+  private readonly pool = new Map<number, WASocket>();
   private readonly baileysLogger = pino({ level: 'silent' });
+  // 动态拉来的 WA 版本, 进程生命周期复用避免反复请求
+  private waVersion: number[] | null = null;
 
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectRepository(WaContactEntity) private readonly contactRepo: Repository<WaContactEntity>,
+    @InjectRepository(ChatMessageEntity) private readonly messageRepo: Repository<ChatMessageEntity>,
+  ) {}
 
-  async onModuleDestroy() {
-    // 优雅关闭: 结束所有进行中 session
-    for (const ctx of this.contexts.values()) {
-      await this.teardown(ctx, 'cancelled', 'shutdown');
+  // ── 生命周期 ────────────────────────────────────────────
+  async onModuleInit(): Promise<void> {
+    try {
+      const { version, isLatest } = await fetchLatestBaileysVersion();
+      this.waVersion = version;
+      this.logger.log(`Baileys WA version ${version.join('.')} (isLatest=${isLatest})`);
+    } catch (err) {
+      this.logger.warn(`fetchLatestBaileysVersion failed, will retry per-bind: ${err}`);
     }
-    this.contexts.clear();
+
+    const slots = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .createQueryBuilder('s')
+      .where('s.status IN (:...st)', { st: [AccountSlotStatus.Warmup, AccountSlotStatus.Active] })
+      .andWhere('s.account_id IS NOT NULL')
+      .getMany();
+
+    for (const slot of slots) {
+      const sessionDir = getWaSessionDir(slot.slotIndex);
+      if (!fs.existsSync(sessionDir) || fs.readdirSync(sessionDir).length === 0) {
+        this.logger.warn(`slot ${slot.id}: 状态=${slot.status} 但 session 文件缺失, 跳过 rehydrate`);
+        continue;
+      }
+      try {
+        await this.spawnPooledSocket(slot.id, slot.slotIndex);
+        this.logger.log(`rehydrated slot ${slot.id} (index ${slot.slotIndex})`);
+      } catch (err) {
+        this.logger.error(`rehydrate slot ${slot.id} failed: ${err}`);
+      }
+    }
   }
 
+  async onModuleDestroy(): Promise<void> {
+    for (const ctx of this.bindContexts.values()) {
+      await this.teardownBind(ctx, 'cancelled', 'shutdown');
+    }
+    this.bindContexts.clear();
+    for (const [slotId, sock] of this.pool) {
+      try {
+        sock.end(undefined);
+      } catch {
+        // ignore
+      }
+      this.pool.delete(slotId);
+    }
+  }
+
+  // ── Bind 流程 ─────────────────────────────────────────
   getStatus(slotId: number): BindStatusView {
-    const ctx = this.contexts.get(slotId);
+    const ctx = this.bindContexts.get(slotId);
     if (!ctx) {
       return {
         state: 'idle',
@@ -78,18 +149,21 @@ export class BaileysService implements OnModuleDestroy {
   }
 
   async startBind(slotId: number): Promise<BindStatusView> {
-    const slot = await this.dataSource.getRepository(AccountSlotEntity).findOne({ where: { id: slotId } });
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
     if (slot.status !== AccountSlotStatus.Empty) {
-      throw new Error(`槽位 ${slotId} 当前状态 ${slot.status}, 只有 empty 槽位可绑定新号`);
+      throw new BadRequestException(
+        `槽位 ${slotId} 当前状态 ${slot.status}, 只有 empty 槽位可绑定新号`,
+      );
     }
 
-    // 已有进行中 session → 直接返回状态 (幂等)
-    const existing = this.contexts.get(slotId);
+    const existing = this.bindContexts.get(slotId);
     if (existing && ['qr', 'connecting', 'starting'].includes(existing.status.state)) {
       return { ...existing.status };
     }
-    if (existing) await this.teardown(existing, 'cancelled', 'restarted');
+    if (existing) await this.teardownBind(existing, 'cancelled', 'restarted');
 
     const ctx: BindContext = {
       slotId,
@@ -106,45 +180,97 @@ export class BaileysService implements OnModuleDestroy {
       },
       timeoutHandle: null,
     };
-    this.contexts.set(slotId, ctx);
+    this.bindContexts.set(slotId, ctx);
 
-    // 异步启动 socket, 不阻塞 controller 响应
-    void this.spawnSocket(ctx).catch((err) => {
-      this.logger.error(`slot ${slotId} spawn failed: ${err}`);
+    void this.spawnBindSocket(ctx).catch((err) => {
+      this.logger.error(`slot ${slotId} spawnBindSocket failed: ${err}`);
       ctx.status.state = 'failed';
       ctx.status.error = err instanceof Error ? err.message : String(err);
       ctx.status.lastEventAt = new Date().toISOString();
     });
 
     ctx.timeoutHandle = setTimeout(() => {
-      void this.teardown(ctx, 'timeout', '2 分钟内未完成扫码');
+      void this.teardownBind(ctx, 'timeout', '2 分钟内未完成扫码');
     }, BIND_TIMEOUT_MS);
 
     return { ...ctx.status };
   }
 
   async cancelBind(slotId: number): Promise<BindStatusView> {
-    const ctx = this.contexts.get(slotId);
-    if (!ctx) {
-      return this.getStatus(slotId);
-    }
-    await this.teardown(ctx, 'cancelled', 'user cancelled');
+    const ctx = this.bindContexts.get(slotId);
+    if (!ctx) return this.getStatus(slotId);
+    await this.teardownBind(ctx, 'cancelled', 'user cancelled');
     return { ...ctx.status };
   }
 
-  // ── 内部 ──────────────────────────────────────────────
-  private async spawnSocket(ctx: BindContext): Promise<void> {
+  // ── 发消息 (M2 W2 只支持 text) ─────────────────────────
+  async sendText(slotId: number, to: string, text: string): Promise<{ waMessageId: string | null }> {
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      throw new BadRequestException(
+        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+      );
+    }
+    const jid = this.normalizeJid(to);
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+
+    const sendResult = await sock.sendMessage(jid, { text });
+    const waMessageId = sendResult?.key?.id ?? null;
+
+    await this.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: jid,
+      direction: MessageDirection.Out,
+      msgType: MessageType.Text,
+      content: text,
+      sentAt: new Date(),
+      waMessageId,
+    });
+
+    return { waMessageId };
+  }
+
+  // ── 读取 (controller 用) ───────────────────────────────
+  async listContacts(accountId: number) {
+    return this.contactRepo.find({
+      where: { accountId },
+      order: { lastMessageAt: 'DESC' },
+    });
+  }
+
+  async listMessages(
+    accountId: number,
+    opts: { contactId?: number; limit?: number; beforeId?: string },
+  ) {
+    const qb = this.messageRepo
+      .createQueryBuilder('m')
+      .where('m.account_id = :aid', { aid: accountId });
+    if (opts.contactId) qb.andWhere('m.contact_id = :cid', { cid: opts.contactId });
+    if (opts.beforeId) qb.andWhere('m.id < :bid', { bid: opts.beforeId });
+    return qb
+      .orderBy('m.id', 'DESC')
+      .take(Math.min(200, Math.max(1, opts.limit ?? 50)))
+      .getMany();
+  }
+
+  // ── 内部: socket 生命周期 ─────────────────────────────
+  private async ensureWaVersion(): Promise<number[]> {
+    if (this.waVersion) return this.waVersion;
+    const { version } = await fetchLatestBaileysVersion();
+    this.waVersion = version;
+    return version;
+  }
+
+  private async spawnBindSocket(ctx: BindContext): Promise<void> {
     const sessionDir = getWaSessionDir(ctx.slotIndex);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-    // Baileys 6.7.x 硬编码的 WA web 客户端版本会过期导致 405 (服务器拒绝).
-    // fetchLatestBaileysVersion 从 baileys 官方源拉最新可用版本.
-    // 离线部署场景 (生产) 这里会 fail, M10 加离线 fallback 版本缓存.
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    this.logger.log(`Baileys WA version ${version.join('.')} (isLatest=${isLatest})`);
+    const version = await this.ensureWaVersion();
 
     const sock = makeWASocket({
-      version,
+      version: version as [number, number, number],
       auth: state,
       printQRInTerminal: false,
       logger: this.baileysLogger,
@@ -163,48 +289,43 @@ export class BaileysService implements OnModuleDestroy {
       if (qr) {
         ctx.status.state = 'qr';
         ctx.status.qr = qr;
-        this.logger.log(`slot ${ctx.slotId} QR refreshed`);
       }
-
-      if (connection === 'connecting') {
-        ctx.status.state = 'connecting';
-      }
+      if (connection === 'connecting') ctx.status.state = 'connecting';
 
       if (connection === 'open') {
-        void this.onConnectionOpen(ctx);
+        void this.onBindConnectionOpen(ctx, sock, saveCreds);
       }
 
-      if (connection === 'close') {
+      if (connection === 'close' && ctx.status.state !== 'connected') {
         const code =
           lastDisconnect?.error instanceof Boom
             ? (lastDisconnect.error as Boom).output.statusCode
             : 0;
-        // 登出 / 受限 / 替换 → 失败; 其他可能是短暂断线, M2 W1 统一当失败处理简化逻辑
-        if (ctx.status.state !== 'connected') {
-          const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown';
-          this.logger.warn(`slot ${ctx.slotId} connection closed before pairing: ${reason} (${code})`);
-          void this.teardown(ctx, 'failed', `连接关闭 (${reason})`);
-        }
+        const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown';
+        this.logger.warn(`slot ${ctx.slotId} bind connection closed: ${reason} (${code})`);
+        void this.teardownBind(ctx, 'failed', `连接关闭 (${reason})`);
       }
     });
   }
 
-  private async onConnectionOpen(ctx: BindContext): Promise<void> {
+  /**
+   * 扫码成功: DB 落库 + 把 socket 转给 pool 常驻 (*不* 关闭 socket, W1 行为变更)
+   */
+  private async onBindConnectionOpen(
+    ctx: BindContext,
+    sock: WASocket,
+    saveCreds: () => Promise<void>,
+  ): Promise<void> {
     try {
-      const sock = ctx.sock;
-      if (!sock?.user?.id) {
-        throw new Error('socket.user.id 缺失, 无法获取手机号');
-      }
-
-      // sock.user.id 形如 "60123456789:11@s.whatsapp.net"; 取冒号前作为 phone
+      if (!sock.user?.id) throw new Error('socket.user.id 缺失');
       const phone = sock.user.id.split(':')[0].split('@')[0];
       const sessionPath = getWaSessionDir(ctx.slotIndex);
 
+      let accountId!: number;
       await this.dataSource.transaction(async (manager) => {
         const slot = await manager.findOne(AccountSlotEntity, { where: { id: ctx.slotId } });
-        if (!slot) throw new Error(`slot ${ctx.slotId} 不存在 (race with clear?)`);
+        if (!slot) throw new Error(`slot ${ctx.slotId} 不存在 (race)`);
 
-        // 同一手机号若已在其他槽位注册, 反对重复绑定
         const existing = await manager.findOne(WaAccountEntity, { where: { phoneNumber: phone } });
         if (existing) {
           throw new Error(`手机号 ${phone} 已在其他槽位注册 (account_id=${existing.id})`);
@@ -219,18 +340,21 @@ export class BaileysService implements OnModuleDestroy {
           waNickname: sock.user?.name ?? null,
         });
         const savedAccount = await manager.save(waAccount);
+        accountId = savedAccount.id;
 
-        await manager.save(manager.create(AccountHealthEntity, {
-          accountId: savedAccount.id,
-          healthScore: 100,
-          riskLevel: RiskLevel.Low,
-          riskFlags: [],
-          totalSent: 0,
-          totalReceived: 0,
-        }));
+        await manager.save(
+          manager.create(AccountHealthEntity, {
+            accountId: savedAccount.id,
+            healthScore: 100,
+            riskLevel: RiskLevel.Low,
+            riskFlags: [],
+            totalSent: 0,
+            totalReceived: 0,
+          }),
+        );
 
         slot.accountId = savedAccount.id;
-        slot.status = AccountSlotStatus.Warmup; // 扫码进来直接进养号 (M5 养号日历接入)
+        slot.status = AccountSlotStatus.Warmup;
         slot.profilePath = sessionPath;
         await manager.save(slot);
       });
@@ -238,45 +362,232 @@ export class BaileysService implements OnModuleDestroy {
       ctx.status.state = 'connected';
       ctx.status.phoneNumber = phone;
       ctx.status.lastEventAt = new Date().toISOString();
-      this.logger.log(`slot ${ctx.slotId} bound phone ${phone}`);
+      this.logger.log(`slot ${ctx.slotId} bound phone ${phone}, handing off to pool`);
 
-      // M2 W1 takeover 只做绑定, 不维持长连接. 关 socket 让 creds 落盘即可.
-      await this.teardown(ctx, 'connected', null);
+      this.attachPoolListeners(ctx.slotId, accountId, sock, saveCreds);
+      this.pool.set(ctx.slotId, sock);
+
+      if (ctx.timeoutHandle) {
+        clearTimeout(ctx.timeoutHandle);
+        ctx.timeoutHandle = null;
+      }
+      setTimeout(() => {
+        if (this.bindContexts.get(ctx.slotId) === ctx) this.bindContexts.delete(ctx.slotId);
+      }, 30_000);
     } catch (err) {
-      this.logger.error(`slot ${ctx.slotId} onConnectionOpen failed: ${err}`);
+      this.logger.error(`slot ${ctx.slotId} onBindConnectionOpen failed: ${err}`);
       ctx.status.state = 'failed';
       ctx.status.error = err instanceof Error ? err.message : String(err);
-      await this.teardown(ctx, 'failed', ctx.status.error);
+      await this.teardownBind(ctx, 'failed', ctx.status.error);
     }
   }
 
-  private async teardown(ctx: BindContext, finalState: BindState, errorMsg: string | null): Promise<void> {
+  /**
+   * Rehydrate 路径: 从磁盘 session 起常驻 socket, 挂到 pool.
+   * creds 已失效时 pool listener 会收到 close(loggedOut), 自动移出 pool.
+   */
+  private async spawnPooledSocket(slotId: number, slotIndex: number): Promise<void> {
+    const sessionDir = getWaSessionDir(slotIndex);
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const version = await this.ensureWaVersion();
+
+    const sock = makeWASocket({
+      version: version as [number, number, number],
+      auth: state,
+      printQRInTerminal: false,
+      logger: this.baileysLogger,
+      browser: ['WAhubX', 'Desktop', '1.0.0'],
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+    });
+
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) {
+      sock.end(undefined);
+      throw new Error(`slot ${slotId} missing accountId during rehydrate`);
+    }
+    this.attachPoolListeners(slotId, slot.accountId, sock, saveCreds);
+    this.pool.set(slotId, sock);
+  }
+
+  private attachPoolListeners(
+    slotId: number,
+    accountId: number,
+    sock: WASocket,
+    saveCreds: () => Promise<void>,
+  ): void {
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect } = update;
+      if (connection === 'close') {
+        const code =
+          lastDisconnect?.error instanceof Boom
+            ? (lastDisconnect.error as Boom).output.statusCode
+            : 0;
+        if (code === DisconnectReason.loggedOut) {
+          this.logger.warn(`slot ${slotId} logged out remotely — removing from pool + marking suspended`);
+          this.pool.delete(slotId);
+          void this.markSlotSuspended(slotId);
+        } else {
+          this.logger.warn(`slot ${slotId} pool socket closed (code=${code}), removing from pool (无自动重连, M2 W3)`);
+          this.pool.delete(slotId);
+        }
+      }
+    });
+
+    sock.ev.on('messages.upsert', (evt) => {
+      for (const msg of evt.messages) {
+        void this.persistIncomingMessage(accountId, msg, evt.type === 'notify').catch((err) => {
+          this.logger.error(`slot ${slotId} persist inbound failed: ${err}`);
+        });
+      }
+    });
+  }
+
+  private async markSlotSuspended(slotId: number): Promise<void> {
+    await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .update(slotId, { status: AccountSlotStatus.Suspended });
+  }
+
+  private async persistIncomingMessage(
+    accountId: number,
+    msg: WAMessage,
+    isLive: boolean,
+  ): Promise<void> {
+    if (!msg.key.remoteJid) return;
+    if (msg.key.fromMe) return;
+
+    const text =
+      msg.message?.conversation ??
+      msg.message?.extendedTextMessage?.text ??
+      msg.message?.imageMessage?.caption ??
+      null;
+    const msgType = this.inferMsgType(msg);
+    const sentAt = msg.messageTimestamp
+      ? new Date(Number(msg.messageTimestamp) * 1000)
+      : new Date();
+
+    await this.persistMessage({
+      accountId,
+      remoteJid: msg.key.remoteJid,
+      direction: MessageDirection.In,
+      msgType,
+      content: text,
+      sentAt,
+      waMessageId: msg.key.id ?? null,
+      pushName: msg.pushName ?? null,
+      updateContactLastMessageAt: isLive,
+    });
+  }
+
+  private async persistMessage(params: {
+    accountId: number;
+    remoteJid: string;
+    direction: MessageDirection;
+    msgType: MessageType;
+    content: string | null;
+    sentAt: Date;
+    waMessageId: string | null;
+    pushName?: string | null;
+    updateContactLastMessageAt?: boolean;
+  }): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      let contact = await manager.findOne(WaContactEntity, {
+        where: { accountId: params.accountId, remoteJid: params.remoteJid },
+      });
+      if (!contact) {
+        contact = manager.create(WaContactEntity, {
+          accountId: params.accountId,
+          remoteJid: params.remoteJid,
+          displayName: params.pushName ?? null,
+          lastMessageAt: (params.updateContactLastMessageAt ?? true) ? params.sentAt : null,
+        });
+        contact = await manager.save(contact);
+      } else {
+        const patch: { displayName?: string | null; lastMessageAt?: Date } = {};
+        if (!contact.displayName && params.pushName) patch.displayName = params.pushName;
+        if (params.updateContactLastMessageAt ?? true) patch.lastMessageAt = params.sentAt;
+        if (Object.keys(patch).length > 0) {
+          await manager.update(WaContactEntity, contact.id, patch);
+        }
+      }
+
+      const msg = manager.create(ChatMessageEntity, {
+        accountId: params.accountId,
+        contactId: contact.id,
+        direction: params.direction,
+        msgType: params.msgType,
+        content: params.content,
+        sentAt: params.sentAt,
+        waMessageId: params.waMessageId,
+      });
+      await manager.save(msg);
+    });
+  }
+
+  private inferMsgType(msg: WAMessage): MessageType {
+    const m = msg.message;
+    if (!m) return MessageType.Other;
+    if (m.conversation || m.extendedTextMessage) return MessageType.Text;
+    if (m.imageMessage) return MessageType.Image;
+    if (m.audioMessage) return MessageType.Voice;
+    if (m.documentMessage) return MessageType.File;
+    return MessageType.Other;
+  }
+
+  private normalizeJid(input: string): string {
+    const trimmed = input.trim();
+    if (trimmed.includes('@')) return trimmed;
+    const digits = trimmed.replace(/[^0-9]/g, '');
+    if (!digits) throw new BadRequestException(`手机号 "${input}" 无效`);
+    return `${digits}@s.whatsapp.net`;
+  }
+
+  private async teardownBind(
+    ctx: BindContext,
+    finalState: BindState,
+    errorMsg: string | null,
+  ): Promise<void> {
     if (ctx.timeoutHandle) {
       clearTimeout(ctx.timeoutHandle);
       ctx.timeoutHandle = null;
     }
     if (ctx.sock) {
       try {
-        // logout 会让服务器端也废弃 session. 但 takeover 模式我们是要保留 session 登录状态,
-        // 所以只 close WebSocket (end), 不 logout.
         ctx.sock.end(undefined);
       } catch {
-        // close 异常忽略
+        // ignore
       }
       ctx.sock = null;
     }
-    // 状态机: 如果已经 connected, 不改写; 否则 finalState 落地
     if (ctx.status.state !== 'connected') {
       ctx.status.state = finalState;
       ctx.status.error = errorMsg;
     }
     ctx.status.lastEventAt = new Date().toISOString();
 
-    // 保留 ctx 在 Map 里约 30 秒, 让前端轮询到 final state; 之后清
     setTimeout(() => {
-      if (this.contexts.get(ctx.slotId) === ctx) {
-        this.contexts.delete(ctx.slotId);
-      }
+      if (this.bindContexts.get(ctx.slotId) === ctx) this.bindContexts.delete(ctx.slotId);
     }, 30_000);
+  }
+
+  // slots.clear 用: 把 pool 中的 socket 强制退出
+  async evictFromPool(slotId: number): Promise<void> {
+    const sock = this.pool.get(slotId);
+    if (!sock) return;
+    try {
+      sock.end(undefined);
+    } catch {
+      // ignore
+    }
+    this.pool.delete(slotId);
+  }
+
+  isInPool(slotId: number): boolean {
+    return this.pool.has(slotId);
   }
 }
