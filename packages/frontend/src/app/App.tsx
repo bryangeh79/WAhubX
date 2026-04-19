@@ -4,6 +4,7 @@ import { DashboardPage } from '@/pages/DashboardPage';
 import { HealthPage } from '@/pages/HealthPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { ActivatePage } from '@/pages/ActivatePage';
+import { SlotsPage } from '@/pages/SlotsPage';
 import { useAuth } from '@/auth/AuthContext';
 import { ActivateGuard, LoginGuard, ProtectedRoute } from '@/auth/RouteGate';
 
@@ -13,7 +14,11 @@ function Shell({ children }: { children: React.ReactNode }) {
   const { user, licenseStatus, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const selected = location.pathname.startsWith('/health') ? ['health'] : ['dashboard'];
+  const selected = location.pathname.startsWith('/health')
+    ? ['health']
+    : location.pathname.startsWith('/slots')
+      ? ['slots']
+      : ['dashboard'];
 
   const handleLogout = async () => {
     await logout();
@@ -30,6 +35,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           selectedKeys={selected}
           items={[
             { key: 'dashboard', label: <Link to="/">仪表盘</Link> },
+            { key: 'slots', label: <Link to="/slots">账号槽位</Link> },
             { key: 'health', label: <Link to="/health">系统健康</Link> },
           ]}
           style={{ flex: 1, minWidth: 0 }}
@@ -75,6 +81,16 @@ export function App() {
           <ProtectedRoute>
             <Shell>
               <DashboardPage />
+            </Shell>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/slots"
+        element={
+          <ProtectedRoute>
+            <Shell>
+              <SlotsPage />
             </Shell>
           </ProtectedRoute>
         }

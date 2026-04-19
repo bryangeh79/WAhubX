@@ -9,6 +9,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { HealthModule } from './modules/health/health.module';
 import { LicenseModule } from './modules/licenses/license.module';
+import { SlotsModule } from './modules/slots/slots.module';
 import { UsersModule } from './modules/users/users.module';
 
 @Module({
@@ -23,6 +24,7 @@ import { UsersModule } from './modules/users/users.module';
     DatabaseModule,
     UsersModule,
     AuthModule,
+    SlotsModule,
     LicenseModule,
     HealthModule,
   ],

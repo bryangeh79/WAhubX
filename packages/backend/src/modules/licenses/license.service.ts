@@ -11,6 +11,7 @@ import { DataSource, IsNull, Repository } from 'typeorm';
 import { LicenseEntity } from './license.entity';
 import { PLAN_SLOT_LIMIT, TenantEntity, TenantStatus } from '../tenants/tenant.entity';
 import { User, UserRole, UserStatus } from '../users/user.entity';
+import { SlotsService } from '../slots/slots.service';
 import { getMachineId } from './machine-id.util';
 import type { GenerateLicenseDto } from './dto/generate-license.dto';
 import type { ActivateLicenseDto } from './dto/activate-license.dto';
@@ -55,6 +56,7 @@ export class LicenseService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(LicenseEntity) private readonly licenseRepo: Repository<LicenseEntity>,
+    private readonly slots: SlotsService,
   ) {
     this.machineId = getMachineId();
     this.logger.log(`Machine fingerprint: ${this.machineId.substring(0, 8)}...${this.machineId.slice(-4)}`);
@@ -153,6 +155,9 @@ export class LicenseService {
       license.issuedAt = new Date();
       license.lastVerifiedAt = new Date();
       await manager.save(license);
+
+      // 激活时自动为租户开 N 条 empty 槽 (N = slot_limit)
+      await this.slots.seedForTenant(manager, license.tenantId!, license.tenant.slotLimit);
 
       this.logger.log(
         `Activated license ${dto.licenseKey} on machine ${this.machineId.substring(0, 8)}... (tenant ${license.tenantId}, admin ${emailLc})`,
