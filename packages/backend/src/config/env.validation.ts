@@ -1,4 +1,4 @@
-import { plainToInstance } from 'class-transformer';
+import { plainToInstance, Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min, validateSync } from 'class-validator';
 
 export enum NodeEnv {
@@ -21,22 +21,35 @@ export class EnvSchema {
   @IsEnum(NodeEnv)
   NODE_ENV: NodeEnv = NodeEnv.Development;
 
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(65535)
-  PORT = 3000;
+  PORT: number = 3000;
 
   @IsEnum(LogLevel)
   LOG_LEVEL: LogLevel = LogLevel.Info;
 
-  // DB (M1 任务 1.4 接入, 现在留可选)
-  @IsOptional() @IsString() DB_HOST?: string;
-  @IsOptional() @IsInt() DB_PORT?: number;
-  @IsOptional() @IsString() DB_USERNAME?: string;
-  @IsOptional() @IsString() DB_PASSWORD?: string;
-  @IsOptional() @IsString() DB_DATABASE?: string;
+  // ───────── Database (required) ─────────
+  @IsString()
+  DB_HOST!: string;
 
-  // JWT (M1 Week 2)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  DB_PORT!: number;
+
+  @IsString()
+  DB_USERNAME!: string;
+
+  @IsString()
+  DB_PASSWORD!: string;
+
+  @IsString()
+  DB_DATABASE!: string;
+
+  // ───────── JWT (M1 Week 2, 暂留可选) ─────────
   @IsOptional() @IsString() JWT_ACCESS_SECRET?: string;
   @IsOptional() @IsString() JWT_REFRESH_SECRET?: string;
   @IsOptional() @IsString() JWT_ACCESS_TTL?: string;

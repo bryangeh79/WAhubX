@@ -1,0 +1,35 @@
+# WAhubX 本地开发依赖（仅 M1 需要的服务）
+# 启动: docker compose -f docker-compose.dev.yml up -d
+# 停止: docker compose -f docker-compose.dev.yml down
+# 清库: docker compose -f docker-compose.dev.yml down -v
+#
+# 注意:
+# - 生产环境用租户本机原生 PG，不用 Docker (详见 WAhubX_技术交接文档 § 9)
+# - Redis 将在 M3 任务队列阶段追加进来
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wahubx-dev-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wahubx
+      POSTGRES_USER: wahubx
+      POSTGRES_PASSWORD: wahubx
+      TZ: Asia/Kuala_Lumpur
+      PGTZ: Asia/Kuala_Lumpur
+    # 主机端口 5433 (避开 FAhubX 本机 PG 在 5432 的占用)
+    # 容器内仍是 5432
+    ports:
+      - '5433:5432'
+    volumes:
+      - wahubx-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wahubx -d wahubx']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  wahubx-pg-data:
+    name: wahubx-dev-pg-data
