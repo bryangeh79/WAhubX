@@ -4,6 +4,63 @@
 
 ---
 
+## [unreleased · M11 Day 2] · 2026-04-20 · Ed25519 签名/验证模块 (standalone crypto)
+
+**Scope**: 纯 crypto 算法 · 不 import M8 health/dispatcher/risk · 不 import M10 backup · standalone.
+观察期并行允许.
+
+### Added (`packages/backend/src/modules/signing/`)
+
+- `types.ts` · `WupdManifest` interface · 字段: `from_version / to_version / app_sha256 /
+  migrations[] / health_check / rollback / created_at / signature`
+- `public-key.ts` · `WAHUBX_UPDATE_PUBLIC_KEY_HEX` 硬编码 (当前 dev placeholder 全 0 ·
+  production build 必须替换) · `getUpdatePublicKeyDer()` 拼 SPKI DER 给 crypto.verify
+- `manifest-codec.ts`:
+  - `canonicalSerialize()` · 递归 sort object keys + 紧凑 JSON + UTF-8 · 跨平台 bit-for-bit 一致
+  - `parseSignatureField()` / `buildSignatureField()` · `ed25519:<base64url-64B>` 编解码
+- `ed25519-signer.service.ts` · **dev/CI 用** · `sign(manifest, privateKeyPem)` 返带签名 manifest
+  · `generateKeyPair()` 静态方法 (一次性发版用)
+- `ed25519-verifier.service.ts` · **production backend 运行** · `verify(manifest, {publicKeyHex?,
+  allowDevPlaceholder?})` 返 `{ok:true}` 或 `{ok:false, code, message}` ·
+  `checkPublicKeyHealth()` 启动自检 · production 模式下全 0 key 直接拒
+- `signing.module.ts` · `@Global` · providers = [Signer, Verifier] · exports 同
+
+### Fail codes (`VerifyFailCode`)
+
+- `MISSING_SIGNATURE` · 未签
+- `SIGNATURE_FORMAT` · 非 `scheme:b64` 格式
+- `UNSUPPORTED_SIG_SCHEME` · prefix 不是 `ed25519` (V2 换算法时换)
+- `INVALID_SIGNATURE_LENGTH` · base64url 解码后非 64B
+- `SIGNATURE_MISMATCH` · 签名有效 · 但 payload 被改 / 用错公钥验
+- `DEV_PLACEHOLDER_KEY_IN_PROD` · production build 下公钥是全 0 · 拒
+
+### Tests (+ 13 new UT · 184/184 全绿)
+
+**`ed25519.spec.ts`** (13 ut):
+- Signer 4: sign 返正确格式 · 同输入 deterministic · 非 Ed25519 key 拒 · generateKeyPair 返 PEM+hex
+- Verifier 7: 正确签 ok · 篡改 payload → MISMATCH · 截断签名 → LENGTH/MISMATCH · 未签 → MISSING ·
+  格式非法 → FORMAT · 不同密钥对 → MISMATCH · production+dev key → PLACEHOLDER_IN_PROD
+- Codec 2: canonical 不同 key 顺序同输出 · signature 字段不参与序列化
+
+### Constraints
+
+- 当前 `WAHUBX_UPDATE_PUBLIC_KEY_HEX` 是 **dev placeholder** (全 0) · production build 前必须换真公钥
+  - 生成: `openssl genpkey -algorithm ed25519 -out privkey.pem` + 提取 public hex 填入
+  - 私钥离线保管 · 不入仓库
+  - build.bat 应加检查 · 若 hex 全 0 且 `NODE_ENV=production` 拒编译
+- **不**在本模块跑 smoke 级签名 · 真 `.wupd` 签名 + 真升级流程在 Day 3-4 UpdateService + Day 5 smoke
+- Ed25519 选型依据 (§拍板 Z1): node built-in crypto 原生支持 · 32B 公钥小 · deterministic 签名
+- 双校验职责 (D 决策):
+  - Installer (Inno Setup Pascal) 校 `app_sha256` · Day 3-4 补 .iss 里 code
+  - Backend (本模块 Verifier) 校 manifest signature · onModuleInit `checkPublicKeyHealth` 启动自检
+
+### Dry-run observation 并行进行中
+
+Day 2 期间 dry-run 保持 live · backend pid 稳定 · risk_event 无新增异常 · acc 1/2 未触发降级.
+22:45 关 dry-run + 验真降级.
+
+---
+
 ## [unreleased · M11 Day 1.5] · 2026-04-20 · Installer 基座 (Inno Setup .iss + Node 嵌入 placeholder)
 
 **Scope**: 纯配置 + 占位文件 · 零 runtime / backend / frontend 改动 · dry-run 观察期并行允许

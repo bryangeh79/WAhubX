@@ -20,6 +20,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AccountHealthModule } from './modules/account-health/account-health.module';
 import { TakeoverModule } from './modules/takeover/takeover.module';
 import { BackupModule } from './modules/backup/backup.module';
+import { SigningModule } from './modules/signing/signing.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { BackupModule } from './modules/backup/backup.module';
     AccountHealthModule,
     TakeoverModule,
     BackupModule,
+    SigningModule,
     TasksModule,
     HealthModule,
   ],
