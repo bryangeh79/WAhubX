@@ -50,6 +50,13 @@ export function getPreImportDir(): string {
   return dir;
 }
 
+// M11 Day 4 · .wupd apply 前自动快照
+export function getPreUpdateDir(): string {
+  const dir = path.join(getBackupsRoot(), 'pre-update');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /** 日期 ISO 'YYYY-MM-DD' 本地时区 */
 export function todayISO(now: Date = new Date()): string {
   const y = now.getFullYear();

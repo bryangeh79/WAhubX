@@ -4,6 +4,51 @@
 
 ---
 
+## [unreleased · M11 Day 4 prepare] · 2026-04-20 · UpdateService.apply 准备阶段 · 无 process.exit
+
+**Scope**: 补 apply 前期 (preview + pre-update backup + staging + signal file) · **不含**
+process.exit (Day 5 smoke 真装). 保证 backend 不会自己 kill 自己 · 观察期继续安全.
+
+### Added / Changed
+
+- `backup-export.service.ts` · `ExportSource` enum 加 `'pre-update'` · `backup-paths.ts` 加
+  `getPreUpdateDir()` · `backups/pre-update/`
+- `backup/wab-codec.ts` · `WabManifest.source` 类型加 `'pre-update'`
+- `update/apply-signal.ts` (新) · Signal File 机制
+  - `ApplySignal` interface · v1 格式 · staging_path / pre_update_wab_path / old_app_rename_to / manifest / written_at
+  - `getSignalFilePath()` · 固定路径 `<base>/updates/staging/apply.signal.json`
+  - `readSignal()` / `writeSignal()` / `clearSignal()` / `assertNoStaleSignal()`
+- `update.service.ts` · apply 真实装
+  - `apply(wupdBuf, {dryRun?})` · 返 `PREPARED` / `PREVIEW_REJECTED` / `EXPORT_SVC_UNAVAILABLE`
+  - 流程: preview check → assertNoStaleSignal → exportSvc.export('pre-update') → extractPayload
+    → 落 staging + 写 signal file → 返 `{staging_path, pre_update_wab_path, signal_path, manifest}`
+  - **不 process.exit** · Day 5 smoke 时加 (需 installer 外壳配合)
+  - Double-check: sha256 在 preview 后再验一次 · 任一 mismatch throw `APPLY_ABORT`
+- `version.controller.ts` · `POST /version/apply-update` 接 `body.dryRun` 参数传给 service
+
+### Day 5 smoke 剩余 TODO (已明注释)
+
+- 真 `.wupd` 签名 · 用 M11 Day 2 SignerService.generateKeyPair · 真公钥填入 `public-key.ts`
+- installer 外壳 (Inno Setup 编译的 util 或独立 exe) · 监测 signal file · 执行 rename
+- `process.exit(0)` · 补在 apply 末尾 · backend 自杀重启
+- End-to-end 本机升级 · bump 0.11.0-m11 → 0.11.1 · 验 app/ 换了 + migration 跑了 + /health 200
+- 故意 broken .wupd (篡改 app.tar) · 验 rollback 真触发
+
+### Tests (+1 新 · 200/200 全绿 · 里程碑 200)
+
+`update.service.spec.ts` (16 ut · Day 3 的 15 + Day 4 新增 2 · 替换 Day 3 NOT_IMPLEMENTED 路径):
+- apply · 无 BackupExportService 注入 → `EXPORT_SVC_UNAVAILABLE`
+- apply · preview rejected → `PREVIEW_REJECTED` · 不进 staging
+
+### 安全边界确认
+
+- apply **不** process.exit · live backend 不受影响
+- 写 signal file 在独立路径 (`updates/staging/`) · 不干扰 data/ 或 backups/
+- assertNoStaleSignal 防重复 apply · 上次残留必须手动清
+- dry-run 观察期进行中 · backend pid 不变 · 无 regression
+
+---
+
 ## [unreleased · M11 Day 3] · 2026-04-20 · UpdateService backend · .wupd preview + 路由
 
 **Scope**: 新 backend module · `/version/*` 路由 · 不 import M8 health/dispatcher/risk. apply

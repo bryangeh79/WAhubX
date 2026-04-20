@@ -246,13 +246,72 @@ describe('wupd-codec · verifyAppSha256 / verifyMigrations', () => {
   });
 });
 
-describe('UpdateService · apply (Day 3 skeleton)', () => {
-  it('apply 返 NOT_IMPLEMENTED · 不动任何状态', async () => {
+describe('UpdateService · apply (Day 4 prepare phase)', () => {
+  it('apply · 无 BackupExportService 注入 · 返 EXPORT_SVC_UNAVAILABLE', async () => {
     const mockVersion = new VersionService();
+    jest.spyOn(mockVersion, 'getCurrent').mockReturnValue({
+      app_version: '0.10.0-m10',
+      installer_fp: { arch: 'x64', osMajor: 'win10', ramBucket: '16G', createdAt: '2026-04-20T00:00:00.000Z' },
+    });
+    const verifier = new Ed25519VerifierService();
+    const svc = new UpdateService(mockVersion, verifier /* no exportSvc */);
+
+    // 需真 buffer 让 preview 过 · 复用 happy-path 构造
+    const appTarLocal = Buffer.from('local-app-tar-' + 'x'.repeat(500));
+    const appShaLocal = crypto.createHash('sha256').update(appTarLocal).digest('hex');
+    const manifest: WupdManifest = {
+      from_version: '0.10.0-m10',
+      to_version: '0.11.0-m11',
+      app_sha256: appShaLocal,
+      migrations: [],
+      health_check: { endpoint: '/api/v1/health', timeout_sec: 60, expect_status: 200 },
+      rollback: { strategy: 'restore_pre_update_snapshot' },
+      created_at: '2026-04-20T17:00:00.000Z',
+    };
+    const signed = signer.sign(manifest, testKeys.privateKeyPem);
+    const wupd = await buildWupd({
+      manifest: signed,
+      appTar: appTarLocal,
+      migrations: new Map(),
+    });
+    jest.spyOn(verifier, 'verify').mockImplementation((m, opts) =>
+      new Ed25519VerifierService().verify(m, { ...opts, publicKeyHex: testKeys.publicKeyHex }),
+    );
+    const result = await svc.apply(wupd);
+    expect(result.code).toBe('EXPORT_SVC_UNAVAILABLE');
+  });
+
+  it('apply · preview rejected · 返 PREVIEW_REJECTED 不进 staging', async () => {
+    const mockVersion = new VersionService();
+    jest.spyOn(mockVersion, 'getCurrent').mockReturnValue({
+      app_version: '0.10.0-m10',
+      installer_fp: { arch: 'x64', osMajor: 'win10', ramBucket: '16G', createdAt: '2026-04-20T00:00:00.000Z' },
+    });
     const verifier = new Ed25519VerifierService();
     const svc = new UpdateService(mockVersion, verifier);
-    const result = await svc.apply(Buffer.from('whatever'));
-    expect(result.code).toBe('NOT_IMPLEMENTED');
-    expect(result.message).toContain('Day 4');
+
+    // 构 .wupd 但 from_version 故意不匹配 → compat=downgrade → can_apply=false
+    const appTarLocal = Buffer.from('app');
+    const appShaLocal = crypto.createHash('sha256').update(appTarLocal).digest('hex');
+    const manifest: WupdManifest = {
+      from_version: '99.0.0', // 不匹配 current '0.10.0-m10'
+      to_version: '99.0.1',
+      app_sha256: appShaLocal,
+      migrations: [],
+      health_check: { endpoint: '/api/v1/health', timeout_sec: 60, expect_status: 200 },
+      rollback: { strategy: 'restore_pre_update_snapshot' },
+      created_at: '2026-04-20T17:00:00.000Z',
+    };
+    const signed = signer.sign(manifest, testKeys.privateKeyPem);
+    const wupd = await buildWupd({
+      manifest: signed,
+      appTar: appTarLocal,
+      migrations: new Map(),
+    });
+    jest.spyOn(verifier, 'verify').mockImplementation((m, opts) =>
+      new Ed25519VerifierService().verify(m, { ...opts, publicKeyHex: testKeys.publicKeyHex }),
+    );
+    const result = await svc.apply(wupd);
+    expect(result.code).toBe('PREVIEW_REJECTED');
   });
 });

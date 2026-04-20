@@ -43,7 +43,7 @@ export interface WabManifest {
   // 是否包含 DB dump (手动 export 总是 true; 单槽小快照不用此 codec 格式)
   has_db: boolean;
   // 生成源 · 区分 manual-export / pre-migration / pre-import 自动备份
-  source: 'manual-export' | 'pre-migration' | 'pre-import';
+  source: 'manual-export' | 'pre-migration' | 'pre-import' | 'pre-update';
   // 租户 ID · 导入时校验是否同租户 (若不匹配提示 "跨租户导入可能有数据关联断裂")
   tenant_id: number | null;
   // 可选 · 备注

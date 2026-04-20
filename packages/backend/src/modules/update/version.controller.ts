@@ -54,12 +54,12 @@ export class VersionController {
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_WUPD_SIZE } }))
   async applyUpd(
     @UploadedFile() file: { buffer: Buffer } | undefined,
-    @Body() _body: unknown,
+    @Body() body: { dryRun?: string } = {},
   ) {
     if (!file) throw new BadRequestException('缺 file 字段 (multipart)');
-    // Day 3 返 501 (骨架)
-    const result = await this.updateSvc.apply(file.buffer);
-    // 非标 HTTP 501 · 返 200 + code · 让 UI 知道是 planned not-implemented 不是 bug
-    return result;
+    // M11 Day 4: apply = prepare phase (不 process.exit)
+    // dryRun=true 则只跑流程不落 staging · 给 admin 按钮预校验
+    const dryRun = body?.dryRun === 'true' || body?.dryRun === '1';
+    return this.updateSvc.apply(file.buffer, { dryRun });
   }
 }

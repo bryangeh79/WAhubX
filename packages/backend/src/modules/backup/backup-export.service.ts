@@ -28,11 +28,12 @@ import { getSlotDir } from '../../common/storage';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { MASTER_KEY_PROVIDER, type MasterKeyProvider } from '../ai/master-key.provider';
 import { encodeWab, type WabManifest } from './wab-codec';
-import { getManualDir, getPreImportDir, getPreMigrationDir } from './backup-paths';
+import { getManualDir, getPreImportDir, getPreMigrationDir, getPreUpdateDir } from './backup-paths';
 
 const execAsync = promisify(exec);
 
-export type ExportSource = 'manual-export' | 'pre-migration' | 'pre-import';
+// M11 Day 4 · 加 'pre-update' · 升级前自动快照
+export type ExportSource = 'manual-export' | 'pre-migration' | 'pre-import' | 'pre-update';
 
 export interface ExportResult {
   filePath: string;
@@ -174,6 +175,8 @@ export class BackupExportService {
         return getPreMigrationDir();
       case 'pre-import':
         return getPreImportDir();
+      case 'pre-update':
+        return getPreUpdateDir();
     }
   }
 }
