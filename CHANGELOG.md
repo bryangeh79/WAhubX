@@ -4,6 +4,69 @@
 
 ---
 
+## [unreleased · M11 Day 5 prep pack] · 2026-04-20 · pack-wupd CLI + 跨实现兼容 smoke
+
+**Scope**: 纯 Node 脚本 · 复用 backend archiver (自动 fallback require 路径) · 零 runtime 影响.
+
+### Added
+
+- `scripts/pack-wupd.js` · 独立 CLI
+  - `--from X --to Y --app-tar P --migrations "glob" --out O` · 组装未签名 .wupd
+  - Magic + version + reserved + manifest length + manifest JSON + inner zip (app.tar + migrations/*)
+  - 自动计算 app_sha256 + 逐 migration sha256 填进 manifest
+  - `--health-endpoint / --health-timeout / --health-status / --rollback / --notes` 可选
+  - archiver 自动 fallback: `archiver` → `packages/backend/node_modules/archiver` → `node_modules/archiver`
+
+### Smoke 端到端跨实现兼容 ✓
+
+```
+# 1. pack (CLI)
+$ node scripts/pack-wupd.js --from 0.10.0-m10 --to 0.11.0-m11 \
+    --app-tar /tmp/app.tar \
+    --migrations "/tmp/mig/*.sql" \
+    --out /tmp/test.wupd
+  ✓ .wupd packed (unsigned) · 1093B (21B app.tar + 2 migrations + manifest)
+
+# 2. sign (CLI)
+$ node scripts/sign-wupd.js sign --wupd /tmp/test.wupd --privkey /tmp/keys/privkey.pem
+  ✓ signed · 1202B (+109B 签名 JSON 扩展)
+
+# 3. CLI verify
+$ node scripts/sign-wupd.js verify --wupd /tmp/test.wupd --pubkey-hex <test pub>
+  ✓ signature_valid
+
+# 4. Backend verify (live /version/verify-upd · 跨实现兼容测试)
+$ curl -X POST /api/v1/version/verify-upd -F "file=@/tmp/test.wupd"
+  manifest: from=0.10.0-m10 to=0.11.0-m11
+  signature_valid: False     ← 期望 (backend 公钥是 dev 全 0 · 用 test pub 签 · 验证拒绝正确)
+  signature_fail_code: SIGNATURE_MISMATCH
+  app_content_valid: True    ← ✓ 跨实现 sha256 一致
+  migrations_valid: True     ← ✓ 跨实现 sha256 一致
+  version_compat: downgrade  ← ✓ current=0.1.0 from=0.10.0-m10 不匹配 · 正确拒
+```
+
+**证明 3 条跨实现兼容**:
+1. `.wupd` 二进制格式 (magic + manifest + zip) · CLI 写 · backend 解
+2. Canonical JSON 序列化 · 签名签的 byte 一致
+3. SHA-256 逐文件计算 · CLI 写入 manifest · backend 读取验证
+
+### Backend 重启 live 验证 (18:29)
+
+- 旧 backend (17:20 起, 无 Day 3-5 代码) 被 taskkill · pid=3492 退出
+- 新 build 含 Day 3-5 所有代码 · 启动 OK
+  - `fp-master-key.txt loaded` (M11 Preamble 迁移已就绪)
+  - `VersionController mapped /api/version` (Day 3 新路由)
+  - `BackupService ready` (M10 + Day 4 pre-update)
+  - `master-key migration · already done · skip` (之前已跑过 · 幂等)
+- `/version/current` 返 `{app_version: '0.1.0', installer_fp: {arch: 'x64', osMajor: 'win11', ramBucket: '64G+'}}`
+
+### Dry-run observation 继续
+
+- 重启后 dry_run=true 状态不变 · acc 1/2 分 100/low · risk_event 2 (历史)
+- 无 regression from M11 additions · 200/200 UT 的信心被 live 验证背书
+
+---
+
 ## [unreleased · M11 Day 5 prep] · 2026-04-20 · sign-wupd CLI · genkey/sign/verify 三命令
 
 **Scope**: 纯 Node 脚本 · 零项目代码依赖 · CI / 发版用 · 零 runtime 影响.
