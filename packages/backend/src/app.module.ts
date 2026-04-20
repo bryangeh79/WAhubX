@@ -19,6 +19,7 @@ import { WarmupModule } from './modules/warmup/warmup.module';
 import { AiModule } from './modules/ai/ai.module';
 import { AccountHealthModule } from './modules/account-health/account-health.module';
 import { TakeoverModule } from './modules/takeover/takeover.module';
+import { BackupModule } from './modules/backup/backup.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { TakeoverModule } from './modules/takeover/takeover.module';
     WarmupModule,
     AccountHealthModule,
     TakeoverModule,
+    BackupModule,
     TasksModule,
     HealthModule,
   ],

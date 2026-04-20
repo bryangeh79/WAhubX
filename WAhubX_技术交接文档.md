@@ -529,18 +529,22 @@ C:\WAhubX\
 ├─ data\                         用户数据（升级时保留）
 │  ├─ config\
 │  │  ├─ license.json
-│  │  ├─ machine-fingerprint.txt
-│  │  ├─ ai-providers.json.backup (可选, 人工导出; M6 起运行时 keys 存 DB ai_provider.api_key_encrypted)
+│  │  ├─ machine-fingerprint.txt    (M1 · License 绑定 · 32 hex · SHA-256 前 16B)
+│  │  ├─ master-key-fingerprint.txt (M10 · MachineBound 加密密钥派生源 · 64 hex)
+│  │  ├─ ai-providers.json.backup   (可选, 人工导出; M6 起运行时 keys 存 DB ai_provider.api_key_encrypted)
 │  │  └─ settings.json
 │  ├─ db\                        PostgreSQL/SQLite
 │  ├─ slots\
 │  │  ├─ 01\
-│  │  │  ├─ chrome-profile\      Chromium user-data-dir
-│  │  │  ├─ wa-session\          Baileys creds.json + keys
-│  │  │  ├─ proxy.conf
-│  │  │  ├─ fingerprint.json
-│  │  │  └─ health.json
+│  │  │  ├─ wa-session\          Baileys creds.json + keys (备份 whitelist)
+│  │  │  ├─ fingerprint.json     槽指纹 UA/分辨率/时区 (备份 whitelist)
+│  │  │  └─ media\               入站媒体下载缓存 (备份默认排除 · BACKUP_INCLUDE_MEDIA 可开)
 │  │  └─ 02\ ...
+│  ├─ backups\                   (M10)
+│  │  ├─ daily\<YYYY-MM-DD>\slot_<NN>.zip   每日明文 zip · 7 天 retention
+│  │  ├─ manual\<ts>_manual-export.wab      手动 .wab · AES-256-GCM
+│  │  ├─ pre-migration\<ts>_pre-migration.wab   E1 迁移前自动备份
+│  │  └─ pre-import\<ts>_pre-import.wab         F+ 导入前自动备份 (defense in depth)
 │  ├─ assets\
 │  │  ├─ voices\
 │  │  ├─ images\
@@ -1057,9 +1061,11 @@ priority=1   priority=3  priority=5  priority=7
 ## B.11 备份三层策略
 
 **Layer 1 · 本地自动快照**（默认开）：
-- 每天 03:00 压缩打包 `/data/slots/<id>/chrome-profile + wa-session`
-- 保存到 `/backups/daily/<date>/<id>.zip`
-- 保留最近 7 天，超过自动清理
+- 每天 03:00 (本地时区 · `BACKUP_DAILY_CRON_HOUR` 可调) whitelist 打包 `data/slots/<id>/wa-session/** + fingerprint.json`
+- **A+ 补跑** 启动时检查 `app_setting 'backup.last_daily_at'` · 若 > 24h / null 立即补跑一次 (防用户每晚关机永远没备份)
+- 保存到 `/backups/daily/<date>/slot_<NN>.zip` · **明文 zip** (Layer 1 容量优先, 离线桌面场景)
+- 保留最近 7 天, 超过自动 retention sweep
+- M9 砍双模式后**不包含** chrome-profile (puppeteer 被砍 · 目录不复存在)
 
 **Layer 2 · 手动导出 `.wab`**（迁移/换电脑用）：
 - UI 一键 `[📦 备份全部]` → `wahubx_backup_<date>.wab`

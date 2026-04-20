@@ -7,6 +7,7 @@ import { AiProvidersService } from './ai-providers.service';
 import { AiTextService } from './ai-text.service';
 import { AiSettingsService } from './ai-settings.service';
 import { EnvMasterKeyProvider, MASTER_KEY_PROVIDER } from './master-key.provider';
+import { MachineBoundMasterKeyProvider } from './machine-bound-master-key.provider';
 import { OpenAICompatAdapter } from './adapters/openai-compat.adapter';
 import { GeminiAdapter } from './adapters/gemini.adapter';
 import { ClaudeAdapter } from './adapters/claude.adapter';
@@ -19,7 +20,14 @@ import { AiProvidersController, AiSettingsController } from './ai.controller';
   imports: [TypeOrmModule.forFeature([AiProviderEntity, AppSettingEntity])],
   controllers: [AiProvidersController, AiSettingsController],
   providers: [
-    { provide: MASTER_KEY_PROVIDER, useClass: EnvMasterKeyProvider },
+    // M10 · MasterKey 策略:
+    //   MASTER_KEY_PROVIDER 绑定到 MachineBound · AiEncryptionService 日常加解密走此
+    //   EnvMasterKeyProvider 仍可独立 inject (不占 token), 给 MasterKeyMigrationService 走 E1 迁移
+    // 全新安装 (data/config/master-key-fingerprint.txt 不存在): MachineBound 首次生成 + 保存
+    // 升级老数据: Migration service 用 Env 解 → MachineBound 加 → 数据就位后 Env 不再用
+    EnvMasterKeyProvider,
+    MachineBoundMasterKeyProvider,
+    { provide: MASTER_KEY_PROVIDER, useExisting: MachineBoundMasterKeyProvider },
     AiEncryptionService,
     AiProvidersService,
     AiTextService,
@@ -33,6 +41,10 @@ import { AiProvidersController, AiSettingsController } from './ai.controller';
     AiTextService,
     AiSettingsService,
     AiProvidersService,
+    // M10 · Export 让 BackupModule 的 MasterKeyMigrationService 注入 Env/MachineBound
+    EnvMasterKeyProvider,
+    MachineBoundMasterKeyProvider,
+    MASTER_KEY_PROVIDER, // symbol · 给 BackupExport/Import/HardwareRecovery 走 @Inject 注入
   ],
 })
 export class AiModule {}

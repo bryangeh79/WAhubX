@@ -4,6 +4,139 @@
 
 ---
 
+## [v0.10.0-m10] · 2026-04-20 · M10 备份/升级基础设施 · §B.11 三层策略 + MasterKey 机器绑定
+
+M10 里程碑: 每日本地快照 (whitelist + A+ missed 补跑 + 7 天 retention) · `.wab` 手动导出/导入
+(AES-256-GCM + magic bytes + manifest AAD 防篡改) · 单槽 daily 恢复 (补强 1) · MasterKeyProvider
+env → MachineBound 迁移 (E1 pre-migration.wab 预备份 + 事务 re-encrypt) · 硬件指纹变化 recovery
+两选 (E2 原 env key / 导入 .wab) · `.wab` 导入 F+ pre-import 自动备份 + 失败回滚 · Admin UI 备份 tab.
+
+**顺序链**: M7 (素材) 仍延后 → M8 保命 → M9 救济 → **M10 保底**. 砍 `.wupd` verify 到 M11
+(与 apply 一起设计) · M10 配额 2 周 · 超出 0 周.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | 每日快照 setInterval + A+ missed 补跑 + whitelist + 7-day retention | `BackupService` · 6 ut (shouldRunMissed 3 + retention + snapshotSlot empty/hasData 3) |
+| 2 | WabCodec · magic `WAHUB` + AES-256-GCM + manifest AAD 绑 | `wab-codec.ts` · 4 ut (roundtrip / wrong key / non-wab / tampered manifest) |
+| 3 | `.wab` 手动导出 (pg_dump docker + slots whitelist + manifest) | live smoke manual export → 245KB · manifest 解析正确 |
+| 4 | `.wab` 导入 F+ pre-import backup + 失败回滚 | `BackupImportService` · defense in depth catch + rollbackFromBuffer |
+| 5 | 单槽 daily restore (补强 1) | `PerSlotRestoreService.restore` + `listAvailableSnapshots` · live smoke slot 11 真恢复 |
+| 6 | MachineBoundMasterKeyProvider · HMAC-SHA256(salt, fingerprint) · 文件持久化 | `MachineBoundMasterKeyProvider` · 4 ut (首次生成/二次读/非法格式/raw fingerprint) |
+| 7 | E1 MasterKey 透明自动迁移 · pre-migration.wab 预备份 + verify + 事务 re-encrypt | `MasterKeyMigrationService` · **live smoke 真跑**: 1 provider env → machine · `master-key.migration_done=true` |
+| 8 | E2 HardwareRecovery · decrypt fail 探测 · 两选恢复 (env key / .wab) | `HardwareRecoveryService.detect/recoverWithEnvKey/recoverFromWab` · 每次 GET /recovery/status re-detect |
+| 9 | BackupController · 11 endpoints · Admin-only | `/backup/daily{,run-now}` · `/backup/export` · `/backup/manual{,/:file/download}` · `/backup/import{,/preview}` · `/backup/slots/:id/{snapshots,restore}` · `/backup/recovery/{status,env-key,import}` |
+| 10 | Frontend `BackupTab` · E2 red banner + 2 recovery 选项 + daily 状态 + manual list + per-slot restore modal | `packages/frontend/src/pages/admin/BackupTab.tsx` · AdminPage 第 9 tab |
+| 11 | 155/155 unit test green (+17 M10) | wab-codec 4 + machine-key 4 + backup-svc 6 + backup-paths 3 |
+| 12 | Live smoke 11 路径 · E1 真迁移 + daily 48 slots + export + preview + restore + recovery normal | 见下 Verified 段 |
+
+### Added (M10)
+
+**数据模型** — migration `SeedBackupSettings1778000000000` (无 schema 改动)
+- app_setting seed: `master_key.migration_done=false` + `backup.last_daily_at=null`
+
+**MasterKey 抽象升级** (`packages/backend/src/modules/ai/`)
+- `MachineBoundMasterKeyProvider` — HMAC-SHA256(salt, SHA-256(host|platform|mac|cpu|ramGB)) → 32B
+  - 文件持久化 `data/config/master-key-fingerprint.txt` (0600) · **独立于 M1 `machine-fingerprint.txt`** (后者是 license 用 32 hex)
+  - 首次生成后**不再重算** · 硬件小变动不会漂移
+  - `isFreshInstall()` · `source()` 供日志脱敏
+- `EnvMasterKeyProvider` 宽容化 — APP_ENCRYPTION_KEY 缺失不抛, `isAvailable()` + `setKeyFromHex()` 给 E2 recovery 用
+- `AiModule` 绑 `MASTER_KEY_PROVIDER → MachineBoundMasterKeyProvider` · 导出 Env / Machine / token 给 BackupModule
+
+**BackupModule** (`packages/backend/src/modules/backup/`)
+- `BackupService` — daily setInterval tick 60s 检查 hour:00 触发 · `runDailyNow()` · `retentionSweep()` · `getSnapshotStatus()` · A+ missed 补跑 onModuleInit
+- `BackupExportService` — `pg_dump --clean --if-exists --no-owner --no-privileges` via docker exec → SQL text + slots whitelist → archiver zip → WabCodec
+- `BackupImportService` — preview (parse header) · import (F+ pre-import backup → decrypt → psql restore → restore slots → rehydrate · 失败 rollback)
+- `PerSlotRestoreService` — 单槽 zip 解压 · baileys `evictFromPool` · listAvailableSnapshots
+- `MasterKeyMigrationService` — E1 onModuleInit detect env-加密 providers → pre-migration.wab + verify → 事务 re-encrypt → markDone
+- `HardwareRecoveryService` — E2 onModuleInit + on-demand detect · recoverWithEnvKey (验 env key → 重加密) / recoverFromWab (委托 BackupImport)
+
+**WabCodec** (`wab-codec.ts`)
+- 格式: magic(5) + ver(1) + iv(12) + tag(16) + manifestLen(4) + manifest JSON(明文) + AES-256-GCM ciphertext
+- Manifest 作 AAD 绑 · 改 manifest 触发 auth fail · 防中间人替换
+- `parseWabHeader()` 仅读 header 不 decrypt · 用于 import preview
+- `decodeWab()` 失败抛 `WAB_DECRYPT_FAILED` · 明确指引 E2 recovery 路径
+
+**Controller** (`/backup/*` Admin only)
+- daily: `GET /backup/daily` + `POST /backup/daily/run-now`
+- manual: `POST /backup/export` + `GET /backup/manual` + `GET /backup/manual/:filename/download`
+- import: `POST /backup/import/preview` + `POST /backup/import`
+- per-slot: `GET /backup/slots/:slotId/snapshots` + `POST /backup/slots/:slotId/restore`
+- recovery: `GET /backup/recovery/status` (每次 re-detect) + `POST /backup/recovery/env-key` + `POST /backup/recovery/import`
+
+**Frontend BackupTab** (`packages/frontend/src/pages/admin/BackupTab.tsx`)
+- 顶部 E2 recovery red banner (locked 时 · 含 fingerprint 前缀显示 + 恢复按钮)
+- Daily 快照卡 · Statistic (最近时间 / 快照天数) + 日期表 + 立即运行按钮
+- Manual 备份卡 · 导出按钮 + 列表 (含 `下载` 按钮) + 导入 modal (preview + confirm + `Popconfirm`)
+- 单槽恢复卡 · 列已绑定账号 + `从快照恢复` modal (日期下拉)
+- Recovery modal · Button.Group 切换方案 A (env key Input.Password) / B (.wab 上传 + override key)
+- AdminPage 第 9 tab `备份`
+
+**文档**
+- 技术交接文档 §6 · 移除 `chrome-profile`, 加 `media` · 加 M10 `backups/` 目录块
+- 技术交接文档 §B.11 · 更新 Layer 1 描述 · 加 A+ missed 补跑 + whitelist 策略
+- 附 `master-key-fingerprint.txt` 与 `machine-fingerprint.txt` 用途区分
+
+**依赖新增** (backend)
+- `archiver@^7` + `@types/archiver` · zip 创建
+- `yauzl@^3` + `@types/yauzl` · zip 读取
+
+### Verified (live smoke · 11 路径)
+
+- 启动日志:
+  - `MachineBound master key derived · source=machine:20abfe62… · len=32B · fresh=true (第一次) / false (第二次)`
+  - `BackupService ready · daily=03:00 · retention=7d · includeMedia=false`
+  - `missed backup detected (lastDaily=never) · 立即补跑` → `daily snapshot 2026-04-20 · ok=60 skipped=4 fail=0`
+  - `master-key migration · 检测 1 个 env-加密 provider · 开始迁移`
+    → `export pre-migration · 240KB · 475ms`
+    → `pre-migration backup verified`
+    → `1 providers re-encrypted`
+    → `DONE · APP_ENCRYPTION_KEY 现可从 .env 移除`
+- HTTP smoke (延续 11 项):
+  - `GET /backup/daily` → lastDailyAt 有值 · 1 date with 48 slots · 84 KB
+  - `GET /backup/recovery/status` (首次 stale locked · 修复 controller 每次 re-detect 后) → **normal**
+  - `POST /backup/export` → 245 KB · manifest.source=`manual-export` · schema_hash=42186f26c29045e5
+  - `GET /backup/manual` → 1 file 列出
+  - `GET /backup/slots/11/snapshots` → 1 snapshot 2026-04-20 · 44 KB
+  - `POST /backup/slots/11/restore` → 成功 restoredFromDate=2026-04-20 · slot 01 真解压覆盖
+  - `POST /backup/import/preview` on `pre-migration.wab` → manifest + schemaMatches=true · 不写任何东西
+- 文件系统验证:
+  - `data/backups/pre-migration/*.wab` 存在 · 245460 bytes
+  - `data/backups/daily/2026-04-20/slot_*.zip` 48 个
+  - `data/config/master-key-fingerprint.txt` 存在 64 hex · 不与 M1 `machine-fingerprint.txt` 冲突
+- DB 验证:
+  - `app_setting` `master_key.migration_done=true` · `backup.last_daily_at=2026-04-20T07:32:08.449Z`
+  - `migrations` 表最新 `SeedBackupSettings1778000000000`
+
+### Constraints (M10 范围边界)
+
+- **`.wupd` verify 砍到 M11** · 升级 apply + rollback + 签名算法 (Ed25519) 一起设计 · M10 纯备份闭环 · M11 纯升级闭环
+- **30 天回收站 (§B.18)** 延后 V1.1 · M10 per-slot restore 已能应急恢复 24h 内误删号
+- **pg_dump via docker exec** · V1.1 评估脱 docker (installer 打包 pg_client 或 TypeORM JSON export)
+- **云备份 (Layer 3)** · V2 付费增值
+- **增量备份** · V1.1 · V1 全量 zip 每槽 ~10MB 够用
+- **Redis 数据不进备份** · 现状 Redis 无关键数据 (BullMQ 装了未用) · 改动需 V1.1 再议
+- **MasterKey 文件丢失 recovery** · E2 已提供两路径 · 但若用户两路径都走不通 (丢原 env + 丢历史 .wab), AI keys 永失 · 需重新 bind 所有 AI provider
+- **Import 语义 = 覆盖** · 不支持"合并" · 覆盖前 F+ 自动 pre-import backup
+- **跨 license 迁移不支持** · .wab 含 tenant_id 但不做跨 license 校验 · 设计上此能力不存在
+- **硬件指纹算法固定** · HMAC-SHA256(salt, SHA-256(...)) · salt 硬编码 · 未来轮换算法需新 master-key v2 + 批量 re-encrypt 迁移
+- **Service init order 依赖** · HardwareRecovery 在 E1 前跑 detect 会看到 locked (本次 smoke 暴露) · 修复: controller `GET /recovery/status` 每次 re-detect (1 次 O(providers) DB 查询, UI 轮询可接受)
+
+### Rationale (存档关键决策)
+
+- **A+ missed 补跑** (用户 2026-04-20) · 用户每晚关机 → setInterval 永不到 03:00 → 永无备份 = 灾难. 启动时检查 last_daily_at > 24h 立即补一次. 额外成本: 每次启动 1 次 DB 查询 + 可能 1 次 ~500ms 打 zip. 可接受.
+- **E1 pre-migration.wab 强制 + verify** (用户 2026-04-20) · MasterKey re-encrypt 过程若中间失败, 数据部分 env/部分 machine, 全完. Verify 步骤额外 ~100ms, 值.
+- **E2 两选 recovery** (用户 2026-04-20) · 硬件变更 = 高频真实场景 (用户换网卡 / 重装系统 / 数据迁移). 无 recovery = 产品灾难. 方案 A 输入原 env key · 方案 B 导入 .wab · 覆盖 99% 场景.
+- **F+ import 前 pre-import backup** (用户 2026-04-20) · 导入失败是可能的 (文件损坏 / schema 不匹配). 失败时用户数据不应卡在中间态. pre-import backup 让回滚确定可行.
+- **whitelist 而非 blacklist** (B 决策实测) · `data/slots/` 子目录可能意外出现新模块产物. whitelist `wa-session + fingerprint.json` 明确边界 · media 默认排除因为体积大且非必要 (V1.1 考虑 INCLUDE_MEDIA=true 选项)
+- **machine-id / master-key fingerprint 两独立文件** (smoke 暴露) · M1 `machine-fingerprint.txt` 32 hex = License 绑定, M10 `master-key-fingerprint.txt` 64 hex = 加密密钥派生. 不同用途不同格式不同稳定性需求. 合用会造成 M1 升级 M10 时误判.
+- **Ed25519 / .wupd 验证延 M11** (用户 2026-04-20) · verify 单飞没用. 与 apply/rollback 判定条件 (health 5xx? migration throw? 超时?) 共同设计连贯. 节 0.5 周回 2 周配额.
+- **manifest 作 AAD 绑 GCM** · 若 manifest 明文放外层 attacker 可替换 (比如改 tenant_id). AAD 绑让 auth tag 覆盖 manifest · 改一字节就 fail.
+- **Import = 覆盖不合并** · 合并语义复杂 (同一 phone 两条 wa_account? 剧本包冲突? chat_message 时序?). V1 粗暴覆盖 + F+ 回滚 · 清晰优先.
+
+---
+
 ## [v0.9.1-m9] · 2026-04-20 · M9 patch · Frontend 401 auto-refresh 拦截器
 
 **背景**: v0.9.0-m9 收工 handoff smoke 暴露漏洞. `JWT_ACCESS_TTL=15min`, 到期前端任一 HTTP
