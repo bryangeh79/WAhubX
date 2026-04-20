@@ -4,6 +4,29 @@
 
 ---
 
+## [unreleased · M7 Day 6] · 2026-04-20 · AssetsTab + backend controller
+
+### Added
+- `AssetsController` (backend) · Admin-only · 6 endpoints:
+  - `GET /assets/personas` · 列 persona 库
+  - `GET /assets/list?kind&personaId&poolName` · 列 asset
+  - `POST /assets/upload` · multipart · source=manual_upload
+  - `POST /assets/generate-persona` · 调 PersonaGeneratorService · 返 report · count 1-20
+  - `DELETE /assets/:id` · DB + 磁盘
+  - `GET /assets/quota/:personaId` · 100 图 + 50 语音配额
+- `AssetsModule` · 注册 AssetService + PersonaGeneratorService + PersonaPoolScheduler
+- `AssetsTab.tsx` (frontend) · persona 库表 · 单选 persona 后列 asset · kind filter · 生成 Modal · 上传 Modal · 删除确认 · 配额 Progress
+- `AdminPage.tsx` · 新增 "素材库" tab
+
+### 锁定
+- 无 UT (per sketch · frontend-heavy)
+- 无 @ant-design/icons 依赖 (未安装 · 用文字按钮)
+- AvatarGeneratorService + FluxService + PiperService 的 DI wiring 推 Day 8 (FluxModule/PiperModule)
+
+### Tests · 271/271 backend · frontend build 通
+
+---
+
 ## [unreleased · M7 Day 5] · 2026-04-20 · StatusPost 真发图 + Persona pool scheduler
 
 ### Changed

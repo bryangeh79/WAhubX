@@ -26,6 +26,7 @@ import { HealthTab } from './admin/HealthTab';
 import { TakeoverTab } from './admin/TakeoverTab';
 import { BackupTab } from './admin/BackupTab';
 import { UpgradeTab } from './admin/UpgradeTab';
+import { AssetsTab } from './admin/AssetsTab';
 
 const { Text, Paragraph } = Typography;
 
@@ -82,6 +83,7 @@ export function AdminPage() {
         { key: 'licenses', label: 'License 管理', children: <LicensesTab /> },
         { key: 'users', label: '用户管理', children: <UsersTab /> },
         { key: 'scripts', label: '剧本包', children: <ScriptsTab /> },
+        { key: 'assets', label: '素材库', children: <AssetsTab /> },
         { key: 'warmup', label: '养号计划', children: <WarmupTab /> },
         { key: 'ai', label: 'AI 配置', children: <AiTab /> },
         { key: 'health', label: '健康分', children: <HealthTab /> },

@@ -22,6 +22,7 @@ import { TakeoverModule } from './modules/takeover/takeover.module';
 import { BackupModule } from './modules/backup/backup.module';
 import { SigningModule } from './modules/signing/signing.module';
 import { UpdateModule } from './modules/update/update.module';
+import { AssetsModule } from './modules/assets/assets.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { UpdateModule } from './modules/update/update.module';
     BackupModule,
     SigningModule,
     UpdateModule,
+    AssetsModule,
     TasksModule,
     HealthModule,
   ],
