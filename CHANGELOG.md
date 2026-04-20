@@ -4,6 +4,74 @@
 
 ---
 
+## [unreleased · M11 Day 4 scripts] · 2026-04-20 · Installer 运行时脚本 (start/stop/init-db/generate-env/redis.conf)
+
+**Scope**: 纯脚本文件 · 不触 runtime · 观察期并行安全.
+
+Day 1.5 留的 `installer/scripts/README.md` placeholder 填上真脚本. 补强 1 (fresh install 分叉) 初步落地.
+
+### Added (`installer/scripts/`)
+
+- `generate-env.js` · 从 Inno 向导端口配置生成 backend `.env`
+  - 改编自 FAhubX generate-env.js · 砍 puppeteer 路径 · 加 WAhubX 字段
+  - 自动生成强密钥: JWT_ACCESS_SECRET · JWT_REFRESH_SECRET · APP_ENCRYPTION_KEY (M10 过渡 · 会被
+    MasterKeyMigrationService 自动迁移到 MachineBound 后可删此行)
+  - DB_PASSWORD 随机 20 字符 · 去易混淆字符 · PG 用 `scram-sha-256` 认证
+  - 保留已有 .env 密钥 (重装不破坏已加密数据)
+  - `.env` 写到 `{install}/.env` · **不嵌 app/backend/** · 升级时 app/ 替换 · .env 保留
+- `init-db.bat` · 首次安装 DB 初始化 (补强 1 · fresh install 路径)
+  - 1/5 initdb + pg_hba.conf (local-only scram) + postgresql.conf 自定义
+  - 2/5 pg_ctl start + pg_isready 轮询
+  - 3/5 createdb wahubx
+  - 4/5 `node dist/database/migrate.js migrate` (TypeORM)
+  - 5/5 pg_ctl stop (initial 初始化不需要常驻)
+- `start.bat` · 3-step 启动 (PG → Redis → Backend) · 幂等 (已跑跳过)
+- `stop.bat` · 按端口 PID 停服 (CLAUDE.md 铁律: **不**用 `taskkill /IM node.exe`)
+- `wahubx.bat` · 用户入口 · call start.bat + /health 15s 轮询 + 自动 open 浏览器
+- `redis.conf` · 本地 cache 配置 · bind 127.0.0.1 · 禁持久化 · 64MB 上限
+
+### 目录布局 (installer/wahubx-setup.iss 部署后)
+
+```
+C:\WAhubX\ (install dir)
+├─ .env                         generate-env.js 生成 · 升级不动
+├─ wahubx.bat                   用户入口
+├─ start.bat · stop.bat
+├─ scripts/
+│  ├─ init-db.bat               首次安装跑 (post-install)
+│  └─ generate-env.js           post-install 跑
+├─ app/                         升级时被 .wupd 替换的目录
+│  ├─ node/                     portable Node 20 LTS
+│  ├─ pgsql/                    portable PostgreSQL 16
+│  ├─ redis/                    Redis for Windows
+│  ├─ backend/                  dist/ + node_modules/
+│  └─ frontend/                 vite build dist/
+├─ data/                        用户数据 · 升级保留 · uninstall 默认保留
+│  ├─ config/                   fp-license / fp-master-key / fp-installer / .env.backup
+│  ├─ pgsql/                    PG 数据目录
+│  ├─ slots/                    wa-session / fingerprint / media
+│  └─ tmp/
+├─ backups/                     M10 快照 · uninstall 默认保留
+│  ├─ daily/
+│  ├─ manual/
+│  ├─ pre-migration/
+│  ├─ pre-import/
+│  └─ pre-update/               M11 Day 4 新增
+└─ logs/                        运行日志 · uninstall 清
+```
+
+### Day 5 smoke TODO (确认 dist/database/migrate.js 存在)
+
+`init-db.bat` 跑 `node dist/database/migrate.js migrate` · 需 backend 的 `pnpm run build` 产出此
+compile 脚本. 若不存在 · build-backend.bat 需加步骤把 typeorm migration 入口编译进 dist/.
+**当前 dev 环境用 `pnpm run migration:run` (typeorm-ts-node-commonjs)** · 装机用 compiled 版.
+
+### Dry-run observation 稳定 (18:08 checkpoint)
+
+backend pid=3492 unchanged · dry_run=true · risk_event 2 (无新增) · 分数未降.
+
+---
+
 ## [unreleased · M11 Day 4 prepare] · 2026-04-20 · UpdateService.apply 准备阶段 · 无 process.exit
 
 **Scope**: 补 apply 前期 (preview + pre-update backup + staging + signal file) · **不含**
