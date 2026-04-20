@@ -159,8 +159,133 @@ WAhubX/
 
 ---
 
+## M11 · 本地打包 `.wupd` 升级包 (开发者流程)
+
+完整架构见 [UPGRADE.md](./UPGRADE.md). 本节是**开发者**端的 hands-on 手册.
+
+### 一次性准备 · 生成生产密钥对
+
+```bash
+node scripts/sign-wupd.js genkey --out-dir ~/wahubx-signing-keys/
+```
+
+输出:
+- `privkey.pem` (0600 权限) · **离线保管 · 绝不 commit 入仓库**
+- `pubkey.pem` · 明文公钥 PEM
+- `pubkey.hex` · 64 hex 字符 · 复制到 `packages/backend/src/modules/signing/public-key.ts` 的
+  `WAHUBX_UPDATE_PUBLIC_KEY_HEX` 常量.
+
+提交代码 · rebuild · 分发 installer.
+
+### 每次发版 · 打包 + 签名 .wupd
+
+```bash
+# 1. build
+cd packages/backend && pnpm run build
+cd ../frontend && pnpm run build
+cd ../../
+
+# 2. 打 app.tar (参考 .wupd apply 路径 · {app}/backend {app}/frontend 等子目录)
+tar -cf staging/app.tar \
+  -C packages/backend dist/ node_modules/ package.json \
+  -C ../frontend dist/
+
+# 3. 组装 .wupd (pack-wupd CLI)
+node scripts/pack-wupd.js \
+  --from 0.10.0-m10 --to 0.11.0-m11 \
+  --app-tar staging/app.tar \
+  --migrations "packages/backend/src/database/migrations/1779*.ts" \
+  --out output/WAhubX-0.11.0-m11.wupd
+
+# 4. 签名 (就地覆写)
+node scripts/sign-wupd.js sign \
+  --wupd output/WAhubX-0.11.0-m11.wupd \
+  --privkey ~/wahubx-signing-keys/privkey.pem
+
+# 5. Verify sanity
+node scripts/sign-wupd.js verify \
+  --wupd output/WAhubX-0.11.0-m11.wupd \
+  --pubkey-hex <pubkey.hex>
+
+# 6. 分发 · 客户 Admin UI 升级 tab 上传
+```
+
+### 本地测试 .wupd 格式 + 签名
+
+启动 backend (dev 模式 dry-run 不影响) · 登录拿 token · 上传 `.wupd` 看 preview:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"platform@wahubx.local","password":"Test1234!"}' \
+  | python -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
+
+curl -s -X POST http://localhost:3000/api/v1/version/verify-upd \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@output/WAhubX-0.11.0-m11.wupd" | python -m json.tool
+```
+
+期望:
+- `signature_valid=true` (前提 public-key.ts 是真公钥, 非全 0 dev placeholder)
+- `version_compat` ∈ {ok, major-bump, same, downgrade}
+- `can_apply=true` (所有 check 过)
+
+### .wupd 格式快速自查
+
+```bash
+# Magic bytes 必须 'WUPD'
+xxd -l 4 output/WAhubX-0.11.0-m11.wupd
+# 00000000: 5755 5044    WUPD
+```
+
+### Bootstrap 端点 (补强 1)
+
+未登录可查:
+```bash
+curl http://localhost:3000/api/v1/version/bootstrap
+# {"fresh_install":false,"platform_admin_exists":true,"license_activated":true,"app_version":"0.1.0"}
+```
+
+给 installer + 前端首屏诊断用. Fresh install 时 fresh_install=true · 跳 License Key 流.
+
+### Installer 构建 (Windows only)
+
+```bash
+# 1. 准备 portable binaries (一次性 · 详见 installer/deps/README.md)
+#    下载放到 installer/deps/{node-lts-embedded, pgsql-portable, redis-windows}/
+
+# 2. 放产品图标 installer/assets/wahubx.ico
+
+# 3. 装 Inno Setup 6 · https://jrsoftware.org/isinfo.php
+
+# 4. 构建
+cd installer && build.bat
+# 输出: installer/output/WAhubX-Setup-v0.11.0-m11.exe
+```
+
+build.bat 9 步编排自动跑 backend/frontend build + deps copy + iscc 编译.
+
+---
+
+## Fingerprint 文件命名约定 (M11 Preamble)
+
+`data/config/` 下 3 份独立 fp 文件 · **用途正交, 不共享**:
+
+| 文件 | 出处 | 算法 | 格式 | 用途 |
+|---|---|---|---|---|
+| `fp-license.txt` | M1 (M11 改名) | SHA-256(MAC+CPU).slice(32) | 32 hex | License 绑定 |
+| `fp-master-key.txt` | M10 (M11 改名) | SHA-256(host\|platform\|arch\|MAC\|CPU\|RAM) | 64 hex | AES 密钥派生 |
+| `fp-installer.txt` | M11 新 | JSON · arch/osMajor/ramBucket/createdAt | JSON | Installer 硬件兼容性 |
+
+**不要**起第 4 份 `machine-fingerprint.txt` 之类模糊命名 · 用 `fp-<用途>.txt`.
+
+**旧名自动迁移**: M10 → M11 升级时 `machine-id.util` 和 `MachineBoundMasterKeyProvider` 检测旧名 → atomic rename · 6 个月后 V1.1 可删 fallback.
+
+---
+
 ## 参考文档
 
 - [WAhubX_技术交接文档.md](../WAhubX_技术交接文档.md) · DB schema / API / 状态机 · **最权威**
+- [UPGRADE.md](./UPGRADE.md) · M11 升级架构完整文档 (10 节 · 发版手册 + 客户 troubleshoot)
 - [WAhubX_产品介绍书.html](../WAhubX_产品介绍书.html) · 业务全景
 - [START_M1.md](../START_M1.md) · M1 启动说明 + 已拍板决策清单
