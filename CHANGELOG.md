@@ -4,6 +4,26 @@
 
 ---
 
+## [unreleased · M7 Day 2] · 2026-04-20 · Flux Adapter (local + replicate)
+
+### Added
+- `packages/backend/src/modules/assets/flux/flux-provider.interface.ts` · FluxProvider abstraction · params/result types
+- `packages/backend/src/modules/assets/flux/flux-local.provider.ts` · ComfyUI HTTP wrapper (port 8188) · workflow hard-code flux-dev · poll + view
+- `packages/backend/src/modules/assets/flux/flux-replicate.provider.ts` · Replicate API client · 2 retry 指数 backoff · ~$0.003/img cost tracking
+- `packages/backend/src/modules/assets/flux/flux.service.ts` · 门面 · mode=auto/flux-local/flux-replicate · GPU detect via nvidia-smi
+- **8 UT 全绿** · flux-local healthcheck 2 · flux-replicate healthcheck 2 · flux.service backend selection 4
+
+### 设计决策 (锁定)
+- Replicate 默认 model: flux-dev (非 schnell)
+- GPU detect 仅 nvidia-smi (AMD V1.1)
+- encryptSecret 复用 M6 (下 Day 6 Settings UI 接)
+- 无 live smoke (推 Day 8)
+- LoRA / ControlNet / spawn ComfyUI · V1.1
+
+### Tests · 250/250 全绿 (27 + 3 = 30 suites)
+
+---
+
 ## [unreleased · M7 Day 1 Batch B + Cascade [3] [4]] · 2026-04-20 · runner hash + migration 1780 + 机制 verify
 
 **Scope**: M7 Day 1 Batch B (#6 + #7 + #11) + cascade [3] 真降级 verify + [4] Layer B-lite
