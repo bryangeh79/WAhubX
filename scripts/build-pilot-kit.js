@@ -79,8 +79,8 @@ if (fs.existsSync(STAGING)) {
 ensureDir(STAGING);
 
 // ── 1. installer ──
+const installerDir = path.join(STAGING, 'installer');
 if (!NO_INSTALLER) {
-  const installerDir = path.join(STAGING, 'installer');
   ensureDir(installerDir);
   const exeSearch = path.join(REPO_ROOT, 'installer', 'output');
   let exeFound = false;
@@ -108,6 +108,8 @@ if (!NO_INSTALLER) {
 // ── 2. 中文 docs ──
 const zhDir = path.join(STAGING, 'docs', '中文');
 ensureDir(zhDir);
+// Dogfood [MAJOR-02] · 原 markdown 内部链接会断 (INSTALLATION.md 等 → 01-安装部署手册.md)
+// · 复制时 rewrite
 const zhMap = [
   ['docs/user-guide/INSTALLATION.md', '01-安装部署手册.md'],
   ['docs/user-guide/QUICK-START.md',   '02-30分钟快速启动.md'],
@@ -119,11 +121,43 @@ const zhMap = [
   ['docs/pilot/RECRUITMENT-PACK.md', '07-Pilot招募包.md'],
   ['docs/pilot/FEEDBACK-COLLECTION.md', '08-反馈收集模板.md'],
 ];
+const zhLinkRewrites = {
+  'INSTALLATION.md': '01-安装部署手册.md',
+  'QUICK-START.md': '02-30分钟快速启动.md',
+  'DEPLOYMENT-MODES.md': '03-部署模式-3档.md',
+  'TROUBLESHOOTING.md': '04-故障排查.md',
+  'ONBOARDING-VIDEO-SCRIPT.md': '05-视频脚本.md',
+  'KNOWN-LIMITATIONS-V1.md': '06-V1已知限制.md',
+  'RECRUITMENT-PACK.md': '07-Pilot招募包.md',
+  'FEEDBACK-COLLECTION.md': '08-反馈收集模板.md',
+};
+function rewriteMdLinks(content, rewrites) {
+  let out = content;
+  for (const [from, to] of Object.entries(rewrites)) {
+    // Match any ](...FROM) closing with FROM as the filename portion
+    // Covers: ](./FROM) ](../FROM) ](FROM) ](docs/FROM) etc.
+    const escFrom = from.replace(/\./g, '\\.');
+    const re = new RegExp(`\\]\\(([^)]*?)${escFrom}\\)`, 'g');
+    out = out.replace(re, () => `](./${to})`);
+  }
+  return out;
+}
+function copyMarkdownWithRewrite(src, dst, rewrites) {
+  if (!fs.existsSync(src)) {
+    console.log(`  ⚠ skip (missing): ${path.relative(REPO_ROOT, src)}`);
+    return false;
+  }
+  ensureDir(path.dirname(dst));
+  const src_content = fs.readFileSync(src, 'utf-8');
+  const rewritten = rewriteMdLinks(src_content, rewrites);
+  fs.writeFileSync(dst, rewritten, 'utf-8');
+  return true;
+}
 let zhCount = 0;
 for (const [src, dst] of zhMap) {
-  if (copyFile(path.join(REPO_ROOT, src), path.join(zhDir, dst))) zhCount++;
+  if (copyMarkdownWithRewrite(path.join(REPO_ROOT, src), path.join(zhDir, dst), zhLinkRewrites)) zhCount++;
 }
-console.log(`  ✓ 中文 docs · ${zhCount} files`);
+console.log(`  ✓ 中文 docs · ${zhCount} files (links rewritten)`);
 
 // ── 3. English docs ──
 const enDir = path.join(STAGING, 'docs', 'en');
@@ -134,11 +168,17 @@ const enMap = [
   ['docs/user-guide/DEPLOYMENT-MODES.en.md', '03-deployment-modes.md'],
   ['docs/user-guide/TROUBLESHOOTING.en.md', '04-troubleshooting.md'],
 ];
+const enLinkRewrites = {
+  'INSTALLATION.en.md': '01-installation.md',
+  'QUICK-START.en.md': '02-quick-start.md',
+  'DEPLOYMENT-MODES.en.md': '03-deployment-modes.md',
+  'TROUBLESHOOTING.en.md': '04-troubleshooting.md',
+};
 let enCount = 0;
 for (const [src, dst] of enMap) {
-  if (copyFile(path.join(REPO_ROOT, src), path.join(enDir, dst))) enCount++;
+  if (copyMarkdownWithRewrite(path.join(REPO_ROOT, src), path.join(enDir, dst), enLinkRewrites)) enCount++;
 }
-console.log(`  ✓ English docs · ${enCount} files`);
+console.log(`  ✓ English docs · ${enCount} files (links rewritten)`);
 
 // ── 4. Contract (律师审阅待) ──
 const contractDir = path.join(STAGING, 'docs', 'contract');
@@ -172,28 +212,56 @@ copyFile(path.join(REPO_ROOT, 'scripts', 'demo-fixtures.sql'), path.join(scripts
 console.log(`  ✓ scripts · validate-env.ps1 + demo-fixtures.sql`);
 
 // ── 6. README.txt · 欢迎信 ──
+// Dogfood fix:
+//   MAJOR-05 · rc2 无 installer · 加显眼警告
+//   MAJOR-06 · VPS URL placeholder 提示
+//   MINOR-10 · 本地时间 + UTC 标注
+//   MINOR-11 · 视频脚本是产品方用 · 客户可跳
+const isPreviewBuild = !fs.existsSync(path.join(installerDir, 'WAhubX-Setup-' + VERSION + '.exe'));
+const previewBanner = isPreviewBuild
+  ? `
+!!! WARNING - PREVIEW BUILD (${VERSION}) !!!
+================================================
+本 RC (Release Candidate) 包不含 installer/WAhubX-Setup-*.exe.
+仅供预览文档 + 跑 scripts/validate-env.ps1 预检.
+真正的安装包 (WAhubX-Setup-v1.0.0.exe ~300MB) 将在 v1.0.0 GA 时随 kit 一起发布.
+
+如果你是 pilot 客户提前收到此包 · 请:
+  1. 读完 docs/中文/ 下 9 份文档 · 建立预期
+  2. 跑 scripts/validate-env.ps1 · 确认机器 ready
+  3. 反馈任何文档不清的地方 (见 docs/中文/08-反馈收集模板.md)
+  4. 等产品方发 GA 包再真正安装
+================================================
+
+`
+  : '';
+
+const nowUtc = new Date();
+const nowLocal = new Date(nowUtc.getTime() + 8 * 60 * 60 * 1000); // MY = UTC+8
 const welcome = `WAhubX Pilot Kit · ${VERSION}
 ================================
-
+${previewBanner}
 欢迎 · 谢谢你加入 WAhubX pilot!
 
-这个包里有你装机需要的所有东西.
+这个包里有你装机需要的所有东西 (真 GA 包会含 installer · 当前 RC 是文档+脚本).
 
 第一步做什么
 ------------
 1. 读 docs/中文/00-文档索引.md · 了解整体结构
 2. 读 docs/中文/02-30分钟快速启动.md · 最短路径上手
 3. 装机前 · 运行 scripts/validate-env.ps1 (预检 9 项)
-4. 装 installer/WAhubX-Setup-*.exe (如果包含)
+   · 命令 · powershell -ExecutionPolicy Bypass -File scripts\\validate-env.ps1
+   · (PowerShell 7 用户可直接 · pwsh scripts\\validate-env.ps1)
+4. (GA 包才有) 装 installer/WAhubX-Setup-v1.0.0.exe
 5. 遇到任何问题 · 查 docs/中文/04-故障排查.md
 
 不会英文没关系
 --------------
-所有关键文档中文齐全. docs/en/ 下是 4 份英文翻译 · 给需要的人用.
+所有关键文档中文齐全. docs/en/ 下是 4 份英文翻译 (给需要的人用).
 
 视频教程
 --------
-docs/中文/05-视频脚本.md 是录屏分镜脚本 · 后期我们会把实际视频附上.
+docs/中文/05-视频脚本.md 是**产品方录屏用的分镜** · 客户可跳 · 真视频 GA 时附.
 
 报告 bug
 --------
@@ -203,16 +271,24 @@ docs/中文/05-视频脚本.md 是录屏分镜脚本 · 后期我们会把实际
 ----
 docs/contract/ 目录 · 最终版由律师审阅后提供. 商务条款另行沟通.
 
-核心原则
---------
+核心原则 (付费全可选)
+---------------------
 你只需为 License Key 付费 · 其他 (代理 · AI API · 语音云) 全部可选.
 零额外开销也能跑 · 见 docs/中文/03-部署模式-3档.md 的 "Mode A · 全免费".
+
+所有 USD 报价都是 USD · 币种若歧义以 USD 为准.
+
+VPS License 服务器 URL
+----------------------
+由客服配置 · 激活时需网络连通. 具体 URL 联系客服获取.
+ (客服: [你的 WhatsApp / Telegram 号])
 
 祝你顺利!
 WAhubX 团队
 
 版本 · ${VERSION}
-构建时间 · ${new Date().toISOString()}
+构建时间 · ${nowLocal.toISOString().replace('Z', '+08:00')} (MY local · UTC+8)
+构建时间 · ${nowUtc.toISOString()} (UTC 参考)
 `;
 fs.writeFileSync(path.join(STAGING, 'README.txt'), welcome);
 console.log(`  ✓ README.txt 欢迎信`);

@@ -43,7 +43,8 @@
 装之前 · 跑一次环境检查 (2 分钟):
 
 ```powershell
-pwsh .\scripts\validate-env.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\validate-env.ps1
+# 有 PowerShell 7 可用: pwsh .\scripts\validate-env.ps1
 ```
 
 9 项检查全绿 · 可装. 有 FAIL · 先修 (参 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) §2).

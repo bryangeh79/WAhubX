@@ -9,7 +9,7 @@
 - ✅ Windows 10/11 · 8GB+ 内存 · 20GB+ SSD
 - ✅ 马来西亚 SIM (全新 / 30 天未用) + 能收 SMS 的手机
 - ✅ WAhubX License Key
-- ✅ 网络能通 github.com + 你的 VPS license 服务器
+- ✅ 网络能通 github.com + VPS license 服务器 (URL 由客服提供 · 激活时粘到浏览器验证可达)
 - 🟡 **可选**: 代理账号 · AI API Key (零额外付费也能跑)
 
 ---
@@ -20,14 +20,16 @@
 
 **先跑 pre-flight** (2 min):
 ```powershell
-pwsh .\scripts\validate-env.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\validate-env.ps1
+# PowerShell 7 用户可用: pwsh .\scripts\validate-env.ps1
 ```
 全绿或仅 warning = 继续装.
 
-**下载 + 校验**:
+**下载 + 校验** (切到下载目录):
 ```powershell
-# 校验 SHA-256 (客服给)
+cd $env:USERPROFILE\Downloads
 Get-FileHash .\WAhubX-Setup-v1.0.0.exe -Algorithm SHA256
+# 对比客服给的 SHA-256 · 一致继续 · 不一致重新下
 ```
 
 双击 `.exe` → SmartScreen 蓝屏 → **"更多信息"** → **"仍要运行"** → 一路下一步 → 装到 `C:\WAhubX\`.
@@ -56,15 +58,17 @@ Admin → **代理管理** → 添加:
 Admin → **AI 配置**.
 
 **最省方案 (标准 pilot 推荐)**:
-- 文本: DeepSeek (~$3-5/月) · 粘 Key
+- 文本: DeepSeek (~USD $3-5/月) · 粘 Key
 - 图片: 跳过 (用 `_builtin` 或手动上传)
 - 语音: Piper 本地 · 默认开 · 无需配置
+
+> 所有 `$` 符号均指 **USD**. 客户换算 RM 按当月汇率 (~RM 4.7 = USD 1).
 
 > 不填 Key = AI 关 · 产品正常跑 · 用 script 原文 + 预置图.
 
 ### ⑥ 注册第 1 号 (~5 min)
 
-Accounts 页 → **添加槽位** → 选代理分组 → **启动注册**.
+Accounts 页 → **添加槽位** → 选代理分组 (无代理时选 **"默认 / 直连"** 组 · 自动家庭 IP) → **启动注册**.
 
 输入手机号 `60xxxxxxxxx` → 选 SMS → **发送验证码**.
 
