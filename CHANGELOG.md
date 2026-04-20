@@ -4,6 +4,23 @@
 
 ---
 
+## [unreleased · M7 Day 3] · 2026-04-20 · Piper adapter + voice service
+
+### Added
+- `packages/backend/src/modules/assets/piper/piper-adapter.ts` · subprocess spawn · piper.exe · stdin text · stdout wav · timeout 30s · execImpl 注入用于测试
+- `packages/backend/src/modules/assets/piper/piper.service.ts` · 门面 · 按 persona.languages.primary 选 model (huayan zh / amy en) · pickText 从 VOICE_TEXT_POOLS 抽 · 8s 上限卡死 (补强 4)
+- `estimateDurationSec` · 中 4 字/秒 · 英 3 词/秒 · 粗估保守
+- **6 UT 全绿** (sketch 要求 ≥ 4) · selectModel · pickText · 超时抛 · 成功路径 · 短中文 · 长中文
+
+### 锁定约束
+- V1 仅 < 8s 语音 · 超长 throws (避大陆腔暴露)
+- wav → opus 转换延后到 Day 4 AssetService (用 ffmpeg)
+- 无 live smoke · 推 Day 8
+
+### Tests · 256/256 全绿 (30 + 1 = 31 suites)
+
+---
+
 ## [unreleased · M7 Day 2] · 2026-04-20 · Flux Adapter (local + replicate)
 
 ### Added
