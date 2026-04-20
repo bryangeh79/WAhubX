@@ -4,6 +4,140 @@
 
 ---
 
+## [v0.9.0-m9] · 2026-04-20 · M9 接管 UI · Takeover Lock + socket.io + 手动发消息 + Hard-kill 逃生口
+
+M9 里程碑: §B.8 接管锁状态机 · socket.io gateway (JWT handshake 强制 + 10s 断线 grace) · 手动 text/image/voice/file 发送 (95MB + MIME 白名单 + EXIF 剥离) · graceful pause (TaskPausedError) + 30s hard-kill 逃生口 (TaskInterruptedError, 不扣分) · 28/30min idle 双阶段桌面告警 · 前端 TakeoverTab (AdminPage 第 8 tab).
+
+**顺序链**: M7 (素材) 延后 → M8 (健康) → **M9 (接管)**. 用户 2026-04-20 链决策: "保命 > 锦上添花, M9 > M7 同理 M8 > M7". 关键 rationale: M8 dry-run 72h 期间 **没有自动降级**, 必须有人工接管作救济渠道. M9 完成后才关 dry-run 进真自动降级, 时序对齐.
+
+### 收工标准 (全绿)
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | TakeoverLockService · acquire/release/hard-kill/heartbeat + 内存 Map + DB flag 双写 | `takeover-lock.service.ts` · 17 ut · smoke 全 13 条路径 OK |
+| 2 | F 决策权限: admin/platform-admin 可 · operator/viewer 403 · 跨租户非 platform-admin 403 | smoke 4 (tenant1 admin on slot-tenant4 → HTTP 403) · 3 ut |
+| 3 | G 决策 socket 10s 断线 grace · 内存 timer · 非 idle timeout 路径 | `onSocketDisconnect` · 2 ut (fake timers) |
+| 4 | D+ 上传卫生 3 条: 95MB + MIME 白名单 + sharp EXIF 剥离 | `takeover-upload.service.ts` · 8 ut 覆盖每白名单 + exe 拒 + path traversal |
+| 5 | Z1+ Hard-kill 逃生口: 30s 未 graceful pause → reveal 按钮 · `task_run.status=interrupted` 不扣分 | migration 加 enum + `hardKill()` · 2 ut + chat-executor-pause 2 ut |
+| 6 | X1+ 30min idle 硬释放 · 28min UI toast · sweep 30s 扫 | 2 ut (fake timers 29/31min) + smoke 配置 10min/9min 验证 sweep |
+| 7 | socket.io JWT handshake 强制 · 匿名 disconnect · 复用 UserSessionService 校验 | `TakeoverGateway.handleConnection` · namespace `/takeover` · rooms `takeover:account:<id>` |
+| 8 | 实时 fan-out: baileys `messages.upsert` → EventEmitter2 → gateway → rooms | smoke 20 (id=50 dir=in 落 acc 2, 发送方 slot 11 · 端到端) |
+| 9 | Dispatcher 集成: `TaskPausedError` → task_run=paused / task=pending · `TaskInterruptedError` → interrupted · 不触发 risk `send_failed` | `dispatcher.service.ts` executeInBackground 双 catch · chat-executor demo `ctx.throwIfPaused?.()` |
+| 10 | Frontend `TakeoverTab`: slot 列表 + 联系人 + 消息流 + send text/media + socket heartbeat + 28min toast + 30s hard-kill reveal | `TakeoverTab.tsx` · AdminPage tab key=takeover · vite proxy `/socket.io` |
+| 11 | 28min idle warning / 30min timeout → `AlertDispatcher` 复用 M8 桌面 channel | `TakeoverAlertRelay` @OnEvent · fan-out 到 DesktopAlertChannel (§B.25) |
+| 12 | 138/138 unit test green (+27 M9) | lock 17 + upload 8 + chat-pause 2 · 无 M8 前置 regression |
+
+### Added (M9)
+
+**数据模型** — migration `AddTakeoverRunStates1777000000000`
+- `task_run_status_enum` 追加 `paused` (graceful 抢占) + `interrupted` (hard-kill 30s 兜底)
+- `task_run.pause_snapshot jsonb` · 存抢占快照 `{accountId, reason, pausedAt, ...}` · resume 时 executor 读 (V1 字段立, 深度 resume 逻辑 V1.1 做)
+- `task.paused_at timestamptz` · 接管时设, release 清; dispatcher 下一 tick 忽略 pausedAt 且 status=pending 的任务 (M9 V1 不用此字段过滤, 靠 takeover_active; 字段留给 V1.1)
+- **enum 加值需独立提交** — PG 限制 `ALTER TYPE ADD VALUE` 同事务内不可引用. 本 migration 不建部分索引 (若需 `WHERE status='paused'`, 下一 forward-only migration 加)
+
+**Takeover module** (`packages/backend/src/modules/takeover/`)
+- `TakeoverLockService` · 内存 `Map<accountId, LockState>` + DB flag 双写 · `onModuleInit` 清进程重启残留
+  - `acquire(accountId, user)` · 权限门 + 幂等同用户 + LOCK_HELD_BY_OTHER
+  - `release(accountId, user, reason)` · 幂等 + 清 task.paused_at + emit event
+  - `hardKill(accountId, user)` · running task_run → `interrupted` + emit · 不扣 risk 分
+  - `heartbeat(accountId, user)` · 延长 idle timer
+  - `onSocketConnect/Disconnect` · 10s disconnect grace timer (配置可调)
+  - `isPaused(accountId)` · executor 查询探针
+  - `sweepIdleLocks` (30s setInterval) · 28min emit warning once · 30min auto-release
+- `TakeoverUploadService` · 3 条硬卫生 (D+ 决策)
+  - Size ≤ 95MB (WA 100MB 留 5MB buffer)
+  - MIME 白名单 · image(jpeg/png/gif/webp) · voice(ogg/mp3/opus/m4a) · file(pdf/docx/xlsx/zip/txt)
+  - Sharp `.rotate().toFormat().toBuffer()` 剥 EXIF + 应用 orientation · jpeg/png/webp/gif 全走一遍
+  - `safeName()` 去 path traversal · ASCII-safe · 保留 `.`-`_`
+- `TakeoverGateway` (socket.io `/takeover`)
+  - `handleConnection` · 手动校验 JWT (复用 JwtService + UserSessionService) · 无效 disconnect(true)
+  - `@SubscribeMessage('subscribe')` · client 发 `{accountId}` 后 join room + markSocketConnect
+  - `@SubscribeMessage('heartbeat')` · 10s 前端主动拉 idle
+  - `@OnEvent` × 7 · 转 EventEmitter2 channels → socket.io rooms:
+    - `takeover.message.in/out` → `message.in/out`
+    - `takeover.acquired/released/hard_kill` → `lock.acquired/released/hard_kill`
+    - `takeover.idle_warning/timeout` → `lock.idle_warning/timeout`
+- `TakeoverAlertRelay` · `@OnEvent('takeover.idle_*')` → 复用 M8 `AlertDispatcherService` → 桌面 toast
+- `TakeoverController` (`/takeover/*`) · Roles(Admin) · acquire / release / hard-kill / heartbeat / status / list
+- `ChatsController` (`/chats/*`) · Roles(Admin) · conversations / messages / send-text / send-media (FileInterceptor · 95MB limit)
+
+**Errors** (`takeover.errors.ts`)
+- `TaskPausedError` · dispatcher catch → task_run=paused, task=pending (不计失败, 不扣分)
+- `TaskInterruptedError` · dispatcher catch → task_run=interrupted (不计失败, 不扣分)
+- `TakeoverLockError` with code enum → `ForbiddenException` (PERMISSION_DENIED) / `BadRequestException` (其他)
+
+**Events** (`takeover.events.ts`)
+- 7 channel 常量 · EventEmitter2 全局 bus 复用 M8 架构
+- `takeover.message.in/out` payload 带 `manual: boolean` (in=false, 手动 out=true)
+
+**Baileys 集成** (`baileys.service.ts`)
+- 注入 `@Optional() EventEmitter2`
+- `persistMessage` 返回 `{contactId, messageId}` (原返 void)
+- inbound 消息触发 `takeover.message.in` event · outbound 由 ChatsController 自己 emit (避免 executor 发的 out 被误标手动)
+
+**Dispatcher 集成** (`dispatcher.service.ts`)
+- 注入 `@Optional() TakeoverLockService`
+- `TaskExecutorContext` 加 `isPaused?()` + `throwIfPaused?()` hooks (dispatcher 绑定到 `takeoverLock.isPaused(accountId)`)
+- `executeInBackground` catch:
+  - `TaskPausedError` → task_run=paused · task=pending · task.paused_at=NOW · **不 emit risk**
+  - `TaskInterruptedError` → task_run=interrupted · task=pending · **不 emit risk**
+  - 其他 error → 原路径 task_run=failed + emit `send_failed`
+- `chat.executor` demo 两处 `ctx.throwIfPaused?.()` breakpoint
+
+**Frontend** (`packages/frontend/src/pages/admin/TakeoverTab.tsx`)
+- AdminPage 第 8 tab `接管` · key=takeover
+- 左列 bound slots 列表 · 右列 lock 控制条 + 联系人 + 消息流 + 发送区
+- socket.io client (auth.token = access token · reconnection · 10s heartbeat)
+- 事件监听: `message.in/out` 刷消息流 · `lock.idle_warning` toast · `lock.idle_timeout` 回归 unlocked 状态 · `lock.released` 清本地 · `lock.hard_kill` warning toast
+- `HARD_KILL_REVEAL_MS = 30_000` · acquire 30s 后才显示 `🚨 强制接管` 按钮 (Z1+ 逃生口默认隐藏)
+- 发送表单: 文本 Cmd+Enter · 媒体 Upload 选 type + 可选 caption · `multipart/form-data` POST /chats/:aid/send-media
+- 消息气泡: 出站绿色 (#25d366) · 入站白 · `script_run_id IS NULL && direction=out` 标 "手动"
+- `vite.config.ts` 加 `/socket.io` ws proxy
+
+**依赖新增** (backend)
+- `@nestjs/websockets@^10.4` · `@nestjs/platform-socket.io@^10.4` (peer v10 匹配项目 NestJS 版本)
+- `socket.io@^4.8`
+- `sharp@^0.34` (EXIF 剥离)
+- `multer@^2.1` + `@types/multer`
+
+(frontend) `socket.io-client` 最新
+
+### Verified (smoke 20+ 路径)
+
+- 启动日志: `TakeoverLock ready · idle_timeout=10min · warning=9min · disconnect_grace=10000ms` + `TakeoverGateway ready · namespace=/takeover`
+- Smoke 2: delta-admin acquire slot 11 (acc 1) → DB `takeover_active=true`
+- Smoke 4: tenant1 admin 尝试 acquire slot-tenant4 → **HTTP 403** 不可跨租户
+- Smoke 5: platform-admin (tenantId=null) 可跨租户 acquire slot 12
+- Smoke 6: `POST /chats/1/send-text {to: 60186888168, text: "M9 smoke 手动发送测试"}` → waMessageId 返回 · **真发到 slot 12**
+- Smoke 14: send-text 无锁 → **HTTP 400 NO_ACTIVE_LOCK**
+- Smoke 15: hard-kill 无锁 → **HTTP 400 NO_ACTIVE_LOCK**
+- Smoke 16: acquire + hard-kill 无 running run → `{interruptedRunIds: []}` HTTP 200
+- Smoke 20: acc 2 查 `contactId=3` (slot 11 phone 60168160836) 消息流 → id=50 **direction=in** 内容 `M9 smoke from slot 11 手动发送测试` · **端到端管道**: TakeoverController → baileys.sendText → WA → 对方 socket → messages.upsert listener → persistMessage → `takeover.message.in` event
+- Smoke 21: `migrations` 表 id=10 `AddTakeoverRunStates1777000000000` · `enum_range` 含 `paused` + `interrupted`
+
+### Constraints (M9 范围边界)
+
+- **executor pause hook 只接了 chat.executor demo** — script_chat / warmup / status_post / status_browse 未接. 实际 run 被接管时会自然 run 完 (通常 <10s), 后续 task_run 保 success/failed. Hard-kill 逃生口兜底极端场景. V1.1 渐进接入其他 executor.
+- **task.paused_at 字段留而不用** — V1 dispatcher skip-takeover-active #4 已经拦 pending. paused_at 字段给 V1.1 精细"只跳被接管时 pause 的任务"用, 不影响当前行为.
+- **hard-kill 不真强停 in-flight 执行** — executor 内部 sendMessage 调用无 cancellation token · Hard-kill 只把 DB 状态改 interrupted, 实际 send 完成后 dispatcher 仍会尝试更新 task_run 到 success/failed. 因 task 状态已 Pending, 新 tick 会重评. 代价: 可能一条消息多发一次. V1.1 考虑在 executor 里加 AbortSignal.
+- **socket.io JWT token 不续期** — access token 15min · 用户长时间接管会 disconnect + 前端重 login. 不自动刷. V1.1 做 refresh-token WS 续期
+- **上传 FormData 单文件** — `FileInterceptor` · 发多图需多次 POST. 批量上传 V1.1
+- **message.out 从 ChatsController emit · 不从 baileys.persistMessage emit** — 避免 executor 发的 out 被误广播到接管 UI. 代价: 若将来有 executor 也想被 takeover UI 看见, 要单独补路径
+- **前端 TakeoverTab 无"抢占" UI** — V1 单用户, 同号二次 acquire 若被别人持有直接 400 LOCK_HELD_BY_OTHER. V2 multi-user steal 语义 + 通知
+
+### Rationale (存档关键决策)
+
+- **F 决策 权限 tenant-admin / platform-admin-only** — 用户 2026-04-20. V1 单用户但仍对 · 为 V2 multi-user 免重构. 核心原因: 接管 = 直接控号, 误操作影响大, operator / viewer 不应有.
+- **G 决策 socket 10s grace** — 用户 2026-04-20. 前端刷新 / WiFi 切换 5s 断线常见. 立即释放 → task 瞬间恢复跑 → 用户回来看到 "我接管着时居然有自动消息发出". 10s buffer 覆盖 99% 场景.
+- **Z1+ Hard-kill 30s reveal (默认隐藏)** — 用户 2026-04-20. Z1 纯 graceful 可能卡住 (executor 不回应). 30s 后给用户逃生口 · 默认隐藏防误操作. `interrupted` ≠ `failed` 语义严格: 不扣 risk 分, 明告 "这是用户主动中断".
+- **enum 加值不内联 index** — PG `ALTER TYPE ADD VALUE` 新值同事务不可引用. forward-only 策略 · 索引如需后续追加 · 对齐 M8 `app_setting` rename 策略.
+- **EXIF 剥离用 sharp 而非 exif-stripper** — sharp 已是 image 处理标准库 · 默认输出 strip metadata · 一次 API 同时拿 orientation-aware + rotate + strip. exif-stripper 只能剥, 重新编码还得 sharp, 重复依赖.
+- **persistMessage 只 emit in · 不 emit out** — 区分 "谁触发的 send". Executor send 也走 persistMessage, 如果那里 emit out 会让接管 UI 看到 "我没发消息居然有 out 消息". 拆开: 手动 out 由 ChatsController emit (带 manual=true), executor out 不 emit.
+- **chat.executor pause hook 2 处 breakpoint** — 演示而非一次性接全部 executor. `throwIfPaused` 是可选 hook, executor 自己决定在哪加. 降低 M9 scope 蔓延风险. 后续每 executor 收尾时接入.
+- **MIME 白名单封闭不开放配置** — D+ 决策 · 防租户自己开 exe / bat 通道. 列表硬编码在 TakeoverUploadService. 要加新格式 = 改代码 + 重部署 · 审慎好过便利.
+
+---
+
 ## [v0.8.0-m8] · 2026-04-20 · M8 健康分 + 风险感知 + 自动降级交付 (跳 M7, 保命先)
 
 M8 里程碑: Event collector (EventEmitter2) + §5.4 公式 scorer + 30min debounce 自动 regress + dispatcher 6th 拒绝路径 (skip-health-high) + medium 降档 (priority -2 / send_delay ×1.5) + 桌面告警 + dry-run 模式 + 去重 UNIQUE 约束 + 滚动窗口 + HealthTab UI 带教育性 tooltip.

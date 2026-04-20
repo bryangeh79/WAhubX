@@ -23,6 +23,8 @@ import type { TaskExecutorContext } from './executor.interface';
 import { HealthSettingsService } from '../account-health/health-settings.service';
 import { RISK_EVENT_CHANNEL, type RiskRawEvent } from '../account-health/risk.events';
 import { RiskEventCode } from '../account-health/risk-event.entity';
+import { TakeoverLockService } from '../takeover/takeover-lock.service';
+import { TaskPausedError, TaskInterruptedError } from '../takeover/takeover.errors';
 
 // 5 条拒绝路径 + soft skip (warmup_stage)
 // M8 · 加第 6 条: skip-health-high (risk_level=high 且非 dry_run 时)
@@ -68,6 +70,8 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     // M8 · optional 为了 M3 单测仍能 new DispatcherService(...)
     @Optional() private readonly eventBus?: EventEmitter2,
     @Optional() private readonly healthSettings?: HealthSettingsService,
+    // M9 · 可选注入 (M3 单测跳过); 运行期注入后 executor 能拿到 throwIfPaused hook
+    @Optional() private readonly takeoverLock?: TakeoverLockService,
   ) {}
 
   onModuleInit(): void {
@@ -286,6 +290,13 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       log: (step, ok, meta) => {
         logs.push({ at: new Date().toISOString(), step, ok, meta });
       },
+      // M9 · 接管抢占探针 (optional 注入)
+      isPaused: () => this.takeoverLock?.isPaused(accountId) ?? false,
+      throwIfPaused: () => {
+        if (this.takeoverLock?.isPaused(accountId)) {
+          throw new TaskPausedError(accountId);
+        }
+      },
     };
 
     try {
@@ -312,6 +323,35 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
         });
       }
     } catch (err) {
+      // M9 · 接管抢占 · 不计失败, task_run=paused, task=pending, 等 release 后下一 tick 续跑
+      if (err instanceof TaskPausedError) {
+        this.logger.warn(`task ${task.id} paused by takeover on acc ${accountId} · task_run → paused`);
+        await this.dataSource.query(
+          `UPDATE task_run SET logs = $1, finished_at = NOW(), status = 'paused', pause_snapshot = $2, error_code = 'TAKEOVER_PAUSED', error_message = '接管抢占 graceful pause' WHERE id = $3`,
+          [JSON.stringify(logs), JSON.stringify({ accountId, reason: 'takeover', pausedAt: new Date().toISOString() }), runId],
+        );
+        await this.dataSource.getRepository(TaskEntity).update(task.id, {
+          status: TaskStatus.Pending, // release 后重新参与调度
+          pausedAt: new Date(),
+          lastError: null,
+        });
+        return;
+      }
+      // M9 · hard-kill · 不计失败, task_run=interrupted, task=pending
+      if (err instanceof TaskInterruptedError) {
+        this.logger.warn(`task ${task.id} interrupted (hard-kill) on acc ${accountId}`);
+        await this.dataSource.query(
+          `UPDATE task_run SET logs = $1, finished_at = NOW(), status = 'interrupted', error_code = 'TAKEOVER_HARD_KILL', error_message = $2 WHERE id = $3`,
+          [JSON.stringify(logs), err.message, runId],
+        );
+        await this.dataSource.getRepository(TaskEntity).update(task.id, {
+          status: TaskStatus.Pending,
+          pausedAt: new Date(),
+          lastError: null,
+        });
+        return;
+      }
+
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`task ${task.id} executor threw: ${message}`);
       await this.dataSource.query(

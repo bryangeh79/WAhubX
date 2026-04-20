@@ -23,6 +23,7 @@ import { ScriptsTab } from './admin/ScriptsTab';
 import { WarmupTab } from './admin/WarmupTab';
 import { AiTab } from './admin/AiTab';
 import { HealthTab } from './admin/HealthTab';
+import { TakeoverTab } from './admin/TakeoverTab';
 
 const { Text, Paragraph } = Typography;
 
@@ -82,6 +83,7 @@ export function AdminPage() {
         { key: 'warmup', label: '养号计划', children: <WarmupTab /> },
         { key: 'ai', label: 'AI 配置', children: <AiTab /> },
         { key: 'health', label: '健康分', children: <HealthTab /> },
+        { key: 'takeover', label: '接管', children: <TakeoverTab /> },
         { key: 'queue', label: '任务队列', children: <QueueTab /> },
       ]}
     />

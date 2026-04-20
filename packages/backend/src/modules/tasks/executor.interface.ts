@@ -10,6 +10,12 @@ export interface TaskExecutorContext {
   accountId: number;
   // 运行期日志追加器. executor 调 ctx.log('step-name', true, {...}) 落 task_run.logs
   log: (step: string, ok: boolean, meta?: Record<string, unknown>) => void;
+  // M9 · 接管抢占检查 hook. executor 在 natural breakpoint (turn 之间) 调:
+  //   ctx.throwIfPaused?.()      → 被接管则抛 TaskPausedError, dispatcher 标 task_run=paused, 不扣分
+  //   ctx.isPaused?.()           → 返回 boolean 的只读探针, 供 executor 自己决定是 return skip 还是 throw
+  // 可选 · M3 spec 的 executor 不用改; 新 executor 可选接入.
+  throwIfPaused?: () => void;
+  isPaused?: () => boolean;
 }
 
 export interface TaskExecutorResult {

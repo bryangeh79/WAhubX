@@ -18,7 +18,9 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { Boom } from '@hapi/boom';
 import { DataSource, Repository } from 'typeorm';
@@ -100,6 +102,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(WaContactEntity) private readonly contactRepo: Repository<WaContactEntity>,
     @InjectRepository(ChatMessageEntity) private readonly messageRepo: Repository<ChatMessageEntity>,
+    // M9 · Optional for back-compat · app 真正启动总会注入 (EventEmitterModule.forRoot 全局)
+    @Optional() private readonly eventBus?: EventEmitter2,
   ) {}
 
   // ── 生命周期 ────────────────────────────────────────────
@@ -928,7 +932,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     waMessageId: string | null;
     pushName?: string | null;
     updateContactLastMessageAt?: boolean;
-  }): Promise<void> {
+  }): Promise<{ contactId: number; messageId: string }> {
+    let contactId = 0;
+    let messageId = '0';
     await this.dataSource.transaction(async (manager) => {
       let contact = await manager.findOne(WaContactEntity, {
         where: { accountId: params.accountId, remoteJid: params.remoteJid },
@@ -949,6 +955,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           await manager.update(WaContactEntity, contact.id, patch);
         }
       }
+      contactId = contact.id;
 
       const msg = manager.create(ChatMessageEntity, {
         accountId: params.accountId,
@@ -960,8 +967,34 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         sentAt: params.sentAt,
         waMessageId: params.waMessageId,
       });
-      await manager.save(msg);
+      const saved = await manager.save(msg);
+      messageId = String(saved.id);
     });
+
+    // M9 · 仅 inbound 消息从这里广播. Outbound 由 ChatsController 自行 emit (带 manual=true),
+    // 避免 executor 发的 out 被误标成 "手动" (执行器 send_to -> sendText -> persistMessage
+    // 走这条路径, 接管 UI 不应在非接管期间收到它们).
+    if (this.eventBus && params.direction === MessageDirection.In) {
+      try {
+        this.eventBus.emit('takeover.message.in', {
+          accountId: params.accountId,
+          contactId,
+          messageId,
+          remoteJid: params.remoteJid,
+          direction: params.direction,
+          msgType: params.msgType,
+          content: params.content,
+          mediaPath: params.mediaPath ?? null,
+          waMessageId: params.waMessageId,
+          sentAt: params.sentAt.toISOString(),
+          manual: false,
+        });
+      } catch (err) {
+        this.logger.debug(`emit takeover.message.in failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    return { contactId, messageId };
   }
 
   private inferMsgType(msg: WAMessage): MessageType {

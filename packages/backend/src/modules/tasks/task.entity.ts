@@ -71,4 +71,8 @@ export class TaskEntity {
 
   @Column({ type: 'timestamptz', name: 'updated_at', default: () => 'now()', onUpdate: 'now()' })
   updatedAt!: Date;
+
+  // M9 · 接管抢占暂停时刻 · 非 null = 任务被接管 pause, release 后 dispatcher 按 scheduledAt 续跑
+  @Column({ type: 'timestamptz', name: 'paused_at', nullable: true })
+  pausedAt!: Date | null;
 }

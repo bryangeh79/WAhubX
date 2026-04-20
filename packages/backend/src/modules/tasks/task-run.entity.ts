@@ -14,7 +14,9 @@ export enum TaskRunStatus {
   Running = 'running',
   Success = 'success',
   Failed = 'failed',
-  Skipped = 'skipped',  // 仲裁 soft-skip (e.g. warmup_stage 不够, 记录但允许后续重试)
+  Skipped = 'skipped',       // 仲裁 soft-skip (e.g. warmup_stage 不够, 记录但允许后续重试)
+  Paused = 'paused',         // M9 · 接管 graceful pause · resume 后从 pause_snapshot 续跑
+  Interrupted = 'interrupted', // M9 · hard-kill 30s 兜底 · 不扣分, 区分 failed
 }
 
 @Entity('task_run')
@@ -53,6 +55,11 @@ export class TaskRunEntity {
   // executor 写结构化步骤日志: [{ at, step, ok, meta }]
   @Column({ type: 'jsonb', default: () => "'[]'" })
   logs!: Array<{ at: string; step: string; ok: boolean; meta?: Record<string, unknown> }>;
+
+  // M9 · 抢占快照: executor 被 graceful-pause 时写 (当前 turn index / payload / cursor)
+  // resume 时 executor 读此字段从断点续跑 · null = 未被抢占过
+  @Column({ type: 'jsonb', name: 'pause_snapshot', nullable: true })
+  pauseSnapshot!: Record<string, unknown> | null;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;

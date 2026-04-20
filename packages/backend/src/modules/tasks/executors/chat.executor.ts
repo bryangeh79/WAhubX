@@ -21,9 +21,12 @@ export class ChatExecutor implements TaskExecutor {
     }
     this.logger.log(`chat task ${ctx.task.id} on account ${ctx.accountId} → ${payload.to} (stub M3)`);
     ctx.log('chat-prepared', true, { to: payload.to, textLen: payload.text.length });
+    // M9 · 接管抢占 breakpoint · 若已被接管, throw TaskPausedError · dispatcher 标 paused 不扣分
+    ctx.throwIfPaused?.();
     // M3 stub: 不真调 Baileys, 留给 M4 剧本引擎把 sendText 接进 ctx
     // M4 会在 ctx 里注入 BaileysService.sendText 的绑定, 避免 executor 直接耦合业务服务
     await new Promise((r) => setTimeout(r, 300));
+    ctx.throwIfPaused?.();
     ctx.log('chat-sent', true, {});
     return { success: true };
   }

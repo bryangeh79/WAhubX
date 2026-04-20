@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Collapse,
