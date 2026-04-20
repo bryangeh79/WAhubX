@@ -106,3 +106,48 @@
 - **Path C** · 启真 VM / ComfyUI / piper 准备工作 (需下载 deps)
 - **Path D** · 法务回来 · 填合同模板真实内容
 - **Path E** · 让 pilot 客户试包 (pre-build installer 后)
+
+---
+
+## Cascade [34]-[43] · X5 Dogfood + X3 prep · 2026-04-21
+
+| time | step | result | tag/commit |
+|---|---|---|---|
+| 2026-04-21 04:15 | [34] 真 build pilot kit rc2 | 58.6 KB zip · SHA B213FFF... · 16 真文件 + 3 placeholder | `build/pilot-kit-v1.0.0-rc2.zip` (本地) |
+| 2026-04-21 04:20 | [35]-[36] Scene 1+2 dogfood rc2 | CRITICAL-01 暴露: validate-env.ps1 编码炸; 发现 14 MAJOR/MINOR issues | `staging/dogfood-issues.md` |
+| 2026-04-21 04:25 | [37]-[38] Scene 3+4 | skip (无 installer · dev env 非典型动作) | — |
+| 2026-04-21 04:30 | [39] fix pass | 12/17 issues fixed · 5 V1.1 延 · validate-env 英文化 · link rewrite · RC 警告横幅 | commit bb25c68 |
+| 2026-04-21 04:40 | re-dogfood rc3 | zip 59.3 KB · SHA FB49F05... · validate-env 9/9 OK · 链接 sample 验证正确 | `build/pilot-kit-v1.0.0-rc3.zip` |
+| 2026-04-21 04:45 | [40] PILOT-READINESS-REPORT.md + tag | 7/10 评分 · 3 wave 建议 | **tag v1.0.0-rc3** |
+| 2026-04-21 04:55 | [41] icon-requirements.md | DESIGN-SPECS/ · 6 尺寸 ICO 规格 · 品牌色 · 3 设计方向 · 1 周交付 | (draft) |
+| 2026-04-21 05:05 | [42] LEGAL-REVIEW-NOTES.md | PDPA 7 原则 · 6 大类审阅条款 · Pilot 特别条款 draft · 律师 checklist | (draft) |
+| 2026-04-21 05:10 | [43] wrap + PROGRESS-LOG | X5+X3 prep session 总结 · 累积 local commits | **tag v1.0.0-rc3-final** |
+
+### X5 + X3 prep Session 总结 (2026-04-21)
+
+**X5 Dogfood 结果**:
+- 发现 17 issues (1 CRITICAL · 13 MAJOR · 3 MINOR)
+- 修 12 (71%) · V1.1 延 5
+- Pilot readiness 评分 · **7/10** (见 docs/PILOT-READINESS-REPORT.md)
+- 2 轮 dogfood 自动化 · CRITICAL 已根治
+
+**X3 prep 产出**:
+- `docs/DESIGN-SPECS/icon-requirements.md` · 给设计师的 wahubx.ico 规格
+- `docs/LEGAL-REVIEW-NOTES.md` · 给律师的 PDPA + Pilot 合同审阅重点
+
+**累积 local commits (post-push rc2)**:
+- `bb25c68` · fix(dogfood): cascade [34]-[40]
+- `(pending)` · docs(design+legal): cascade [41]-[42] + wrap
+
+**累积 local tags**:
+- `v1.0.0-rc3` @ bb25c68
+- `v1.0.0-rc3-final` @ (wrap commit · 本次)
+
+**HALT 触发情况**: 无 · 全程推进.
+
+**规则遵守**:
+- ✅ 不 push (累积等授权)
+- ✅ 不删文件
+- ✅ 不 rebase/amend
+- ✅ 不调付费 API
+- ✅ 不动 dev DB 既有数据
