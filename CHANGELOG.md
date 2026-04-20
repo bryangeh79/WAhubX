@@ -4,6 +4,54 @@
 
 ---
 
+## [v0.9.1-m9] · 2026-04-20 · M9 patch · Frontend 401 auto-refresh 拦截器
+
+**背景**: v0.9.0-m9 收工 handoff smoke 暴露漏洞. `JWT_ACCESS_TTL=15min`, 到期前端任一 HTTP
+请求 → 401 → 原 `api.ts` 拦截器直接 `setSession(null, null) + on401` 强登出. 演示场景每 15
+分钟踢回登录页 = 演示级 UX bug, 不接受为 V1.1 debt.
+
+**修复** (`packages/frontend/src/lib/api.ts`)
+- 401 首次命中 → 用 refresh token 调 `/auth/refresh` 换新 access → retry 原请求一次
+- 失败 (refresh 本身 401 / 网络错误) → 走原登出路径
+- 防无限循环: `original._retry` 标 · 同一 config 只 retry 1 次
+- 并发控制: `inflightRefresh` Promise · 多个同时 401 的请求共享 1 次 refresh
+- 豁免: `/auth/refresh` + `/auth/login` + `/auth/activate` 自身 401 不尝试 refresh (避免递归)
+- 去重: refresh 失败 catch 块检查 `getAccessToken() !== null` 才再调 on401 (auth 端点分支已清时跳过)
+
+**doRefresh 实现微调**: 原方案用裸 `axios.post` 避免递归. 改为走 `api` 实例 + `_retry=true` 标
++ 路径含 `/auth/refresh` 自动走 isAuthEndpoint 分支. 好处: 同一 MockAdapter 即可拦所有请求,
+测试简单.
+
+**测试** (`src/lib/api.test.ts`) · vitest + axios-mock-adapter + jsdom
+- 4 ut 覆盖: refresh 成功 silently 200 / refresh 失败清 session 调 on401 / 防无限循环 retry
+  后 401 不再 refresh / auth 端点 401 不触发 refresh
+- localStorage polyfill (jsdom 25 某些 runtime 下 `.clear` 缺失)
+
+**依赖新增** (frontend dev)
+- `vitest@^2` · `axios-mock-adapter@^2` · `jsdom@^25`
+
+**集成 smoke** (TTL=30s 加速模拟 20min idle)
+```
+[t=0s ] POST /auth/login                         → 200 · access + refresh
+[t=1s ] POST /takeover/1/acquire                 → 200
+[t=2s ] POST /chats/1/send-text #1 (fresh)       → 200 · waMessageId=3EB0349CC908E4B4F3846D
+[t=3s ] idle 35s (token TTL 过期)
+[t=38s] POST /chats/1/send-text #2 (expired)     → 401
+[t=38s] ↳ interceptor: 401 + 非 auth 端点 + _retry=false → 调 refresh
+[t=39s] ↳ POST /auth/refresh                     → 200 · new tokens
+[t=40s] ↳ retry original with new token          → 200 · waMessageId=3EB0D2348CEBE11045F2F5
+```
+两条不同 waMessageId = 两条真实消息都成功发到 slot 12 · 用户视角 send #2 silently 200
+
+**Constraint**: vitest 装在 frontend · 为 401 拦截器 + 未来更多 UI 测试准备. 后续建议所有新
+frontend 模块配 vitest · M10 / M7 文件都走这个方式.
+
+**Tag 策略**: v0.9.0-m9 已 push 远端 · 本补丁新增 `v0.9.1-m9` tag 指向补丁 commit · **不覆写
+v0.9.0-m9** (保护其他 clone 者 + 历史语义纯粹). v0.9.0-m9 = M9 首交付 · v0.9.1-m9 = M9 handoff
+发现的真 UX bug 立即补丁, 同一里程碑的修补版.
+
+---
+
 ## [v0.9.0-m9] · 2026-04-20 · M9 接管 UI · Takeover Lock + socket.io + 手动发消息 + Hard-kill 逃生口
 
 M9 里程碑: §B.8 接管锁状态机 · socket.io gateway (JWT handshake 强制 + 10s 断线 grace) · 手动 text/image/voice/file 发送 (95MB + MIME 白名单 + EXIF 剥离) · graceful pause (TaskPausedError) + 30s hard-kill 逃生口 (TaskInterruptedError, 不扣分) · 28/30min idle 双阶段桌面告警 · 前端 TakeoverTab (AdminPage 第 8 tab).
