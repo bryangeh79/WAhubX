@@ -1,33 +1,45 @@
 @echo off
 REM ============================================================
-REM WAhubX Installer Build Script (Day 1.5 · 骨架版)
+REM WAhubX Installer Build (M11 Day 5 完整版)
 REM ============================================================
-REM  完整版由 M11 Day 3-4 交付. 本 Day 1.5 只做:
-REM    1. 检查 deps/ 二进制齐全 (不齐则报错指引用户手动放)
-REM    2. 跑 iscc.exe 编译 .iss → output/WAhubX-Setup-v*.exe
+REM  步骤:
+REM    1. 检查 Inno Setup 6 安装
+REM    2. 清空 staging/
+REM    3. Build backend (pnpm run build) → copy dist + node_modules to staging/backend/
+REM    4. Build frontend (pnpm run build) → copy dist/ to staging/frontend/
+REM    5. Copy deps/node-lts-embedded → staging/node/
+REM    6. Copy deps/pgsql-portable → staging/pgsql/
+REM    7. Copy deps/redis-windows → staging/redis/
+REM    8. Copy scripts/*.bat + scripts/*.js → 见 .iss [Files] 引用
+REM    9. iscc.exe wahubx-setup.iss → output/WAhubX-Setup-v<ver>.exe
 REM
-REM  Day 3-4 要补的步骤 (TODO 标记):
-REM    - 调 build-backend.bat · 拷 dist/ + node_modules/ 到 staging/backend/
-REM    - 调 build-frontend.bat · 拷 vite dist/ 到 staging/frontend/
-REM    - 拷 deps/node-lts-embedded/* → staging/node/
-REM    - 拷 deps/pgsql-portable/* → staging/pgsql/
-REM    - 拷 deps/redis-windows/* → staging/redis/
-REM    - 拷 scripts/*.bat + scripts/*.js → scripts/ (已就绪时)
+REM  Prerequisite:
+REM    - Inno Setup 6 已装 (https://jrsoftware.org/)
+REM    - pnpm 在 PATH
+REM    - installer/deps/node-lts-embedded/ · pgsql-portable/ · redis-windows/ 齐
+REM      (若缺 · 脚本警告但继续 · 生成的 installer 不完整)
 REM
-REM Prerequisite:
-REM    Inno Setup 6.x · 安装后 iscc.exe 默认路径:
-REM        %ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
-REM        %LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
+REM  使用:
+REM    cd installer
+REM    build.bat
+REM
+REM  输出:
+REM    output\WAhubX-Setup-v<version>.exe
 REM ============================================================
 
 setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
+set INSTALLER_DIR=%cd%
+set REPO_ROOT=%INSTALLER_DIR%\..
 
-echo [M11 Day 1.5] WAhubX Installer Build (Skeleton)
+echo ============================================================
+echo [M11 Day 5] WAhubX Installer Build
+echo   installer: %INSTALLER_DIR%
+echo   repo:      %REPO_ROOT%
 echo ============================================================
 
-REM ── 查找 iscc.exe ──────────────────────────────────────
+REM ── 查找 iscc.exe ──
 set ISCC_EXE=
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set ISCC_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
 if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set ISCC_EXE=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
@@ -35,50 +47,130 @@ if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set ISCC_EXE=%LOCALAPPD
 if "!ISCC_EXE!"=="" (
     echo [ERROR] Inno Setup 6 not found.
     echo         Install from https://jrsoftware.org/isinfo.php
-    echo         Expected path: %%ProgramFiles^(x86^)%%\Inno Setup 6\ISCC.exe
     exit /b 1
 )
+echo [OK] iscc.exe: !ISCC_EXE!
 
-echo [OK] iscc.exe found: !ISCC_EXE!
+REM ── 找 pnpm ──
+where pnpm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] pnpm not found in PATH
+    exit /b 2
+)
+echo [OK] pnpm found
+
+REM ── 清空 staging ──
 echo.
+echo [1/9] Cleaning staging/
+if exist staging\backend rmdir /s /q staging\backend
+if exist staging\frontend rmdir /s /q staging\frontend
+if exist staging\node rmdir /s /q staging\node
+if exist staging\pgsql rmdir /s /q staging\pgsql
+if exist staging\redis rmdir /s /q staging\redis
+if not exist staging mkdir staging
+if not exist output mkdir output
 
-REM ── 检查 staging 目录 ──────────────────────────────────
-if not exist "staging" mkdir "staging"
-if not exist "output" mkdir "output"
-if not exist "assets" mkdir "assets"
-if not exist "deps" mkdir "deps"
-if not exist "scripts" mkdir "scripts"
-
-REM ── Day 1.5 骨架: staging 内容允许空 ─────────────────
-REM     .iss 的 Check: StagingExists() 过滤未就绪的 [Files] 条目
-REM     Day 3-4 build.bat 真填 staging/* 后 · 条目自动启用
-echo [INFO] staging/ contents (Day 1.5 · 允许为空):
-dir /b staging\ 2>nul
+REM ── Build backend ──
 echo.
+echo [2/9] Building backend...
+cd /d "%REPO_ROOT%\packages\backend"
+call pnpm run build
+if errorlevel 1 (
+    echo [ERROR] backend build failed
+    exit /b 3
+)
+echo [OK] backend dist/ built
 
-REM ── Day 1.5 assets 检查 · ICO 文件可选 ──────────────────
-if not exist "assets\wahubx.ico" (
-    echo [WARN] assets\wahubx.ico 不存在 · Inno Setup 会报错
-    echo         临时: 手动放任意 .ico 到 assets\ · 或注释掉 .iss 中 SetupIconFile 行
-    echo         Day 3+: 产品方交付正式品牌图标
-    REM 继续构建 · 让 iscc.exe 自己报错用户决定
+REM ── Copy backend ──
+echo.
+echo [3/9] Copying backend → staging/backend/
+mkdir "%INSTALLER_DIR%\staging\backend"
+xcopy /s /i /q dist "%INSTALLER_DIR%\staging\backend\dist" >nul
+xcopy /s /i /q node_modules "%INSTALLER_DIR%\staging\backend\node_modules" >nul
+copy /y package.json "%INSTALLER_DIR%\staging\backend\package.json" >nul
+echo [OK] backend staged
+
+REM ── Build frontend ──
+echo.
+echo [4/9] Building frontend...
+cd /d "%REPO_ROOT%\packages\frontend"
+call pnpm run build
+if errorlevel 1 (
+    echo [ERROR] frontend build failed
+    exit /b 4
+)
+echo [OK] frontend dist/ built
+
+REM ── Copy frontend ──
+echo.
+echo [5/9] Copying frontend → staging/frontend/
+mkdir "%INSTALLER_DIR%\staging\frontend"
+xcopy /s /i /q dist "%INSTALLER_DIR%\staging\frontend" >nul
+echo [OK] frontend staged
+
+REM ── Copy deps (portable binaries) ──
+cd /d "%INSTALLER_DIR%"
+
+echo.
+echo [6/9] Copying deps/node-lts-embedded → staging/node/
+if exist deps\node-lts-embedded (
+    xcopy /s /i /q deps\node-lts-embedded staging\node >nul
+    echo [OK] node staged
+) else (
+    echo [WARN] deps\node-lts-embedded missing · see deps\README.md for download
+    echo        installer will 生成 but 无 runtime · 仅用于测试 .iss 编译
 )
 
-REM ── 编译 ──
-echo [BUILD] iscc.exe wahubx-setup.iss
+echo.
+echo [7/9] Copying deps/pgsql-portable → staging/pgsql/
+if exist deps\pgsql-portable (
+    xcopy /s /i /q deps\pgsql-portable staging\pgsql >nul
+    echo [OK] pgsql staged
+) else (
+    echo [WARN] deps\pgsql-portable missing
+)
+
+echo.
+echo [7b/9] Copying deps/redis-windows → staging/redis/
+if exist deps\redis-windows (
+    xcopy /s /i /q deps\redis-windows staging\redis >nul
+    REM 拷 redis.conf (会被 .iss 单独复制一份到 {app}\app\redis)
+    if exist scripts\redis.conf copy /y scripts\redis.conf staging\redis\redis.conf >nul
+    echo [OK] redis staged
+) else (
+    echo [WARN] deps\redis-windows missing
+)
+
+REM ── Check assets/ icon ──
+echo.
+echo [8/9] Checking assets/wahubx.ico...
+if not exist assets\wahubx.ico (
+    echo [WARN] assets\wahubx.ico missing · Inno 会报错
+    echo        临时: 从 assets\README.md 指引放任意 .ico
+    echo        正式发布: 产品方交付
+)
+
+REM ── Run iscc ──
+echo.
+echo [9/9] Building installer with Inno Setup...
 "!ISCC_EXE!" /Qp wahubx-setup.iss
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] iscc.exe exit code !ERRORLEVEL!
-    exit /b !ERRORLEVEL!
+    echo         Common: assets\wahubx.ico 缺 / staging 目录结构不全 / Inno 脚本语法错误
+    exit /b 5
 )
 
 echo.
-echo [OK] Build complete. Output:
+echo ============================================================
+echo   Build complete. Output:
 dir /b output\*.exe
+echo ============================================================
 echo.
-echo ============================================================
-echo   Day 1.5 骨架版 · staging 空 · installer 能生成但跑起来无服务
-echo   Day 3-4 填 staging/backend + staging/frontend + deps/ 后才可真安装
-echo ============================================================
+echo Next steps:
+echo   1. node scripts/sign-wupd.js genkey   (if no production key yet)
+echo   2. Replace WAHUBX_UPDATE_PUBLIC_KEY_HEX in public-key.ts
+echo   3. Rebuild installer (this script)
+echo   4. Test install on clean VM
+echo   5. If ok · distribute .exe
 
 endlocal

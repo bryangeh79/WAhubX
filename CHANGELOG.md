@@ -4,6 +4,41 @@
 
 ---
 
+## [unreleased · M11 Day 5 build.bat 完整版] · 2026-04-20 · CI build 编排 9 步
+
+**Scope**: 纯 build script · 零 runtime 影响.
+
+### Changed
+- `installer/build.bat` · 从 Day 1.5 骨架升到完整 9 步编排
+  1. 检查 Inno Setup 6 安装
+  2. 清空 staging/
+  3. `pnpm run build` backend · 复制 dist/ + node_modules/ + package.json → staging/backend/
+  4. `pnpm run build` frontend · 复制 dist/ → staging/frontend/
+  5. 同 4 (其他打包)
+  6. Copy `deps/node-lts-embedded` → `staging/node/` (WARN 若缺)
+  7. Copy `deps/pgsql-portable` → `staging/pgsql/` (WARN 若缺)
+  7b. Copy `deps/redis-windows` → `staging/redis/` + redis.conf
+  8. 检查 `assets/wahubx.ico`
+  9. `iscc.exe wahubx-setup.iss` → `output/WAhubX-Setup-v*.exe`
+
+### 所需外部资源 (build 前准备)
+- **Inno Setup 6** · https://jrsoftware.org/isinfo.php
+- **pnpm** · 在 PATH
+- **Portable Node 20 LTS** · 下载到 `installer/deps/node-lts-embedded/`
+- **PostgreSQL 16 portable** · `installer/deps/pgsql-portable/`
+- **Redis for Windows** · `installer/deps/redis-windows/`
+- **`assets/wahubx.ico`** · 产品方图标
+
+### 降级模式 (deps 缺失)
+- 各 `deps/*` 缺则 WARN + 跳过该 copy
+- 生成的 .exe 能编译但**无 runtime** · 仅测 `.iss` 语法 / 流程正确性
+- 正式发布前必须齐 4 项 (node + pgsql + redis + ico)
+
+### Dry-run (18:37)
+backend pid 新 (重启 2 次) · risk_event 仍 2 · 稳定
+
+---
+
 ## [unreleased · M11 补强 1 · bootstrap] · 2026-04-20 · /version/bootstrap · fresh install 探测 (public endpoint)
 
 **Scope**: backend 新端点 · 仅查询 (COUNT) · 不 import M8 · 观察期并行安全.
