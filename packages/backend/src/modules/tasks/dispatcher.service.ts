@@ -220,8 +220,13 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       case 'skip-ip-group-busy':
       case 'skip-takeover-active':
       case 'skip-night-window':
-      case 'skip-health-high':
         // 保 pending 让下一轮 tick 重新评估
+        return;
+      case 'skip-health-high':
+        // M8 · 健康分 high · 观察性 log (cascade [3] 验证 · 原无 log)
+        this.logger.warn(
+          `task ${task.id} (${task.taskType}) skip-health-high · acc=${task.targetIds[0]} · 保 pending`,
+        );
         return;
       case 'leave-pending-unknown-type':
         // 按用户 2A 约束: warn + 保 pending, 不 reject

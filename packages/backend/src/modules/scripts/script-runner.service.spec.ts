@@ -31,6 +31,8 @@ function buildRunner(opts: {
   // M6 · AI 注入
   aiEnabled?: boolean;
   aiRewrite?: (text: string) => RewriteResult; // 自定义 AI 行为
+  // M7 Day 1 #6 · slot.persona 测 content-based hash
+  slotPersonaByAccount?: Record<number, Record<string, unknown> | null>;
 } = { scriptContent: {} }) {
   const sent: Sent[] = [];
   const cache: Array<Partial<RewriteCacheEntity>> = [...(opts.existingCache ?? [])];
@@ -76,8 +78,13 @@ function buildRunner(opts: {
   } as unknown as Repository<AssetEntity>;
 
   const slotRepo = {
-    findOne: async ({ where: { accountId } }: { where: { accountId: number } }) =>
-      ({ id: 100 + accountId, accountId }) as AccountSlotEntity,
+    findOne: async ({ where: { accountId } }: { where: { accountId: number } }) => {
+      const persona =
+        opts.slotPersonaByAccount && accountId in opts.slotPersonaByAccount
+          ? opts.slotPersonaByAccount[accountId]
+          : null;
+      return { id: 100 + accountId, accountId, persona } as AccountSlotEntity;
+    },
   } as unknown as Repository<AccountSlotEntity>;
 
   const accountRepo = {
@@ -434,6 +441,77 @@ describe('ScriptRunnerService.run', () => {
     expect(cache[0]?.source).toBe('m4_pool_pick');
   });
 
+  // ── M7 Day 1 #6 · personaHash 基于 slot.persona 内容 ──
+  it('persona 变化 · cache miss · 自动重算 (不同 personaHash)', async () => {
+    const personaA = {
+      persona_id: 'persona_a_01',
+      display_name: 'Jasmine A',
+      wa_nickname: 'A',
+      gender: 'female',
+      age: 28,
+      ethnicity: 'chinese-malaysian',
+      country: 'MY',
+      city: 'Petaling Jaya',
+      occupation: '电商客服',
+      languages: { primary: 'zh-CN', secondary: ['en'], code_switching: true },
+      personality: ['开朗', '碎碎念'],
+      speech_habits: {
+        sentence_endings: ['lah', 'lor', '啦'],
+        common_phrases: ['真的吗 la', '我 kena 啦', 'aiyo'],
+        emoji_preference: ['😊', '🙈'],
+        typing_style: '短句',
+        avg_msg_length: 12,
+      },
+      interests: ['吃 mamak', 'K-pop', '找 cafe'],
+      activity_schedule: {
+        timezone: 'Asia/Kuala_Lumpur',
+        wake_up: '08:30',
+        sleep: '23:30',
+        peak_hours: ['12:00-13:30'],
+        work_hours: '09:30-18:30',
+      },
+      avatar_prompt: '28yo Chinese Malaysian woman',
+      signature_candidates: ['吃饱没'],
+      persona_lock: true,
+    };
+    const personaB = { ...personaA, persona_id: 'persona_b_02', display_name: 'Amy B', age: 32 };
+
+    const { service, cache } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }] }],
+      },
+      slotPersonaByAccount: { 1: personaA },
+    });
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    const hashA = cache[0]?.personaHash;
+    expect(hashA).toMatch(/^[0-9a-f]{16}$/);
+
+    // 改 persona · 换帐号 (模拟新 persona)
+    const runner2 = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }] }],
+      },
+      slotPersonaByAccount: { 1: personaB },
+    });
+    await runner2.service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    const hashB = runner2.cache[0]?.personaHash;
+
+    expect(hashB).toMatch(/^[0-9a-f]{16}$/);
+    expect(hashA).not.toBe(hashB);
+  });
+
+  it('slot.persona 无效 · fallback 旧 hash · 仍产 16-hex 不炸', async () => {
+    const { service, cache } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['hi'] }] }],
+      },
+      slotPersonaByAccount: { 1: { partial: 'junk' } }, // 过不了 PersonaV1Schema
+    });
+    const result = await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(result.turnsExecuted).toBe(1);
+    expect(cache[0]?.personaHash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
   it('second run after AI miss 命中 cache · 不再调 AI', async () => {
     const aiCalls: string[] = [];
     const { service, cache } = buildRunner({
@@ -456,5 +534,74 @@ describe('ScriptRunnerService.run', () => {
     await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
     expect(aiCalls).toHaveLength(1); // 第二轮命中 cache, 不调 AI
     expect(cache[0]?.usedCount).toBe(2);
+  });
+
+  // ── M7 Day 1 #11 · 补强 1 · cache hit smoke (mock AI · 2 turn) ──
+  it('补强 1 · 同 persona 2 turn · 第 2 turn cache hit · used_count 递增 · AI 只调 1 次', async () => {
+    const aiCalls: string[] = [];
+    const persona = {
+      persona_id: 'persona_smoke_01',
+      display_name: 'Smoke Jasmine',
+      wa_nickname: 'Smoke',
+      gender: 'female',
+      age: 28,
+      ethnicity: 'chinese-malaysian',
+      country: 'MY',
+      city: 'Petaling Jaya',
+      occupation: '电商客服',
+      languages: { primary: 'zh-CN', secondary: ['en'], code_switching: true },
+      personality: ['开朗'],
+      speech_habits: {
+        sentence_endings: ['lah', 'lor', '啦'],
+        common_phrases: ['真的吗 la', '我 kena 啦', 'aiyo'],
+        emoji_preference: ['😊', '🙈'],
+        typing_style: '短句',
+        avg_msg_length: 12,
+      },
+      interests: ['吃 mamak', 'K-pop', '找 cafe'],
+      activity_schedule: {
+        timezone: 'Asia/Kuala_Lumpur',
+        wake_up: '08:30',
+        sleep: '23:30',
+        peak_hours: ['12:00-13:30'],
+        work_hours: '09:30-18:30',
+      },
+      avatar_prompt: '28yo Chinese Malaysian woman smoke test',
+      signature_candidates: ['吃饱没'],
+      persona_lock: true,
+    };
+    const { service, cache, sent } = buildRunner({
+      scriptContent: {
+        sessions: [{ name: 'main', turns: [{ turn: 1, role: 'A', type: 'text', content_pool: ['早'] }] }],
+      },
+      aiEnabled: true,
+      aiRewrite: (text) => {
+        aiCalls.push(text);
+        return {
+          ok: true,
+          text: `fake-ai-rewrite-${aiCalls.length}`,
+          providerUsed: 'mock',
+          modelUsed: 'mock-m',
+          latencyMs: 1,
+        };
+      },
+      slotPersonaByAccount: { 1: persona },
+    });
+    // Turn 1 · cache miss · AI 调用
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(aiCalls).toHaveLength(1);
+    expect(cache).toHaveLength(1);
+    expect(cache[0]?.usedCount).toBe(1);
+    const firstHash = cache[0]?.personaHash;
+    expect(firstHash).toMatch(/^[0-9a-f]{16}$/);
+    expect(sent[0].text).toBe('fake-ai-rewrite-1');
+
+    // Turn 2 · 同 persona 同 script 同 turn · cache HIT · AI 不再调
+    await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
+    expect(aiCalls).toHaveLength(1); // 仍 1 · 第 2 轮命中 cache
+    expect(cache).toHaveLength(1); // 不新增
+    expect(cache[0]?.usedCount).toBe(2); // used_count 递增
+    expect(cache[0]?.personaHash).toBe(firstHash); // hash 稳定
+    expect(sent[1].text).toBe('fake-ai-rewrite-1'); // 复用同一 variant
   });
 });

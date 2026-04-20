@@ -52,6 +52,10 @@ export class AssetEntity {
   @Column({ type: 'int', name: 'generated_for_slot', nullable: true })
   generatedForSlot!: number | null;
 
+  // M7 Day 1 #7 · 专属某 persona 则填; 通用池 null · FK persona(persona_id)
+  @Column({ type: 'text', name: 'persona_id', nullable: true })
+  personaId!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;
 }

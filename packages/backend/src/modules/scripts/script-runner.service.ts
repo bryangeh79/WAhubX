@@ -10,6 +10,11 @@ import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AiTextService } from '../ai/ai-text.service';
 import { AiSettingsService } from '../ai/ai-settings.service';
+import {
+  PersonaV1Schema,
+  computePersonaHash,
+  type PersonaV1,
+} from '../assets/persona.types';
 
 // 剧本 JSON 的最小运行时结构 (从 ScriptEntity.content 解析)
 interface SessionJson {
@@ -191,7 +196,7 @@ export class ScriptRunnerService {
   private async resolveText(scriptDbId: number, senderAccountId: number, turn: TurnJson): Promise<string | null> {
     if (!turn.content_pool || turn.content_pool.length === 0) return null;
 
-    const personaHash = this.personaHash(senderAccountId, scriptDbId, turn.turn);
+    const personaHash = await this.personaHashForRun(senderAccountId, scriptDbId, turn.turn);
     const hit = await this.cacheRepo.findOne({
       where: { scriptId: scriptDbId, turnIndex: turn.turn, personaHash },
     });
@@ -261,6 +266,49 @@ export class ScriptRunnerService {
     return candidates[this.randomInt(0, candidates.length - 1)];
   }
 
+  /**
+   * M7 Day 1 #6 · personaHash 改为 "persona 内容 + script/turn" 复合.
+   *
+   * 旧逻辑 (backward-compat alias `personaHash`): sha1(accountId|scriptDbId|turn) 截 16.
+   *   问题: slot.persona 变了 cache 仍命中 · 老 rewrite 串用.
+   *
+   * 新逻辑:
+   *   1. 读 slot.persona · 若能过 PersonaV1Schema · 用 computePersonaHash(persona) + script/turn 混合
+   *   2. 否则 fallback 旧签名 (保证不炸 M4 fixture / 历史无 persona 账号)
+   *
+   * Cache miss 策略 · slot.persona 换 → hash 变 → 自动重生成 · 符合产品预期.
+   */
+  private async personaHashForRun(
+    accountId: number,
+    scriptDbId: number,
+    turnIndex: number,
+  ): Promise<string> {
+    try {
+      const slot = await this.slotRepo.findOne({ where: { accountId } });
+      if (slot?.persona) {
+        const parsed = PersonaV1Schema.safeParse(slot.persona);
+        if (parsed.success) {
+          const personaContentHash = computePersonaHash(parsed.data as PersonaV1);
+          // mix in script/turn · 同 persona 不同剧本/轮 cache 独立
+          return crypto
+            .createHash('sha256')
+            .update(`${personaContentHash}|${scriptDbId}|${turnIndex}`)
+            .digest('hex')
+            .substring(0, 16);
+        }
+      }
+    } catch (err) {
+      this.logger.debug(
+        `personaHashForRun fallback · acc=${accountId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    return this.personaHash(accountId, scriptDbId, turnIndex);
+  }
+
+  /**
+   * Deprecated · M4 旧签名 · 仅作 fallback + backward-compat UT 保留.
+   * 生产路径走 personaHashForRun.
+   */
   private personaHash(accountId: number, scriptDbId: number, turnIndex: number): string {
     return crypto
       .createHash('sha1')

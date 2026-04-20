@@ -4,6 +4,49 @@
 
 ---
 
+## [unreleased · M7 Day 1 Batch B + Cascade [3] [4]] · 2026-04-20 · runner hash + migration 1780 + 机制 verify
+
+**Scope**: M7 Day 1 Batch B (#6 + #7 + #11) + cascade [3] 真降级 verify + [4] Layer B-lite
+
+### Added
+- `packages/backend/src/database/migrations/1780000000000-AddAssetPersonaId.ts` (NEW · #7)
+  - `asset_source_enum` ADD VALUE `'manual_upload'` (forward-only)
+  - `persona` 表 · PK=persona_id · JSONB content · content_hash + ethnicity + used_by_slot_ids + source · 2 indexes
+  - `asset.persona_id TEXT NULL` + FK ON DELETE SET NULL + idx
+  - **Live applied to dev DB** · columns verified
+- `packages/backend/src/modules/assets/persona.entity.ts` (NEW · #7)
+  - TypeORM entity for persona 表 · content 强类型为 PersonaV1
+- `ScriptRunnerService.personaHashForRun()` (NEW · #6)
+  - 读 slot.persona · PersonaV1Schema.safeParse · 过则 computePersonaHash(p) + scriptDbId + turnIndex 混合
+  - 不过则 fallback 旧 sha1(acc|script|turn) alias · M4 fixture + 历史无 persona 账号不炸
+- `ScriptRunnerService` 新 3 UT · 共 19/19 绿
+  - persona 变化 → 不同 personaHash
+  - slot.persona 无效 → fallback 16-hex 不炸
+  - 补强 1 · cache hit smoke (mock AI · 第 2 轮 AI 0 调 · used_count 递增)
+- `AssetEntity.personaId` 列 (TS)
+- `/admin/debug/inject-risk-event` endpoint (cascade [3]) · 支持 count + code + severity · 直 emit risk.raw
+- `DispatcherService` skip-health-high 加观察性 warn log (cascade [3] 验证用)
+
+### Changed
+- `app_setting.health.dry_run = false` (live · cascade [2])
+- `AssetSource` enum 已在 Batch A 加 `ManualUpload` · 本次 migration 把 PG enum 同步
+
+### Verified (cascade [3] [4])
+- **[3] 真降级 mechanism**: 20 risk_event 注入 → scorer 自动 rescore → DB risk_level=high, score=0 → dispatcher 连续 4 轮 skip-health-high log → AlertDispatcher → DesktopAlertChannel 路径 fired (生产 SnoreToast 由 installer 装)
+- **[4] M11 Day 5 Layer B-lite**: `/api/v1/version/apply-update` dryRun live · signature_valid=true + app_content_valid=true + migrations_valid=true · 全 pipeline 通 · Fresh-VM + installer.exe E2E blocked on prereq · 见 INVESTIGATION_NOTE.md
+- Tag: `v0.11.0-m11-codecomplete-smoke-pending` 本地 (push 待 [14])
+
+### Tests
+- **242/242 全绿** · 27 test suites · 之前 214 + 25 (Batch A) + 3 (#6) + 1 (#11) ≈ 243
+- Full backend build 零 TS error
+
+### Dev state
+- backend 停 (migration 后 · cascade [7]+ 不强制 live backend)
+- Account 1 risk_level 恢复 low · risk_event 清理
+- task.id=15 delete
+
+---
+
 ## [unreleased · M7 Day 1 #4-10 Batch A] · 2026-04-20 · PersonaV1 + sendStatusMedia + paths
 
 **Scope**: M7 素材库基础设施 · isolated/additive · 零现 runtime 影响 (新 API 未被调).
