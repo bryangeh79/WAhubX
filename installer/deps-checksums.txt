@@ -1,0 +1,38 @@
+# WAhubX installer · 依赖二进制 SHA-256 pinning
+# 防止供应链篡改 · release build 时 installer/scripts/verify-checksums.ps1 比对
+#
+# 格式: <relative-path>  <sha256-hex>
+# 空行和 # 开头行忽略
+#
+# 更新策略:
+#   - 每次升级依赖版本 · 重新 Get-FileHash · 提交变更
+#   - SHA 变化需 commit 消息说明 (防止静默替换)
+#   - Mismatch 则 installer build 中止
+
+# ── Node 20 LTS (Windows x64 portable) ──
+# 来源: https://nodejs.org/dist/v20.19.4/SHASUMS256.txt
+# node-v20.19.4-win-x64.zip
+node-lts-embedded.zip  <PENDING-FILL-AFTER-DOWNLOAD>
+
+# ── PostgreSQL 16.4 Windows Binaries ──
+# 来源: EnterpriseDB 无 checksum 文件 · 本项目自 Get-FileHash
+# postgresql-16.4-1-windows-x64-binaries.zip
+pgsql-portable.zip  <PENDING-FILL-AFTER-DOWNLOAD>
+
+# ── Memurai (Redis 7 compatible for Windows) ──
+# Developer Edition · 免费
+# memurai-developer-4.1.x.zip
+redis-windows.zip  <PENDING-FILL-AFTER-DOWNLOAD>
+
+# ── Piper TTS (Windows amd64) ──
+# 来源: GitHub release
+# piper_windows_amd64.zip
+piper.zip  <PENDING-FILL-AFTER-DOWNLOAD>
+
+# ── Piper Voice Models ──
+# HuggingFace hosted · 稳定 hash
+zh_CN-huayan-medium.onnx  <PENDING-FILL-AFTER-DOWNLOAD>
+en_US-amy-medium.onnx  <PENDING-FILL-AFTER-DOWNLOAD>
+
+# ── 产品方提供 ──
+wahubx.ico  <PENDING-FILL-FROM-DESIGNER>

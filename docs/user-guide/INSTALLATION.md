@@ -38,7 +38,17 @@
 
 ## 2. 下载 & 安装
 
-### 2.1 下载安装包
+### 2.1 预检
+
+装之前 · 跑一次环境检查 (2 分钟):
+
+```powershell
+pwsh .\scripts\validate-env.ps1
+```
+
+9 项检查全绿 · 可装. 有 FAIL · 先修 (参 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) §2).
+
+### 2.2 下载安装包
 
 向客服索取最新 `WAhubX-Setup-v1.0.x.exe` 下载链接 + SHA-256 校验值.
 

@@ -16,8 +16,15 @@
 
 ## 整流程 (30 min)
 
-### ① 下载 · 验 · 装 (~8 min)
+### ① 预检 · 下载 · 验 · 装 (~10 min)
 
+**先跑 pre-flight** (2 min):
+```powershell
+pwsh .\scripts\validate-env.ps1
+```
+全绿或仅 warning = 继续装.
+
+**下载 + 校验**:
 ```powershell
 # 校验 SHA-256 (客服给)
 Get-FileHash .\WAhubX-Setup-v1.0.0.exe -Algorithm SHA256

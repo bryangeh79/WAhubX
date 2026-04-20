@@ -38,8 +38,15 @@
 - **[../DEVELOPMENT.md](../DEVELOPMENT.md)** · 本地开发环境搭建 (开发者文档)
 - **[../UPGRADE.md](../UPGRADE.md)** · 升级流程 + E1/E2 recovery 路径
 - **[../DAY5-SMOKE-RUNBOOK.md](../DAY5-SMOKE-RUNBOOK.md)** · 升级包 smoke 测试手册
+- **[../RELEASE-V1.0.md](../RELEASE-V1.0.md)** · V1.0 GA 发布 checklist (17 节 · 170+ 项)
+- **[../../installer/deps/FETCH-DEPS.md](../../installer/deps/FETCH-DEPS.md)** · 依赖二进制下载手册
 - **[../M7-BUILTIN-SEED.md](../M7-BUILTIN-SEED.md)** · `_builtin` 素材生成流程
 - **[../M7-COMPLETE.md](../M7-COMPLETE.md)** · M7 架构说明 + V1.1 债
+
+**装机前脚本**:
+- `scripts/validate-env.ps1` · 客户机 pre-flight 9 项检查
+- `scripts/demo-fixtures.sql` · demo tenant + persona seed (dev UI 展示用)
+- `installer/scripts/verify-deps.ps1` · release build 前 deps 齐全检查
 
 ### 🤝 Pilot 联系人 / 销售
 

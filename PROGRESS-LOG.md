@@ -29,3 +29,9 @@
 | 2026-04-21 00:15 | [21] FEEDBACK-COLLECTION.md | 安装 10 问 + Bug Report + 周检 5 问 + 日志自助打包 + testimonial | (draft) |
 | 2026-04-21 00:18 | [22] KNOWN-LIMITATIONS-V1.md | 9 核心限制 + 6 误解为 bug 的正常降级 + V1.1 修复计划 | (draft) |
 | 2026-04-21 00:20 | [23] user-guide/README.md 索引 | 按角色 3 分组 + 文档地图 + 核心原则 | (draft) |
+| 2026-04-21 00:25 | [14-23] Path B commit | 9 文档 · 付费全可选原则贯穿 | commit 3c126de (本地) |
+| 2026-04-21 00:35 | [24] fetch-deps | FETCH-DEPS.md 详细下载手册 + verify-deps.ps1 + deps-checksums.txt | (draft) |
+| 2026-04-21 00:42 | [25] release-checklist | polish staging draft → docs/RELEASE-V1.0.md · 17 节 · 3 hard blockers 聚焦 | (draft) |
+| 2026-04-21 00:47 | [26] demo-fixtures.sql | tenant 999 + 3 persona + 3 mock accounts + health seeds · 幂等 ON CONFLICT | (draft) |
+| 2026-04-21 00:52 | [27] validate-env.ps1 | 客户机 pre-flight 9 项 · exit 1 on FAIL | (draft) |
+| 2026-04-21 00:55 | [28] polish | INSTALLATION + QUICK-START + README 交叉引用加 validate-env + release checklist | (edit) |
