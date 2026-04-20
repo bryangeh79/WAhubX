@@ -4,6 +4,41 @@
 
 ---
 
+## [unreleased · M11 Day 5 prep] · 2026-04-20 · sign-wupd CLI · genkey/sign/verify 三命令
+
+**Scope**: 纯 Node 脚本 · 零项目代码依赖 · CI / 发版用 · 零 runtime 影响.
+
+### Added
+
+- `scripts/sign-wupd.js` · 独立 CLI
+  - `genkey --out-dir <dir>` · Ed25519 密钥对 → privkey.pem (0600) + pubkey.pem + pubkey.hex
+  - `sign --wupd <path> --privkey <pem>` · 就地覆写 · 填 `manifest.signature = 'ed25519:<b64url>'`
+  - `verify --wupd <path> --pubkey-hex <64hex>` · 校验 + 打印 manifest · exit 0/1
+  - 与 backend `signing` module 独立实现 · 签出/验入兼容 (同 canonical JSON + 同 Ed25519)
+  - `.wupd` 格式对齐 `packages/backend/src/modules/update/wupd-codec.ts`
+
+### Live smoke 即时验证
+
+```
+$ node scripts/sign-wupd.js genkey --out-dir /tmp/wahubx-keys
+  ✓ pubkey.hex: 1b1f3104d89a10a0d3c53a7d112d4c4b3e85713b2079d0911390fbdcf30e7d2e
+
+$ <造 dummy .wupd · 353B>
+$ node scripts/sign-wupd.js sign --wupd /tmp/test.wupd --privkey ...
+  ✓ signed · signature: ed25519:04veWuBBYVK_EYrSK3hh9KY8iwPodFe82Bv2W016To… · 462B
+
+$ node scripts/sign-wupd.js verify --wupd /tmp/test.wupd --pubkey-hex 1b1f...
+  ✓ signature_valid · Manifest OK
+```
+
+Day 5 发版流程固化:
+1. 一次性生成生产密钥对 → 离线保管
+2. `pubkey.hex` 贴到 `WAHUBX_UPDATE_PUBLIC_KEY_HEX` (public-key.ts)
+3. build + pack `.wupd` (build.bat Day 5 补)
+4. `sign-wupd.js sign ...` → 分发
+
+---
+
 ## [unreleased · M11 Day 4 scripts] · 2026-04-20 · Installer 运行时脚本 (start/stop/init-db/generate-env/redis.conf)
 
 **Scope**: 纯脚本文件 · 不触 runtime · 观察期并行安全.
