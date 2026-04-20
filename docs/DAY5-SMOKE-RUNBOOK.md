@@ -455,8 +455,41 @@ cd ../../installer && build.bat
 
 Layer A 核心路径 (pack / sign / verify / 跨实现兼容 / backend 解析) **全通**.
 
-剩下的 apply 真执行需 Layer B (VM + real binaries) 或构造匹配 from_version 的 .wupd (改 backend package.json 版本再 smoke 一遍).
+### 9.1 Apply prepare (dryRun=true) 也通了 · 2026-04-20 19:07
+
+构造匹配当前版本的 .wupd (from=0.1.0 current · to=0.1.1-test) · 走 apply 完整 prepare 流程:
+
+```bash
+# pack-wupd → sign → POST /version/apply-update with dryRun=true
+curl -X POST /api/v1/version/apply-update \
+  -F "file=@staging/day5-smoke/test-matching.wupd" \
+  -F "dryRun=true"
+
+# 返回:
+{
+  "code": "PREPARED",
+  "staging_path": "C:\\...\\packages\\updates\\staging\\2026-04-20T11-07-16-043Z",
+  "pre_update_wab_path": null,   ← dryRun 跳过真 backup
+  "signal_path": null,            ← dryRun 跳过 signal file
+  "manifest": { ..., "signature": "ed25519:Knn..." },
+  "dry_run": true
+}
+```
+
+**Layer A 代码路径全线 live**:
+- pack-wupd CLI ✓
+- sign-wupd CLI ✓
+- signature 跨 CLI ↔ Backend 兼容 ✓
+- verify-upd 4 项 check ✓
+- apply-update prepare 路径 (preview → assertNoStaleSignal → double-check sha → dryRun skip 落地) ✓
+
+**仅剩未 live 在 dev 机验证的**:
+1. non-dryRun apply (会 process.exit · 需 installer 外壳接管才能真跑)
+2. Installer.exe 打包编译成果 (要 Inno Setup + portable binaries)
+3. 真 atomic rename app/ (installer 外壳 Pascal code)
+
+这 3 项 **= Layer B** · 待 Windows VM + portable binaries.
 
 ---
 
-_Last updated: 2026-04-20 19:00 · Layer A smoke 已 live 验证 · Layer B 待外部资源齐 · 随时可跑._
+_Last updated: 2026-04-20 19:07 · Layer A smoke **FULL PATH 已 live 验证** · apply dryRun=PREPARED · Layer B (non-dryRun + installer.exe) 待 VM/binaries._
