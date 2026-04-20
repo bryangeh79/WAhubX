@@ -25,6 +25,7 @@ import { AiTab } from './admin/AiTab';
 import { HealthTab } from './admin/HealthTab';
 import { TakeoverTab } from './admin/TakeoverTab';
 import { BackupTab } from './admin/BackupTab';
+import { UpgradeTab } from './admin/UpgradeTab';
 
 const { Text, Paragraph } = Typography;
 
@@ -86,6 +87,7 @@ export function AdminPage() {
         { key: 'health', label: '健康分', children: <HealthTab /> },
         { key: 'takeover', label: '接管', children: <TakeoverTab /> },
         { key: 'backup', label: '备份', children: <BackupTab /> },
+        { key: 'upgrade', label: '升级', children: <UpgradeTab /> },
         { key: 'queue', label: '任务队列', children: <QueueTab /> },
       ]}
     />

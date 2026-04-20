@@ -4,6 +4,42 @@
 
 ---
 
+## [unreleased · M11 Day 2.5] · 2026-04-20 · Admin UI 升级 Tab (纯 frontend 骨架)
+
+**Scope**: 纯 frontend 新文件 + AdminPage 第 10 tab · 零 backend 改动 · Day 3 后端就绪时
+直接无缝接入.
+
+### Added
+- `packages/frontend/src/pages/admin/UpgradeTab.tsx` · 完整 UI 骨架
+  - 当前版本显示 (计划 `GET /version/current`)
+  - `.wupd` 上传 + 预览 manifest (计划 `POST /version/verify-upd`)
+  - Preview 卡片: from/to · app_sha256 · 签名校验状态 · 版本兼容标签 (OK / MAJOR-bump / downgrade) ·
+    health_check · rollback strategy · migrations 列表
+  - Apply 按钮 (当前 disabled 加 tooltip "Day 3 后端就绪") · Popconfirm "确认升级"
+  - Progress modal · antd Steps 8 阶段 (verifying → pre-backup → stopping → replacing →
+    migrating → starting → health-check → done/rollback) · 失败走 rollback 显 `Result status=error`
+  - 成功显 "backend 断线 · 请刷新" Result + 刷新按钮
+- AdminPage 第 10 tab `升级` · 紧接 `备份` tab 后
+
+### Day 3-4 backend 对接点 (已在 UI 代码标 TODO)
+- `GET /version/current` · 返 `{ app_version, installer_fp: {arch, osMajor, ramBucket} }`
+- `POST /version/verify-upd` · multipart file · 返 `ManifestPreview + signature_valid + version_compat`
+- `POST /version/apply-update` · multipart file · 真升级 · backend 中途会自杀重启
+
+### Backend 不就绪时降级行为
+- `GET /version/current` 404 / 超时 → UI 顶部 `WARN banner` "Day 3-4 后就绪"
+- Apply 按钮 `disabled` + tooltip
+- Preview 仍可调 · 报错 `preview 失败 · 后端未就绪`
+
+### Tests
+- Frontend 既有 4 ut (401 refresh) 保持通过 · UpgradeTab 不写 UT (纯 UI · Day 3 再补集成测)
+- Backend 184/184 保持
+
+### Dry-run observation 持续
+Day 2.5 期间 backend live · 无改动 · dry-run 继续累积.
+
+---
+
 ## [unreleased · M11 Day 2] · 2026-04-20 · Ed25519 签名/验证模块 (standalone crypto)
 
 **Scope**: 纯 crypto 算法 · 不 import M8 health/dispatcher/risk · 不 import M10 backup · standalone.
