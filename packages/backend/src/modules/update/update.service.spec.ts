@@ -64,6 +64,59 @@ beforeAll(() => {
   signer = new Ed25519SignerService();
 });
 
+describe('VersionService · bootstrap (补强 1)', () => {
+  it('无 DataSource · 返保守 fresh=true', async () => {
+    const svc = new VersionService();
+    jest.spyOn(svc, 'getCurrent').mockReturnValue({
+      app_version: '0.11.0',
+      installer_fp: { arch: 'x64', osMajor: 'win10', ramBucket: '16G', createdAt: '2026-04-20T00:00:00.000Z' },
+    });
+    const r = await svc.bootstrap();
+    expect(r.fresh_install).toBe(true);
+    expect(r.platform_admin_exists).toBe(false);
+    expect(r.license_activated).toBe(false);
+    expect(r.app_version).toBe('0.11.0');
+  });
+
+  it('有 admin · 无 license · platform_admin_exists=true · license_activated=false · fresh=false', async () => {
+    const queryMock = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('role = \'admin\'')) return Promise.resolve([{ c: '1' }]);
+      if (sql.includes('machine_fingerprint')) return Promise.resolve([{ c: '0' }]);
+      if (sql.includes('FROM "users"')) return Promise.resolve([{ c: '1' }]);
+      return Promise.resolve([{ c: '0' }]);
+    });
+    const ds = { query: queryMock } as unknown as import('typeorm').DataSource;
+    const svc = new VersionService(ds);
+    jest.spyOn(svc, 'getCurrent').mockReturnValue({
+      app_version: '0.11.0',
+      installer_fp: { arch: 'x64', osMajor: 'win10', ramBucket: '16G', createdAt: '2026-04-20T00:00:00.000Z' },
+    });
+    const r = await svc.bootstrap();
+    expect(r.platform_admin_exists).toBe(true);
+    expect(r.license_activated).toBe(false);
+    expect(r.fresh_install).toBe(false);
+  });
+
+  it('has admin + activated license · 典型 existing install 状态', async () => {
+    const queryMock = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('role = \'admin\'')) return Promise.resolve([{ c: '1' }]);
+      if (sql.includes('machine_fingerprint')) return Promise.resolve([{ c: '1' }]);
+      if (sql.includes('FROM "users"')) return Promise.resolve([{ c: '5' }]);
+      return Promise.resolve([{ c: '0' }]);
+    });
+    const ds = { query: queryMock } as unknown as import('typeorm').DataSource;
+    const svc = new VersionService(ds);
+    jest.spyOn(svc, 'getCurrent').mockReturnValue({
+      app_version: '0.11.0',
+      installer_fp: { arch: 'x64', osMajor: 'win10', ramBucket: '16G', createdAt: '2026-04-20T00:00:00.000Z' },
+    });
+    const r = await svc.bootstrap();
+    expect(r.fresh_install).toBe(false);
+    expect(r.platform_admin_exists).toBe(true);
+    expect(r.license_activated).toBe(true);
+  });
+});
+
 describe('version.service · SemVer', () => {
   it('parseSemver · 提取 major/minor/patch/pre', () => {
     const p = parseSemver('0.11.0-m11');

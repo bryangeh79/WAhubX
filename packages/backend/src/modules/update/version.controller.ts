@@ -21,6 +21,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { UserRole } from '../users/user.entity';
 import { VersionService } from './version.service';
 import { UpdateService } from './update.service';
@@ -35,6 +36,19 @@ export class VersionController {
     private readonly versionSvc: VersionService,
     private readonly updateSvc: UpdateService,
   ) {}
+
+  /**
+   * M11 补强 1 · public · 未登录可调
+   * 给 installer + 前端首屏决策用 · fresh install / license 激活状态
+   *
+   * @Public 绕过全局 JwtAuthGuard · @Roles() 空 override 类级 Admin · RolesGuard 放行
+   */
+  @Public()
+  @Roles()
+  @Get('bootstrap')
+  async bootstrap() {
+    return this.versionSvc.bootstrap();
+  }
 
   @Get('current')
   current() {

@@ -4,7 +4,9 @@
 //   - Admin UI 升级 Tab 顶部显示
 //   - /version/verify-upd 判 from_version 匹配
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { readOrCreateFpInstaller } from '../licenses/fp-installer.util';
 
 export interface CurrentVersionInfo {
@@ -19,10 +21,36 @@ export interface CurrentVersionInfo {
 
 export type VersionCompat = 'ok' | 'same' | 'downgrade' | 'major-bump';
 
+/**
+ * M11 补强 1 · Bootstrap 信息 · 给 installer + frontend 首屏决策用
+ *
+ * Frontend 在未登录状态下调 `/version/bootstrap` (public endpoint):
+ *   - fresh_install=true + !license_activated → 跳 License Key 输入页
+ *   - !fresh_install + license_activated → 跳登录页
+ *   - fresh_install 但 license_activated → 奇怪状态 (部分迁移) · 显诊断 modal
+ *
+ * Installer 可 curl 调此端点 · 判断是否要跑 init-db.bat (已有 platform admin 则跳过)
+ */
+export interface BootstrapInfo {
+  /** 无任何 user 行 · 全新机器 · 需 License Key 激活流程 */
+  fresh_install: boolean;
+  /** 至少 1 个 tenant_id=null + role=admin (平台超管) 存在 */
+  platform_admin_exists: boolean;
+  /** 至少 1 个 license 激活 (machine_fingerprint 已绑) */
+  license_activated: boolean;
+  /** 当前 app 版本 */
+  app_version: string;
+}
+
 @Injectable()
 export class VersionService {
   private readonly logger = new Logger(VersionService.name);
   private cached: CurrentVersionInfo | null = null;
+
+  constructor(
+    // Bootstrap 需 DB 查询 · Optional 让单测不注入 DataSource 也能 new
+    @Optional() @InjectDataSource() private readonly dataSource?: DataSource,
+  ) {}
 
   /** 缓存 · 进程生命期 · 版本号不变 */
   getCurrent(): CurrentVersionInfo {
@@ -103,6 +131,44 @@ export class VersionService {
       current,
       compat: 'ok',
       reason: `PATCH/MINOR 升级 ${current} → ${to} · 自动安全`,
+    };
+  }
+
+  /**
+   * M11 补强 1 · bootstrap 查询
+   * 只读操作 · 不写 DB · public (installer/frontend 未登录可调)
+   */
+  async bootstrap(): Promise<BootstrapInfo> {
+    const appVersion = this.getCurrent().app_version;
+    if (!this.dataSource) {
+      // 单测场景 · 返保守 · fresh=true 以触发 License Key 流
+      return {
+        fresh_install: true,
+        platform_admin_exists: false,
+        license_activated: false,
+        app_version: appVersion,
+      };
+    }
+    const adminCount: Array<{ c: string }> = await this.dataSource.query(
+      `SELECT COUNT(*)::text AS c FROM "users" WHERE tenant_id IS NULL AND role = 'admin'`,
+    );
+    const platformAdminExists = Number(adminCount?.[0]?.c ?? '0') > 0;
+
+    const licenseCount: Array<{ c: string }> = await this.dataSource.query(
+      `SELECT COUNT(*)::text AS c FROM "license" WHERE machine_fingerprint IS NOT NULL AND revoked = false`,
+    );
+    const licenseActivated = Number(licenseCount?.[0]?.c ?? '0') > 0;
+
+    const userCount: Array<{ c: string }> = await this.dataSource.query(
+      `SELECT COUNT(*)::text AS c FROM "users"`,
+    );
+    const freshInstall = Number(userCount?.[0]?.c ?? '0') === 0;
+
+    return {
+      fresh_install: freshInstall,
+      platform_admin_exists: platformAdminExists,
+      license_activated: licenseActivated,
+      app_version: appVersion,
     };
   }
 

@@ -4,6 +4,50 @@
 
 ---
 
+## [unreleased · M11 补强 1 · bootstrap] · 2026-04-20 · /version/bootstrap · fresh install 探测 (public endpoint)
+
+**Scope**: backend 新端点 · 仅查询 (COUNT) · 不 import M8 · 观察期并行安全.
+
+M11 必做 #11 补强 1 "Fresh install vs upgrade 分叉" backend 侧具体落地.
+
+### Added
+- `GET /api/v1/version/bootstrap` · Public · 未登录可调
+  - 返 `{fresh_install, platform_admin_exists, license_activated, app_version}`
+  - Frontend 首屏 / Installer 诊断用
+- `VersionService.bootstrap()` · 3 SQL COUNT (users WHERE role=admin tenant_id=null ·
+  license WHERE machine_fingerprint IS NOT NULL · users total)
+- 权限: `@Public()` 绕 global JwtAuthGuard + `@Roles()` 空 override 类级 Admin
+
+### 修复 live 暴露的权限问题
+- 首次实装只加 `@Public()` · Day 5 smoke 发现 RolesGuard (类级 @Roles Admin) 仍拦 403
+- 加 `@Roles()` (empty) 在方法级 · override 类级 · RolesGuard 见 `required.length===0` 放行
+
+### Tests (+3 · 203/203 全绿)
+
+`update.service.spec.ts` (19 ut · 16 → 19):
+- bootstrap · 无 DS → 保守 fresh=true
+- bootstrap · admin 有 + license 无 → platform_admin_exists=true · license_activated=false
+- bootstrap · admin + license 都有 → 典型 existing install 状态
+
+### Live smoke
+```
+$ curl http://localhost:3000/api/v1/version/bootstrap  (无 auth · public)
+{
+  "fresh_install": false,
+  "platform_admin_exists": true,
+  "license_activated": true,
+  "app_version": "0.1.0"
+}
+```
+
+### Frontend 接入 TODO (Day 2.5 UpgradeTab 可复用)
+- 首屏未登录时先调 `/version/bootstrap`
+- `fresh_install=true` → License Key 输入页
+- `platform_admin_exists=false && !fresh_install` → 诊断 modal (数据损坏?)
+- 已登录就绕过 · 照常走 dashboard
+
+---
+
 ## [unreleased · M11 Day 5 prep pack] · 2026-04-20 · pack-wupd CLI + 跨实现兼容 smoke
 
 **Scope**: 纯 Node 脚本 · 复用 backend archiver (自动 fallback require 路径) · 零 runtime 影响.
