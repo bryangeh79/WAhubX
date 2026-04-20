@@ -1,10 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
-import { extractErrorMessage } from '@/lib/api';
+import { api, extractErrorMessage } from '@/lib/api';
 
 const { Title, Paragraph, Text } = Typography;
+
+interface BootstrapInfo {
+  fresh_install: boolean;
+  platform_admin_exists: boolean;
+  license_activated: boolean;
+  app_version: string;
+}
 
 interface ActivateFormValues {
   licenseKey: string;
@@ -19,6 +26,15 @@ export function ActivatePage() {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [bootstrap, setBootstrap] = useState<BootstrapInfo | null>(null);
+
+  // M11 补强 1 · 首屏诊断 · 区分 Fresh Install vs 重新激活
+  useEffect(() => {
+    api
+      .get<BootstrapInfo>('/version/bootstrap')
+      .then((res) => setBootstrap(res.data))
+      .catch(() => undefined); // backend 未就绪 · 不阻塞
+  }, []);
 
   const handleFinish = async (values: ActivateFormValues) => {
     setError(null);
@@ -37,6 +53,25 @@ export function ActivatePage() {
     <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: 24, background: '#f5f5f5' }}>
       <Card style={{ width: 520 }}>
         <Title level={3} style={{ marginBottom: 4 }}>激活 WAhubX</Title>
+        {bootstrap && (
+          <Alert
+            type={bootstrap.fresh_install ? 'success' : 'info'}
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              bootstrap.fresh_install
+                ? `全新安装 · v${bootstrap.app_version}`
+                : `已有数据 (${bootstrap.platform_admin_exists ? '有平台超管' : '无平台超管'}) · v${bootstrap.app_version}`
+            }
+            description={
+              bootstrap.fresh_install
+                ? '首次激活 · 将创建平台超管账号 + 绑定 License 到本机指纹'
+                : bootstrap.license_activated
+                ? '⚠ 本机已激活过 License · 如需换号请先从后台 revoke 旧 License'
+                : 'License 未绑定 · 本页可重新激活 · 但不会清除已有数据'
+            }
+          />
+        )}
         <Paragraph type="secondary" style={{ marginBottom: 16 }}>
           输入管理员发给你的 License Key, 并设置首个管理员账号. 该 License 将绑定到这台机器, 无法转移.
         </Paragraph>
