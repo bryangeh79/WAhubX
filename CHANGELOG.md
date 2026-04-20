@@ -4,6 +4,25 @@
 
 ---
 
+## [unreleased · M7 Day 5] · 2026-04-20 · StatusPost 真发图 + Persona pool scheduler
+
+### Changed
+- `StatusPostExecutor` Layer 1/2 接真发图 · `baileys.sendStatusMedia('image', base64)`
+  - Layer 1 · persona_id 匹配 asset.personaId · AI 生成的 persona-owned 专属图
+  - Layer 2 · `_builtin_images_life` 通用池 (Day 7 _builtin-seed CI 填)
+  - 文件缺失 / 发送失败 · 降级 layer 3 纯文本 · 不抛
+- Layer 3 (scripts/status_posts) + Layer 4 (skip) 原逻辑保留
+
+### Added
+- `PersonaPoolScheduler` · 每小时 tick · MY 04:00 触发 · 池 < 20 调 `PersonaGeneratorService.generate`
+  - 去重: 同一 MY 日只触发 1 次
+  - `refillNow()` 暴露给手动调用 + UT
+
+### Tests · 271/271 全绿 (34 + 1 = 35 suites)
+- PersonaPoolScheduler · 4 UT · 不 triggered when count≥20 · needed 计算 · 非 refill hour · 同日去重
+
+---
+
 ## [unreleased · M7 Day 4] · 2026-04-20 · Asset + Persona + Avatar services
 
 ### Added

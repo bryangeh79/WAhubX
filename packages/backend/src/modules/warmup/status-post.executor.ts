@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -7,6 +9,7 @@ import { ScriptEntity } from '../scripts/script.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { BaileysService } from '../baileys/baileys.service';
 import { WarmupPlanEntity, WarmupPhase } from './warmup-plan.entity';
+import { getDataDir } from '../../common/storage';
 
 // status_post 执行器 · §B.20 4 层素材降级
 // Phase gate (executor 内再 double check, calendar 已过过一次):
@@ -51,22 +54,24 @@ export class StatusPostExecutor implements TaskExecutor {
     });
     if (!slot) return { success: false, errorCode: 'NO_SLOT', errorMessage: `account ${ctx.accountId} 无 slot` };
 
-    // 层 1: persona custom pool (M5 暂无, M7 填)
-    const persona = (slot.persona ?? {}) as { statusPool?: string };
-    if (persona.statusPool) {
-      const asset = await this.pickAsset(persona.statusPool, AssetKind.Image);
+    // 层 1: persona custom pool (M7 Day 5 · 真发图 via sendStatusMedia)
+    const personaRaw = (slot.persona ?? {}) as {
+      persona_id?: string;
+      statusPool?: string;
+    };
+    if (personaRaw.persona_id) {
+      const asset = await this.pickPersonaOwnedAsset(personaRaw.persona_id, AssetKind.Image);
       if (asset) {
-        ctx.log('layer1-persona-pool-hit', true, { poolName: persona.statusPool });
-        // 真发图待 M7 素材到位. 当前代码路径通, 降到文字.
-        this.logger.warn('layer1 命中但 M5 未实装 image status, 降 fallback caption');
+        const sent = await this.trySendAssetImage(slot.id, asset, ctx, 'layer1-persona');
+        if (sent) return { success: true };
       }
     }
 
-    // 层 2: _builtin_* 兜底 (M5 期间空)
+    // 层 2: _builtin_* 兜底 (M7 Day 7 _builtin-seed CI 填 · 装后 installer 带)
     const builtinAsset = await this.pickAsset('_builtin_images_life', AssetKind.Image);
     if (builtinAsset) {
-      ctx.log('layer2-builtin-hit', true, { assetId: builtinAsset.id });
-      this.logger.warn('layer2 命中但 M5 未实装 image status, 降 fallback caption');
+      const sent = await this.trySendAssetImage(slot.id, builtinAsset, ctx, 'layer2-builtin');
+      if (sent) return { success: true };
     }
 
     // 层 3: script_pack status_posts 纯文本
@@ -92,6 +97,50 @@ export class StatusPostExecutor implements TaskExecutor {
     const candidates = await this.assetRepo.find({ where: { poolName, kind }, take: 20 });
     if (candidates.length === 0) return null;
     return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
+  private async pickPersonaOwnedAsset(personaId: string, kind: AssetKind) {
+    const candidates = await this.assetRepo.find({
+      where: { personaId, kind },
+      take: 20,
+    });
+    if (candidates.length === 0) return null;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
+  /**
+   * 读 asset 文件 → base64 → sendStatusMedia · 失败不抛 · 返 false 让上层继续降级
+   * M7 Day 5 · 把 layer 1/2 接真发图
+   */
+  private async trySendAssetImage(
+    slotId: number,
+    asset: AssetEntity,
+    ctx: TaskExecutorContext,
+    stage: string,
+  ): Promise<boolean> {
+    try {
+      const abs = path.join(getDataDir(), asset.filePath);
+      if (!fs.existsSync(abs)) {
+        ctx.log(`${stage}-file-missing`, false, { assetId: asset.id, path: asset.filePath });
+        return false;
+      }
+      const buf = fs.readFileSync(abs);
+      const base64 = buf.toString('base64');
+      const res = await this.baileys.sendStatusMedia(slotId, 'image', base64, {
+        mimeType: 'image/jpeg',
+      });
+      ctx.log(`${stage}-image-sent`, true, {
+        assetId: asset.id,
+        waMessageId: res.waMessageId,
+        bytes: buf.length,
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.log(`${stage}-send-failed`, false, { assetId: asset.id, error: msg });
+      this.logger.warn(`${stage} send failed · slot=${slotId}: ${msg}`);
+      return false;
+    }
   }
 
   /**
