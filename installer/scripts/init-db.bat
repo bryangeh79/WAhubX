@@ -22,7 +22,26 @@ if not exist "%WAHUBX_HOME%\data" mkdir "%WAHUBX_HOME%\data"
 if not exist "%WAHUBX_HOME%\data\config" mkdir "%WAHUBX_HOME%\data\config"
 if not exist "%WAHUBX_HOME%\data\slots" mkdir "%WAHUBX_HOME%\data\slots"
 if not exist "%WAHUBX_HOME%\data\tmp" mkdir "%WAHUBX_HOME%\data\tmp"
+if not exist "%WAHUBX_HOME%\data\assets" mkdir "%WAHUBX_HOME%\data\assets"
 if not exist "%WAHUBX_HOME%\backups" mkdir "%WAHUBX_HOME%\backups"
+
+:: M7 Day 1 · 债 1.2 · 复制 _builtin 素材 seed 到 data/assets/_builtin
+:: 仅 fresh install 跑 (data/assets/_builtin 不存在时)
+:: 源: {install}\seeds\_builtin (installer 打包时 build.bat 从 staging 放进来)
+:: 目: {install}\data\assets\_builtin
+set BUILTIN_SEED=%WAHUBX_HOME%\seeds\_builtin
+set BUILTIN_TARGET=%WAHUBX_HOME%\data\assets\_builtin
+if not exist "%BUILTIN_TARGET%" (
+    if exist "%BUILTIN_SEED%" (
+        echo [SEED] Copying _builtin assets from seed to data/assets/_builtin...
+        xcopy /s /i /q "%BUILTIN_SEED%" "%BUILTIN_TARGET%" >nul
+        echo   _builtin assets seeded.
+    ) else (
+        echo [WARN] %BUILTIN_SEED% not found · skip seed · M7 asset 池将为空
+    )
+) else (
+    echo [SKIP] _builtin assets already exist · not overwriting
+)
 
 :: 从 .env 读端口 + 密码
 set PG_PORT=5433

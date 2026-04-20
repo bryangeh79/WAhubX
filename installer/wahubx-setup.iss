@@ -84,6 +84,11 @@ Source: "scripts\generate-env.js"; DestDir: "{app}\scripts"; Flags: ignoreversio
 ; Brand assets (icon, README)
 Source: "assets\wahubx.ico"; DestDir: "{app}\assets"; Flags: ignoreversion; Check: FileExists(ExpandConstant('{src}\assets\wahubx.ico'))
 
+; M7 Day 1 · 债 1.2 · _builtin 素材 seed
+; 放到 {app}\seeds\_builtin\ · init-db.bat 首次安装时拷到 {app}\data\assets\_builtin
+; Day 2+ 升级时 seed 仍会覆盖 (但 init-db.bat 的 IF 守护 data/assets/_builtin 已存在则不覆盖)
+Source: "staging\data\assets\_builtin\*"; DestDir: "{app}\seeds\_builtin"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{src}\staging\data\assets\_builtin'))
+
 [Dirs]
 ; data 目录用户数据 · uninstall 默认保留
 Name: "{app}\data"; Permissions: users-full

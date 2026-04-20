@@ -173,6 +173,84 @@ const shouldRun = fs.existsSync(SIGN_CLI) && fs.existsSync(PACK_CLI);
     }).toThrow(/Command failed/);
   });
 
+  // M7 Day 1 #1 · 补强 3 · release blocker 级 guard · app_sha256 范围审计
+  // app.tar 不应含 data/ / backups/ / keys/ / .env · 防开发者误打包用户数据 wipe 客户 assets
+  describe('补强 3 · pack-wupd app.tar 内容 guard (release blocker)', () => {
+    it('含 data/ · 拒 pack (防 wipe 客户 assets)', () => {
+      const fakeTar = path.join(tmpDir, 'contaminated-data.tar');
+      fs.writeFileSync(
+        fakeTar,
+        Buffer.from('fake-tar-header-contents-including-data/assets/user-secret'),
+      );
+      expect(() => {
+        execFileSync(
+          'node',
+          [
+            PACK_CLI,
+            '--from', '0.1.0', '--to', '0.1.1',
+            '--app-tar', fakeTar,
+            '--out', path.join(tmpDir, 'should-reject-data.wupd'),
+          ],
+          { encoding: 'utf-8', stdio: 'pipe' },
+        );
+      }).toThrow(/Command failed/);
+    });
+
+    it('含 backups/ · 拒 (保护 .wab 备份不泄漏)', () => {
+      const fakeTar = path.join(tmpDir, 'with-backups.tar');
+      fs.writeFileSync(fakeTar, Buffer.from('fake-content-backups/manual/user-backup.wab'));
+      expect(() => {
+        execFileSync(
+          'node',
+          [
+            PACK_CLI,
+            '--from', '0.1.0', '--to', '0.1.1',
+            '--app-tar', fakeTar,
+            '--out', path.join(tmpDir, 'should-reject-backups.wupd'),
+          ],
+          { encoding: 'utf-8', stdio: 'pipe' },
+        );
+      }).toThrow(/Command failed/);
+    });
+
+    it('含 .env · 拒 (保护 secrets)', () => {
+      const fakeTar = path.join(tmpDir, 'with-env.tar');
+      fs.writeFileSync(fakeTar, Buffer.from('app-content.env=secret-data-here'));
+      expect(() => {
+        execFileSync(
+          'node',
+          [
+            PACK_CLI,
+            '--from', '0.1.0', '--to', '0.1.1',
+            '--app-tar', fakeTar,
+            '--out', path.join(tmpDir, 'should-reject-env.wupd'),
+          ],
+          { encoding: 'utf-8', stdio: 'pipe' },
+        );
+      }).toThrow(/Command failed/);
+    });
+
+    it('纯代码 app.tar · 通过 guard · 保护不误拒合法 payload', () => {
+      const cleanTar = path.join(tmpDir, 'clean-app.tar');
+      fs.writeFileSync(
+        cleanTar,
+        Buffer.from('dist/main.js dist/app.module.js node_modules/@nestjs/...'),
+      );
+      const outWupd = path.join(tmpDir, 'clean.wupd');
+      execFileSync(
+        'node',
+        [
+          PACK_CLI,
+          '--from', '0.1.0', '--to', '0.1.1',
+          '--app-tar', cleanTar,
+          '--out', outWupd,
+        ],
+        { encoding: 'utf-8', cwd: REPO_ROOT },
+      );
+      expect(fs.existsSync(outWupd)).toBe(true);
+    });
+  });
+
   it('wupd 格式自 identify · magic + manifest 可 parse', () => {
     const appTar = path.join(tmpDir, 'identify.tar');
     fs.writeFileSync(appTar, Buffer.from('test'));

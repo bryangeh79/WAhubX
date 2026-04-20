@@ -141,6 +141,24 @@ if exist deps\redis-windows (
     echo [WARN] deps\redis-windows missing
 )
 
+REM M7 Day 1 · 债 1.1 · 复制 _builtin 素材骨架 + seed 内容到 staging
+REM   来源: 仓库根 data/assets/_builtin/ (M5 commit 05c2159 建 · git tracked)
+REM   目的: staging/data/assets/_builtin/ · installer 打进去 · init-db.bat 安装时复制到 {app}/data
+echo.
+echo [7c/9] Copying data/assets/_builtin seed → staging/data/assets/_builtin/
+if exist "%REPO_ROOT%\data\assets\_builtin" (
+    mkdir "%INSTALLER_DIR%\staging\data\assets\_builtin" 2>nul
+    xcopy /s /i /q "%REPO_ROOT%\data\assets\_builtin" "%INSTALLER_DIR%\staging\data\assets\_builtin" >nul
+    echo [OK] _builtin seed staged
+    REM 体积审计 · M7 生成后应有 50MB+ · 此刻可能只有 .gitkeep + README
+    for /f "tokens=3" %%s in ('dir "%INSTALLER_DIR%\staging\data\assets\_builtin" /s /-c ^| find "File(s)"') do set BUILTIN_SIZE=%%s
+    echo        大小: !BUILTIN_SIZE! bytes (M7 完整填充后应 50MB+)
+) else (
+    echo [ERROR] data/assets/_builtin 不存在于仓库根 · M5 commit 05c2159 应已建
+    echo         检查: dir "%REPO_ROOT%\data\assets\_builtin"
+    exit /b 6
+)
+
 REM ── Check assets/ icon ──
 echo.
 echo [8/9] Checking assets/wahubx.ico...

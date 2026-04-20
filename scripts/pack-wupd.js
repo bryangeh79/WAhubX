@@ -132,6 +132,22 @@ async function main() {
     process.exit(3);
   }
   const appTar = fs.readFileSync(appTarPath);
+
+  // M7 Day 1 · 补强 3 · release blocker 级检查
+  // 扫 tar 内 entry 名 · 若含 'data/' · 'data\\' · 'backups/' · 拒 pack
+  // 防开发者误 include 用户数据 · 升级时覆盖客户 data/ (wipe assets 灾难)
+  const suspiciousPatterns = ['data/', 'data\\', 'backups/', 'backups\\', 'keys/', '.env'];
+  const tarText = appTar.toString('binary'); // 粗粒度扫 · tar 格式含 entry name 可读
+  const found = suspiciousPatterns.filter((p) => tarText.includes(p));
+  if (found.length > 0) {
+    console.error('ERROR: app.tar 含禁止路径 · 拒 pack');
+    console.error('  检测到: ' + found.join(', '));
+    console.error('  app.tar 只应含 packages/backend/dist + packages/frontend/dist 等代码产物');
+    console.error('  重新 tar: tar -cf app.tar -C packages/backend dist/ -C ../frontend dist/');
+    console.error('  (不要 tar 整个仓库! data/ + backups/ + keys/ 是用户私密数据 · 升级会 wipe)');
+    process.exit(10);
+  }
+
   const appSha = sha256Hex(appTar);
   console.log(`✓ app.tar · ${appTar.length}B · sha=${appSha.slice(0, 16)}…`);
 
