@@ -4,6 +4,50 @@
 
 ---
 
+## [unreleased · M7 Day 1 #4-10 Batch A] · 2026-04-20 · PersonaV1 + sendStatusMedia + paths
+
+**Scope**: M7 素材库基础设施 · isolated/additive · 零现 runtime 影响 (新 API 未被调).
+
+### Added
+- `packages/backend/src/modules/assets/persona.types.ts` (NEW · #4 + #5)
+  - `PersonaV1Schema` Zod 18-字段 schema · `persona_id/display_name/wa_nickname/gender/age/ethnicity/country/city/occupation/languages/personality/speech_habits/interests/activity_schedule/avatar_prompt/signature_candidates/persona_lock`
+  - `EthnicityMY` 枚举 · `chinese-malaysian` (V1) / `malay` (**永不实装**) / `indian-malaysian`/`mixed` (V1.1)
+  - `EthnicityNotImplementedError` + `assertEthnicityImplementedInV1()` 守护
+  - `canonicalSerializePersona()` · 排序 key · 排 `created_at` · UTF-8 Buffer
+  - `computePersonaHash()` · SHA-256 · 截前 16 hex · 跨平台稳定
+- `packages/backend/src/modules/assets/prompts/persona-zh-my.ts` (NEW · #4)
+  - 马华人口统计 seed · `AGE_DISTRIBUTION` / `MY_CITIES` / `MY_OCCUPATIONS` / `MY_SENTENCE_ENDINGS` (18 词) / `MY_COMMON_PHRASES` (18 条) / `MY_EMOJI_PREFERENCE` (4 组) / `MY_INTERESTS_LOCAL` (16 条) / `ACTIVITY_PATTERNS` (3 型)
+  - `buildPersonaGenPrompt()` · **14 硬约束** · 先调 `assertEthnicityImplementedInV1`
+  - `MAINLAND_LEAKAGE_TERMS` + `detectMainlandLeakage()` · 大陆梗/app/城市
+- `packages/backend/src/modules/assets/prompts/voice-prompts.ts` (NEW · Day 3 placeholder)
+  - `SUPPORTED_PIPER_MODELS` · `VOICE_POOL_CATEGORIES` (5 类) · `VOICE_TEXT_POOLS` · `buildPiperRequest()`
+  - 腔调说明 (补强 4): Piper zh-CN 大陆腔 · V1 只短语音 · V1.1 评估 fine-tune
+- `packages/backend/src/modules/assets/persona.types.spec.ts` (NEW · 20 UT)
+  - Schema validation · EthnicityMY V1 守护 · canonical serialize 稳定性 · computePersonaHash · prompt 生成 · mainland leakage
+- `BaileysService.sendStatusMedia()` (#8) · `packages/backend/src/modules/baileys/baileys.service.ts`
+  - image/voice/file → `status@broadcast` · 16MB 上限 · 不落盘 (status 24h 过期) · 写 `chat_message` 便于日历幂等
+- `AssetSource.ManualUpload = 'manual_upload'` (#9) · `packages/backend/src/modules/scripts/asset.entity.ts`
+  - Day 2 asset-studio UI 用户手动上传 · PG enum migration 在 Batch B #7
+- `storage.ts` 素材路径 helper (#10) · `packages/backend/src/common/storage.ts`
+  - `getAssetsDir()` / `getAssetPoolDir(kind, pool)` / `getBuiltinAssetPoolDir(...)` / `getAssetFilePath(...)` / `toAssetRelativePath(...)`
+  - 磁盘布局: `data/assets/<kind>/<pool>/<filename>` · `_builtin` 为 installer 预置只读
+  - `toAssetRelativePath` 强 forward slash · 跨平台导入一致
+- `packages/backend/src/common/storage.spec.ts` (NEW · 5 UT)
+
+### Deferred (Batch B · 明日 09:00)
+- #6 · runner 改用新 `computePersonaHash`
+- #7 · PG enum ADD VALUE `manual_upload` migration (forward-only)
+- #11 · 补强 1 · `_builtin/` 最小资源 smoke
+
+### Tests
+- 25/25 绿 (persona.types 20 + storage 5)
+- Full backend build 通过 · 零 TS error
+
+### Dry-run (21:30)
+continuing · 计划 22:45 关
+
+---
+
 ## [unreleased · M11 Day 5 build.bat 完整版] · 2026-04-20 · CI build 编排 9 步
 
 **Scope**: 纯 build script · 零 runtime 影响.

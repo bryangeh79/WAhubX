@@ -387,6 +387,77 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return { waMessageId };
   }
 
+  /**
+   * 发媒体 Status (M7 Day 1 #8 · 24h WA 动态 · image/video/voice).
+   * M5 Phase 2+ 养号日历 + M7 素材库 casual_status 用.
+   * jid = 'status@broadcast' · 消息载荷同 sendMedia 规则.
+   * 不落盘媒体 (status 24h 过期 · 无审计价值) · 仅写 chat_message 行便于日历幂等.
+   */
+  async sendStatusMedia(
+    slotId: number,
+    type: 'image' | 'voice' | 'file',
+    contentBase64: string,
+    options: { mimeType?: string; filename?: string; caption?: string } = {},
+  ): Promise<{ waMessageId: string | null }> {
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      throw new BadRequestException(
+        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+      );
+    }
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+
+    const buffer = Buffer.from(contentBase64, 'base64');
+    if (buffer.length === 0) throw new BadRequestException('contentBase64 解码后为空');
+    if (buffer.length > 16 * 1024 * 1024) {
+      throw new BadRequestException(`媒体大小超过 WA 16MB 上限 (${buffer.length} bytes)`);
+    }
+
+    let sendPayload: Parameters<WASocket['sendMessage']>[1];
+    let msgTypeEnum: MessageType;
+    switch (type) {
+      case 'image':
+        sendPayload = { image: buffer, caption: options.caption };
+        msgTypeEnum = MessageType.Image;
+        break;
+      case 'voice':
+        sendPayload = {
+          audio: buffer,
+          ptt: true,
+          mimetype: options.mimeType ?? 'audio/ogg; codecs=opus',
+        };
+        msgTypeEnum = MessageType.Voice;
+        break;
+      case 'file':
+        sendPayload = {
+          document: buffer,
+          fileName: options.filename ?? 'file.bin',
+          mimetype: options.mimeType ?? 'application/octet-stream',
+          caption: options.caption,
+        };
+        msgTypeEnum = MessageType.File;
+        break;
+    }
+
+    const sendResult = await sock.sendMessage('status@broadcast', sendPayload);
+    const waMessageId = sendResult?.key?.id ?? null;
+
+    await this.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: 'status@broadcast',
+      direction: MessageDirection.Out,
+      msgType: msgTypeEnum,
+      content: options.caption ? `[STATUS] ${options.caption}` : `[STATUS ${type}]`,
+      sentAt: new Date(),
+      waMessageId,
+    });
+
+    return { waMessageId };
+  }
+
   // ── 读取 (controller 用) ───────────────────────────────
   async listContacts(accountId: number) {
     return this.contactRepo.find({

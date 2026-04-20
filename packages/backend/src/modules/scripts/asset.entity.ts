@@ -20,6 +20,7 @@ export enum AssetSource {
   AiGenerated = 'ai_generated',
   Imported = 'imported',
   Pack = 'pack',
+  ManualUpload = 'manual_upload', // M7 Day 1 #9 · 用户前端手动上传 · Day 2 asset-studio UI 用
 }
 
 @Entity('asset')
