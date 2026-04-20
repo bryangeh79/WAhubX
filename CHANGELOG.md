@@ -4,6 +4,60 @@
 
 ---
 
+## [unreleased · M11 Preamble] · 2026-04-20 · fp 文件命名统一 (观察期内破例提交)
+
+**破例背景**: dry-run 观察期 (2026-04-20 14:52 起 24-48h) 原则上不开 M11 代码. 用户明确破例:
+> M11 Preamble (fp 统一) 属纯命名重构 · 不触 health/dispatcher/risk
+> scope 严格限 fp 三文件 + migration + 文档 · 其他任何 M11 代码禁
+
+**动机**: M10 smoke 暴露 M1 `machine-fingerprint.txt` (32 hex) 与 M10 `master-key-fingerprint.txt`
+(64 hex) 用途正交但命名笼统 · 将来 M11 installer 再起第 3 份会继续爆命名冲突.
+M11 Preamble 先统一, Day 1 开始一切新代码按新名写.
+
+**不做** (严格锁定, 等观察期结束才开):
+- ❌ Inno Setup .iss 任何行 · UpdateService · Ed25519 · .wupd 逻辑 · 升级 UI
+- ❌ health / dispatcher / risk / scorer 任何行
+
+### Changed · fp 命名统一
+
+**文件重命名** (`data/config/`):
+- `machine-fingerprint.txt` → `fp-license.txt` (M1 License 绑定用 · 32 hex)
+- `master-key-fingerprint.txt` → `fp-master-key.txt` (M10 AES 密钥派生源 · 64 hex)
+
+**向后兼容** (V1.1 可删 fallback 分支):
+- `machine-id.util.getMachineId()` 启动时检测旧名 · 合法则 rename 到新名 + 删旧
+- `MachineBoundMasterKeyProvider` 构造时调 `migrateLegacyMasterKeyFingerprint()` 同逻辑
+- 旧名格式非法时**不动** · 让上层报错走 E2 recovery 路径 (不自动损坏)
+
+### Added · fp-installer.txt (M11 Preamble 新文件)
+
+- `packages/backend/src/modules/licenses/fp-installer.util.ts`
+- 格式 JSON: `{ arch, osMajor, ramBucket, createdAt, installerVersion: '1.0' }`
+- 粗粒度算法 (故意):
+  - `arch` = `os.arch()` (x64 / arm64 / ia32)
+  - `osMajor` = `deriveOsMajor()` · Windows 走 release build (22000+ = win11) · macOS 走 Darwin map · Linux 走 kernel major
+  - `ramBucket` = 向下取 {4G, 8G, 16G, 32G, 64G+} 档
+- `readOrCreateFpInstaller()` 返 `{current, stored, matches, wasFreshlyGenerated}` · M11 后续 installer 用此判兼容性
+- **不参与任何加密** · 纯信息报告 · 不硬拒绝 · 让用户 / installer 策略层决策
+
+### Tests (+ 16 new UT · 171/171 全绿)
+
+- `fp-installer.util.spec.ts` · 7 ut (ramBucket 边界 · osMajor · compute · readOrCreate 首次/二次/硬件变/损坏 JSON)
+- `machine-id.util.spec.ts` · 4 ut (首次新名 · legacy 迁移 · legacy 非法不迁 · 新旧并存不覆盖)
+- `machine-bound-master-key.migration.spec.ts` · 5 ut (无 legacy · legacy 合法迁移 · legacy 非法保留 · 并存不覆盖 · 构造触发迁移)
+
+### Docs
+
+- 技术交接文档 §6 · `data/config/` 块更新 · 列 3 份 fp 文件 + 出处 M 号
+
+### Constraints (M11 Preamble 破例范围)
+
+- 仅 fp 三文件 + 迁移 fallback + UT + 文档 · **零**业务逻辑改动
+- 后端启动时老数据 (M10 遗留 `master-key-fingerprint.txt`) 会一次性被重命名
+- 观察期结束、真 M11 开工时, 这些命名已就位 · Day 1 加 Inno / Ed25519 等按新名直接用
+
+---
+
 ## [v0.10.0-m10] · 2026-04-20 · M10 备份/升级基础设施 · §B.11 三层策略 + MasterKey 机器绑定
 
 M10 里程碑: 每日本地快照 (whitelist + A+ missed 补跑 + 7 天 retention) · `.wab` 手动导出/导入

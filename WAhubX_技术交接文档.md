@@ -529,8 +529,9 @@ C:\WAhubX\
 ├─ data\                         用户数据（升级时保留）
 │  ├─ config\
 │  │  ├─ license.json
-│  │  ├─ machine-fingerprint.txt    (M1 · License 绑定 · 32 hex · SHA-256 前 16B)
-│  │  ├─ master-key-fingerprint.txt (M10 · MachineBound 加密密钥派生源 · 64 hex)
+│  │  ├─ fp-license.txt             (M11 · License 绑定 · 32 hex · SHA-256 前 16B · ← M1 machine-fingerprint.txt)
+│  │  ├─ fp-master-key.txt          (M11 · MachineBound AES 密钥派生源 · 64 hex · ← M10 master-key-fingerprint.txt)
+│  │  ├─ fp-installer.txt           (M11 · Installer 硬件兼容性 · JSON · {arch, osMajor, ramBucket, createdAt, installerVersion})
 │  │  ├─ ai-providers.json.backup   (可选, 人工导出; M6 起运行时 keys 存 DB ai_provider.api_key_encrypted)
 │  │  └─ settings.json
 │  ├─ db\                        PostgreSQL/SQLite
