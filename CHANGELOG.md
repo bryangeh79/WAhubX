@@ -4,6 +4,28 @@
 
 ---
 
+## [unreleased · M7 Day 7] · 2026-04-20 · _builtin-seed CI script
+
+### Added
+- `scripts/generate-builtin-assets.js` · CLI · 5 persona variants × (10 images + 10 voice) across 3 image pools + 3 voice pools
+  - `--mode stub` (default) · 生 tiny PNG/OGG placeholder · ~12MB · CI smoke 可跑
+  - `--mode real` · 调 FluxService + PiperService · 未实装 (exit 20 · Day 8 batch smoke 接)
+  - `--personas` / `--images` / `--voices` / `--out` 可配
+  - **Exit 10** 若超 100MB · GitHub Releases 外挂 · HALT
+- `docs/M7-BUILTIN-SEED.md` · 生成流程 + 大小约束 + installer 打包路径 + release 授权 flow
+
+### Stub smoke 验证 (2 persona × 3 img × 3 voice)
+- 12 files · 1.41 MB · 目录结构对齐 StatusPostExecutor Layer 2 期望
+
+### 锁定
+- real mode 待 Day 8 batch smoke 接 Flux + Piper service
+- `data/assets/*` 已在 .gitignore · stub 产出不会意外入库
+- 真 release 素材由 git LFS 或 GitHub Releases 分发
+
+### Tests · 271/271 still green
+
+---
+
 ## [unreleased · M7 Day 6] · 2026-04-20 · AssetsTab + backend controller
 
 ### Added
