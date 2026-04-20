@@ -4,6 +4,24 @@
 
 ---
 
+## [unreleased · M7 Day 4] · 2026-04-20 · Asset + Persona + Avatar services
+
+### Added
+- `asset.service.ts` · CRUD + 池抽签 · forward-slash filePath · persona-owned 优先 · 通用池 fallback
+- `persona-generator.service.ts` · AI 驱动 PersonaV1 批量生成 · Zod validate · leakage filter · hash dedupe · report shape
+- `avatar-generator.service.ts` · Flux 4 候选 · 评分选 1 · 全低 regenerate 1 轮 · 再低 fallback arr[0]
+  - V1 评分: base64 bytes >= 20KB + seed deterministic (V1.1 替换 CLIP score + face-api)
+- 3 spec files · 11 UT 全绿 (create/delete/count + AI happy/leakage/fail + 3 avatar path + score helper)
+
+### 锁定
+- 无 face-api / CLIP score (V1.1)
+- 无 live Flux smoke (推 Day 8)
+- 无 AvatarGenerator 持久化 (Day 6 UI 从 winner.image.base64 接到 AssetService.create)
+
+### Tests · 267/267 全绿 (31 + 3 = 34 suites)
+
+---
+
 ## [unreleased · M7 Day 3] · 2026-04-20 · Piper adapter + voice service
 
 ### Added
