@@ -4,6 +4,50 @@
 
 ---
 
+## [unreleased · M11 Day 1.5] · 2026-04-20 · Installer 基座 (Inno Setup .iss + Node 嵌入 placeholder)
+
+**Scope**: 纯配置 + 占位文件 · 零 runtime / backend / frontend 改动 · dry-run 观察期并行允许
+(模块对 M8 health 完全正交).
+
+### Added
+- `installer/wahubx-setup.iss` · Inno Setup 6.x 脚本 · 改编自 FAhubX main 分支 (commit ref `a6eb016` 前)
+  - 品牌 FAhubX → WAhubX · 新 AppId UUID
+  - 默认安装目录 `C:\WAhubX` · OutputBaseFilename `WAhubX-Setup-v{ver}`
+  - 简化 FAhubX 的 Local/Cloud 模式选项 · **WAhubX V1 本地桌面 only**
+  - Port Configuration 页保留 · 默认端口 3000 (backend) / 5433 (pg) / 6380 (redis)
+  - **补强 2 · Uninstall 保 data/**: 默认仅删 `{app}\app\*` · Task checkbox `clean_data` 勾上才递归删 `{app}\data` + `{app}\backups`
+  - 中文简体 + 英文双语
+- `installer/deps/README.md` · Node 20 LTS 嵌入方式说明 + 占位目录
+- `installer/assets/README.md` · 图标资源说明 (wahubx.ico 需用户提供)
+- `installer/scripts/README.md` · 占位 (Day 3 真写 init-db / generate-env)
+- `installer/build.bat` · 最简版 · 构建流程骨架 (Day 3-4 填 stage/backend/frontend 复制)
+- `.gitignore` 追加 `installer/output/`, `installer/staging/`, `installer/deps/node-*/`
+- `installer/.gitkeep` 保留空子目录结构
+
+### Constraints
+- **不**跑 staging/backend 与 staging/frontend 复制 · 那需 Day 3-4 UpdateService
+- **不**拷 Node 20 LTS 二进制到 `deps/node-lts-embedded/` · 文件大 (~60MB) 不进 Git · CI build.bat 步骤下载
+- **不** SignTool.exe · V1 不做 Code Signing (见 M11 Code Signing constraint)
+
+### Windows Code Signing · **V1 不做** (决策调整 · 2026-04-20)
+
+~~~~
+原 M11 propose 计划 Code Signing 生产发布前必购 · **撤销** · 对齐 FAhubX 发布模式
+~~~~
+
+- 目标市场 (马来西亚私域运营者) SmartScreen 警告接受度高
+- WA 自动化工具签名反而可能触发反病毒标记 (行为特征合规边缘)
+- V1 客户 onboarding 视频 / README 教 "Run anyway" 即可 (产品层, 非代码 scope)
+- `installer/build.bat` 不调 SignTool.exe · `.exe` 文件名含版本号方便识别
+- **V1.1+ 若出现任一情况再评估**:
+  - 客户数 > 100
+  - 企业客户要求
+  - 反病毒软件 false positive 频发
+
+Ed25519 做 `.wupd` **内容完整性** (M11 Day 2 实装) · 不依赖 Authenticode 身份证明.
+
+---
+
 ## [unreleased · M11 Preamble] · 2026-04-20 · fp 文件命名统一 (观察期内破例提交)
 
 **破例背景**: dry-run 观察期 (2026-04-20 14:52 起 24-48h) 原则上不开 M11 代码. 用户明确破例:
