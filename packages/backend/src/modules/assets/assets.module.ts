@@ -11,17 +11,29 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AssetsController } from './assets.controller';
 import { AssetService } from './asset.service';
 import { PersonaGeneratorService } from './persona-generator.service';
+import { AvatarGeneratorService } from './avatar-generator.service';
 import { PersonaPoolScheduler } from './persona-pool.scheduler';
 import { PersonaEntity } from './persona.entity';
 import { AssetEntity } from '../scripts/asset.entity';
 import { AiModule } from '../ai/ai.module';
+import { FluxModule } from './flux/flux.module';
+import { PiperModule } from './piper/piper.module';
 
-// Note: AvatarGeneratorService + FluxService + PiperService 需 FluxModule/PiperModule 提供
-// 这些 M7 Day 8 batch smoke 时才 wire · AssetsTab UI 不直接调
+// M7 Day 8 · Flux + Piper modules wired · AvatarGenerator 现可 DI 注入
 @Module({
-  imports: [TypeOrmModule.forFeature([PersonaEntity, AssetEntity]), AiModule],
+  imports: [
+    TypeOrmModule.forFeature([PersonaEntity, AssetEntity]),
+    AiModule,
+    FluxModule,
+    PiperModule,
+  ],
   controllers: [AssetsController],
-  providers: [AssetService, PersonaGeneratorService, PersonaPoolScheduler],
-  exports: [AssetService, PersonaGeneratorService],
+  providers: [
+    AssetService,
+    PersonaGeneratorService,
+    AvatarGeneratorService,
+    PersonaPoolScheduler,
+  ],
+  exports: [AssetService, PersonaGeneratorService, AvatarGeneratorService],
 })
 export class AssetsModule {}

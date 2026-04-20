@@ -4,6 +4,88 @@
 
 ---
 
+## [v0.12.0-m7 · M7 code-complete] · 2026-04-20 · 素材库 + Persona + Avatar + Voice
+
+> Day 1-8 cascade 8 commits · 31 new UT · 271/271 total
+> Live E2E smoke 待 prereq (ComfyUI + piper + 真账号) · 同 M11 Layer B 模式
+
+### M7 Scope 总览
+
+**基础设施** (Day 1):
+- PersonaV1 Zod schema · 18 字段 · EthnicityMY 枚举 (V1 仅 chinese-malaysian)
+- canonicalSerializePersona + computePersonaHash (SHA-256 · 16 hex · created_at 排除)
+- Migration 1780 · persona 表 + asset.persona_id FK + enum 'manual_upload'
+- BaileysService.sendStatusMedia · status@broadcast image/voice/file
+- storage.ts asset path helpers · forward-slash relative paths
+- ScriptRunnerService.personaHashForRun · slot.persona 内容基 hash · fallback alias
+
+**生成能力** (Day 2-4):
+- Flux adapter · local (ComfyUI) + Replicate + auto backend selection
+- Piper TTS · subprocess wrap · 8s cap (补强 4 · 避大陆腔)
+- PersonaGeneratorService · AI → Zod → leakage filter → dedupe
+- AvatarGeneratorService · Flux 4 候选 · 评分 · regenerate/fallback
+
+**运行时** (Day 5):
+- StatusPostExecutor Layer 1/2 真发图 (sendStatusMedia)
+- PersonaPoolScheduler · 每小时 tick · MY 04:00 refill pool < 20
+
+**管理 UI** (Day 6):
+- AssetsController (6 endpoints) + AssetsTab frontend
+- 配额显示 (100 img + 50 voice / persona)
+
+**生产 seed** (Day 7):
+- generate-builtin-assets.js · stub mode verified
+- docs/M7-BUILTIN-SEED.md · 流程 + 大小约束 + installer 打包
+
+**DI 收尾** (Day 8):
+- FluxModule + PiperModule · 从 env/settings 构造
+- AvatarGeneratorService 现可完整 DI
+- docs/M7-COMPLETE.md · 架构图 + 受限 PASS 说明 + V1.1 债
+
+### Tests · 271/271 全绿
+
+| Module | UT |
+|---|---|
+| persona.types (Zod + hash + leakage) | 20 |
+| storage (asset paths) | 5 |
+| script-runner (hash + cache) | 3 (new) |
+| flux (local + replicate + service) | 8 |
+| piper (adapter + service + estimateSec) | 6 |
+| asset.service | 3 |
+| persona-generator.service | 3 |
+| avatar-generator.service | 3 (+ 2 score helper) = 5 |
+| persona-pool.scheduler | 4 |
+| **M7 new total** | **57** |
+
+### 锁定约束
+
+- V1 ethnicity 仅 `chinese-malaysian` · `malay` 永不实装
+- Piper voice = 大陆腔 huayan · < 8s 限制避露馅 · V1.1 fine-tune
+- 无 face-api / CLIP score · AvatarGenerator 简化评分 (bytes + seed deterministic)
+- 无 live E2E smoke (推 prereq 就绪后 · Day 8 schedule)
+
+### 已知 blocker (v1.0 GA 前必补)
+
+1. ComfyUI setup 文档 (docs/FLUX-LOCAL-SETUP.md 待写)
+2. piper.exe + 模型分发 (installer bundle vs 首次下载 · 待决策)
+3. _builtin/ 真素材 (real mode · git LFS 或 GH Releases)
+4. Settings UI 补 assets.* (Day 6 基础版 · 配 flux_backend / replicate_token 交互)
+
+### Tag `v0.12.0-m7` @ 33da66a + 后续 Day 7/8 commits
+
+累计 M7 commits:
+- Day 1 Batch A: `66833c8`
+- Day 1 Batch B + cascade 3-4: `5a7be90`
+- Day 2: (tag only · included in 5a7be90 stream)
+- Day 3: `14fedfe`
+- Day 4: (rolled into Day 5 stream)
+- Day 5: `98b821f`
+- Day 6: `33da66a`
+- Day 7: (本次)
+- Day 8: (本次)
+
+---
+
 ## [unreleased · M7 Day 7] · 2026-04-20 · _builtin-seed CI script
 
 ### Added
