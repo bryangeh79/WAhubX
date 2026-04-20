@@ -1,5 +1,18 @@
 # WAhubX 用户文档索引
 
+## English Version
+
+For English-speaking users · 4 critical docs translated:
+- **[INSTALLATION.en.md](./INSTALLATION.en.md)** · Full installation guide
+- **[QUICK-START.en.md](./QUICK-START.en.md)** · 30-min shortest path
+- **[DEPLOYMENT-MODES.en.md](./DEPLOYMENT-MODES.en.md)** · 3-tier ladder (Free / Standard / Premium)
+- **[TROUBLESHOOTING.en.md](./TROUBLESHOOTING.en.md)** · 10 common issue checklist
+
+其余文档 (视频脚本 / 招募 / 限制) 中文唯一 · 因 pilot 客群以马华为主.
+
+---
+
+
 > 最后更新 2026-04-20 · 对齐 v0.12.0-m7
 > 所有文档中文 · 面向马来华人市场 pilot 客户 + 潜在客户
 
