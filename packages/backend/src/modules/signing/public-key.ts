@@ -22,9 +22,15 @@
 // 当前值: **dev placeholder** (全 0) · 本地开发 · 不验真签名 · UT 用临时生成对
 //   生产发布前必须换成真公钥 · build.bat 加检查步骤 · 全 0 拒绝进 production build
 
-/** 32B Ed25519 公钥 · hex 编码 (64 hex 字符) */
+/** 32B Ed25519 公钥 · hex 编码 (64 hex 字符)
+ *
+ * **M11 Day 5 smoke 用 dev key** · 对应 keys/privkey.pem (gitignored)
+ * Production 发布前生成新的 keypair · 替换此 hex · 重 build.
+ *
+ * 当前 dev key 公钥 (2026-04-20 生成):
+ */
 export const WAHUBX_UPDATE_PUBLIC_KEY_HEX =
-  '0000000000000000000000000000000000000000000000000000000000000000';
+  '3dfd279320bee09e67a5dc6a2fd8268e4cd65edb2b7edb15632709c36260e78f';
 
 /** 判断当前是否为 dev 占位公钥 (全 0) · production build 必须替换 */
 export function isDevPlaceholderKey(): boolean {

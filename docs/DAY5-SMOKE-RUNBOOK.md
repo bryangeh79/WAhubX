@@ -1,13 +1,19 @@
 # M11 Day 5 · 端到端升级 Smoke Runbook
 
-> **状态**: 代码 / UT / CLI / docs 全就位 · 等外部资源齐全后执行本 runbook 完成 M11 收工 smoke.
+> **状态**: 代码 / UT / CLI / docs 全就位 · Day 5 smoke 分两层:
 >
-> **阻塞项** (用户/产品方提供):
+> **Layer A · Dev 机 backend 层 smoke** (本 runbook · 一键可跑):
+> - pack + sign + backend verify + apply prepare (无 process.exit · 安全)
+> - 需要: dev key (已备 `keys/`) + test.wupd (已备 `staging/day5-smoke/`) + dev-snapshot.sh
+> - **2026-04-20 已部分完成** · 见第 8 节 live 证据
+>
+> **Layer B · Installer.exe 端到端 smoke** (需 clean Windows VM):
+> 阻塞外部资源:
 > - `installer/deps/node-lts-embedded/` · Node 20 LTS portable (~60MB)
 > - `installer/deps/pgsql-portable/` · PostgreSQL 16 portable (~200MB)
 > - `installer/deps/redis-windows/` · Redis for Windows (~8MB)
 > - `installer/assets/wahubx.ico` · 产品图标
-> - 生产 Ed25519 密钥对 · 贴 hex 到 `packages/backend/src/modules/signing/public-key.ts`
+> - Clean Win10/11 VM 或物理测试机
 
 ---
 
@@ -355,4 +361,102 @@ CHANGELOG 整合所有 unreleased section 到 `[v0.11.0-m11]` 正式段落.
 
 ---
 
-_Last updated: 2026-04-20 · M11 Day 5 prep 全就位 · 待外部资源齐全后按本 runbook 执行_
+## 8. Layer A · Dev 机一键 smoke (已就位 · 可直接跑)
+
+### 8.1 前置 · dev 环境 snapshot (防 brick)
+
+```bash
+cd /c/AI_WORKSPACE/Whatsapp\ Auto\ Bot
+./scripts/dev-snapshot.sh snapshot --notes "before-day5-smoke"
+# 输出: dev-snapshots/dev-snapshot-<ts>.tar.gz
+# 含: packages/backend/data/ + backups/ + DB 全量 dump
+```
+
+出错时随时 `./scripts/dev-snapshot.sh restore dev-snapshot-<ts>` 还原.
+
+### 8.2 一键验证 (已备物料)
+
+物料清单 (已生成 · gitignored):
+- `keys/privkey.pem` · dev Ed25519 私钥 (本地 · 0600)
+- `keys/pubkey.hex` · `3dfd279320bee09e67a5dc6a2fd8268e4cd65edb2b7edb15632709c36260e78f`
+- `staging/day5-smoke/app.tar` · dummy app.tar (10KB)
+- `staging/day5-smoke/test.wupd` · pack+sign 完成 (816 bytes)
+- `packages/backend/src/modules/signing/public-key.ts` · 已填 dev pubkey
+
+```bash
+# 1. 背景 backend 健在
+curl -sI http://localhost:3000/api/v1/health | head -1
+# HTTP/1.1 200 OK
+
+# 2. 登录
+PLAT=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"platform@wahubx.local","password":"Test1234!"}' \
+  | python -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
+
+# 3. Backend /version/verify-upd · 期望 signature_valid=true (dev key 匹配)
+# ⚠ curl 路径必须 Windows 绝对 (/tmp 在 bash 和 node 解读不同)
+curl -s -X POST http://localhost:3000/api/v1/version/verify-upd \
+  -H "Authorization: Bearer $PLAT" \
+  -F "file=@C:/AI_WORKSPACE/Whatsapp Auto Bot/staging/day5-smoke/test.wupd"
+
+# 期望 JSON 字段:
+#   signature_valid: true       ← 2026-04-20 验证通过
+#   app_content_valid: true     ← SHA-256 跨实现一致
+#   migrations_valid: true      ← 空 migration · OK
+#   version_compat: downgrade   ← test.wupd from 0.11.0-m11 · current 0.1.0 不匹配 (预期 · 本机没升级过)
+#   can_apply: false            ← version 不适配 · 正确拒
+```
+
+### 8.3 若要测 apply prepare 阶段 (不 process.exit)
+
+需要改 test.wupd 的 from_version 匹配 current (或改 current app_version). 为 Layer A smoke 不破 current · 留给 Layer B 正式测.
+
+### 8.4 dev key → production 切换 (发布前必做)
+
+```bash
+# 1. 生成生产密钥对 · 离线保管
+mkdir ~/wahubx-prod-keys
+node scripts/sign-wupd.js genkey --out-dir ~/wahubx-prod-keys/
+# 记下 pubkey.hex 内容
+
+# 2. 替换 public-key.ts 的 WAHUBX_UPDATE_PUBLIC_KEY_HEX
+# (vim 或 sed · 绝对路径: packages/backend/src/modules/signing/public-key.ts)
+
+# 3. rebuild + 重 UT
+cd packages/backend && pnpm test && pnpm run build
+
+# 4. 删 dev 密钥 (或移走)
+rm -rf keys/
+
+# 5. installer/build.bat 重构 · 生成 production .exe
+cd ../../installer && build.bat
+```
+
+---
+
+## 9. Layer A smoke 2026-04-20 live 证据
+
+**已执行**:
+```
+[18:59:22] pack-wupd CLI → staging/day5-smoke/test.wupd · 816B
+[18:59:22] sign-wupd CLI → signed with keys/privkey.pem
+[18:59:22] verify-wupd CLI → ✓ signature_valid
+
+[19:00:xx] backend rebuild + restart with public-key.ts=dev hex
+[19:00:xx] POST /version/verify-upd → {
+             "signature_valid": true,        ← 跨实现兼容 ✓
+             "app_content_valid": true,
+             "migrations_valid": true,
+             "version_compat": "downgrade",  ← 预期 · 非适配
+             "can_apply": false
+           }
+```
+
+Layer A 核心路径 (pack / sign / verify / 跨实现兼容 / backend 解析) **全通**.
+
+剩下的 apply 真执行需 Layer B (VM + real binaries) 或构造匹配 from_version 的 .wupd (改 backend package.json 版本再 smoke 一遍).
+
+---
+
+_Last updated: 2026-04-20 19:00 · Layer A smoke 已 live 验证 · Layer B 待外部资源齐 · 随时可跑._

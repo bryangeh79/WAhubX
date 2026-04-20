@@ -129,12 +129,15 @@ describe('Ed25519VerifierService', () => {
   });
 
   it('verify 在 NODE_ENV=production 下 dev placeholder (全 0) 公钥 · ok=false · code=DEV_PLACEHOLDER_KEY_IN_PROD', () => {
+    // M11 Day 5 · 默认 WAHUBX_UPDATE_PUBLIC_KEY_HEX 现已填 dev key (非全 0)
+    // 本测试显式传全 0 hex 模拟 production build 忘替换场景
     const origEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';
     try {
       const manifest = buildManifest();
       const signed = signer.sign(manifest, testKeys.privateKeyPem);
-      const result = verifier.verify(signed); // 不传 publicKeyHex · 走默认全 0
+      const allZero = '0'.repeat(64);
+      const result = verifier.verify(signed, { publicKeyHex: allZero });
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.code).toBe('DEV_PLACEHOLDER_KEY_IN_PROD');
     } finally {

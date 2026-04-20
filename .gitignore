@@ -20,6 +20,12 @@ build/
 .env.*.local
 *.pem
 *.key
+# M11 · dev/prod 密钥对存放处 · 永不入仓库
+keys/
+# dev snapshot backups · 防 smoke brick
+dev-snapshots/
+# M11 Day 5 · test .wupd + staging (root-level only · installer/staging 仍保)
+/staging/
 
 # ───────── Editor / OS ─────────
 .vscode/
