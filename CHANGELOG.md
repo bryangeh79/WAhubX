@@ -4,6 +4,76 @@
 
 ---
 
+## [unreleased · M11 Day 3] · 2026-04-20 · UpdateService backend · .wupd preview + 路由
+
+**Scope**: 新 backend module · `/version/*` 路由 · 不 import M8 health/dispatcher/risk. apply
+真实装在 Day 4 (需 installer 外壳配合原子 rename).
+
+### Added (`packages/backend/src/modules/update/`)
+
+- `wupd-codec.ts` · `.wupd` 文件格式 codec
+  - Magic `WUPD` + version 1 + reserved 3B + manifest length + manifest JSON + inner zip
+  - `parseWupdHeader()` · 只读 header · preview 用
+  - `extractWupdPayload()` · 解 inner zip · 返 `{appTar, migrations: Map}`
+  - `verifyAppSha256()` · `verifyMigrations()` · SHA-256 比对
+- `version.service.ts` · 当前版本 + fp-installer + SemVer 兼容判断
+  - `getCurrent()` · cache · app_version (读 package.json / env) + fp-installer (`readOrCreateFpInstaller`)
+  - `assessCompat(from, to)` · 返 `{ok | same | downgrade | major-bump}` + reason
+  - `parseSemver / semverCompare` · export (给 UT 用)
+- `update.service.ts` · 升级业务
+  - `preview(wupdBuf)` · 完整: 签名 + 版本兼容 + app sha256 + migrations sha256 四项 check · 返 `PreviewResult`
+  - `apply(wupdBuf)` · **Day 3 骨架** · 返 `{code: 'NOT_IMPLEMENTED'}` · Day 4 补真逻辑
+- `version.controller.ts` · Admin-only
+  - `GET  /api/v1/version/current`       返 CurrentVersionInfo
+  - `POST /api/v1/version/verify-upd`    multipart · 返 PreviewResult (不写状态)
+  - `POST /api/v1/version/apply-update`  multipart · Day 3 返 `{code: 'NOT_IMPLEMENTED'}`
+- `update.module.ts` · 独立 · 仅 depends AuthModule · 自动拿 `@Global` Signing + Backup
+
+### PreviewResult 字段 (给 Day 2.5 UI 消费)
+
+```
+{
+  manifest: WupdManifest,
+  file_bytes,
+  signature_valid: boolean,
+  signature_fail_code? : 'MISSING_SIGNATURE' | 'SIGNATURE_MISMATCH' | ...,
+  signature_fail_message?,
+  version_compat: 'ok' | 'same' | 'downgrade' | 'major-bump',
+  version_compat_reason,
+  app_content_valid: boolean,       // app.tar 的 sha256 vs manifest.app_sha256
+  migrations_valid: boolean,        // 每条 migration 的 sha256 vs manifest.migrations[i].sha256
+  migrations_issues?: { missing[], mismatch[] },
+  can_apply: boolean                // 所有 check 通过才 true
+}
+```
+
+### Tests (+15 · 199/199 全绿 · 超目标 20 的 75%)
+
+- `update.service.spec.ts` (15 ut):
+  - SemVer 2: parseSemver + semverCompare (PATCH/MINOR/MAJOR/pre-release)
+  - preview 6: happy path · magic mismatch · 5 种 version_compat 场景
+  - tamper 2: app.tar 改 → app_content_valid=false · migration 缺失 → missing
+  - codec 3: verifyAppSha256 · verifyMigrations (ok/mismatch)
+  - apply 1: Day 3 skeleton 返 NOT_IMPLEMENTED
+  - module test 1: signer generateKeyPair 共享测试 key · 给 verify 用
+
+### Day 4 TODO (apply 真实装)
+
+- 注入 BackupExportService · pre-update 备份 (新 source 'pre-update')
+- extractWupdPayload · 落盘 `staging/app.tar` + `staging/migrations/*.sql`
+- 写 signal file `C:\WAhubX\updates\staging\apply.signal.json`
+- `process.exit(0)` · installer 外壳 (Inno Setup 编译 util) 监测 exit + signal file
+  - 接管: atomic rename `app/ → app-old/` + `staging/app-new/ → app/`
+  - 启新 backend · TypeORM 跑新 migrations
+  - health check 失败 → rename back + restore pre-update.wab
+
+### Dry-run observation 持续稳定
+
+Day 3 期间 backend pid 不变 · dry_run=true · acc 1/2 score=100 level=low · risk_event 仍 2.
+下次 check 对齐原节奏 20:45.
+
+---
+
 ## [unreleased · M11 Day 2.5] · 2026-04-20 · Admin UI 升级 Tab (纯 frontend 骨架)
 
 **Scope**: 纯 frontend 新文件 + AdminPage 第 10 tab · 零 backend 改动 · Day 3 后端就绪时

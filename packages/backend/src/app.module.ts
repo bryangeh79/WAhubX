@@ -21,6 +21,7 @@ import { AccountHealthModule } from './modules/account-health/account-health.mod
 import { TakeoverModule } from './modules/takeover/takeover.module';
 import { BackupModule } from './modules/backup/backup.module';
 import { SigningModule } from './modules/signing/signing.module';
+import { UpdateModule } from './modules/update/update.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { SigningModule } from './modules/signing/signing.module';
     TakeoverModule,
     BackupModule,
     SigningModule,
+    UpdateModule,
     TasksModule,
     HealthModule,
   ],
