@@ -1,10 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
-import { extractErrorMessage } from '@/lib/api';
+import { api, extractErrorMessage } from '@/lib/api';
 
 const { Title, Text } = Typography;
+
+interface BootstrapInfo {
+  fresh_install: boolean;
+  platform_admin_exists: boolean;
+  license_activated: boolean;
+  app_version: string;
+}
 
 interface LoginFormValues {
   email: string;
@@ -17,6 +24,18 @@ export function LoginPage() {
   const location = useLocation();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [bootstrap, setBootstrap] = useState<BootstrapInfo | null>(null);
+
+  // M11 补强 1 · 首屏调 /version/bootstrap (public endpoint) · 显版本号 + 诊断
+  // 不影响 RouteGate 跳转 (已由 licenseStatus 决定) · 仅提供透明诊断
+  useEffect(() => {
+    api
+      .get<BootstrapInfo>('/version/bootstrap')
+      .then((res) => setBootstrap(res.data))
+      .catch(() => {
+        // backend 未起 / 返 404 (未升级到 M11 Day 3) → 静默, 不阻塞登录
+      });
+  }, []);
 
   const handleFinish = async (values: LoginFormValues) => {
     setError(null);
@@ -41,6 +60,14 @@ export function LoginPage() {
             <Text type="secondary">
               {licenseStatus.tenantName} · {licenseStatus.plan?.toUpperCase()} · {licenseStatus.slotLimit} 槽
             </Text>
+          )}
+          {bootstrap && (
+            <div style={{ marginTop: 6, fontSize: 11, color: '#999' }}>
+              v{bootstrap.app_version}
+              {!bootstrap.platform_admin_exists && (
+                <Text type="warning" style={{ marginLeft: 8 }}>⚠ 无平台超管 · 请走激活流程</Text>
+              )}
+            </div>
           )}
         </div>
         {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />}
