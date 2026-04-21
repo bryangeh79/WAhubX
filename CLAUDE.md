@@ -27,9 +27,9 @@
 
 **优先顺序**:
 1. **TaskStop 工具**: 后台任务由 Bash `run_in_background:true` 启动时拿到 `task_id`. 收尾用 `TaskStop({ task_id })`, 精准不误伤.
-2. **按端口**: 明确知道端口时 (比如后端 3000 / vite 5173) 用:
+2. **按端口**: 明确知道端口时 (比如后端 9700 / vite 5173) 用:
    ```bash
-   netstat -ano | findstr ":3000" | awk '{print $5}' | sort -u | xargs -I{} taskkill //F //PID {}
+   netstat -ano | findstr ":9700" | awk '{print $5}' | sort -u | xargs -I{} taskkill //F //PID {}
    ```
 3. **按 PID**: 知道 PID 直接 `taskkill //F //PID <pid>`.
 
@@ -60,7 +60,7 @@
 |---|---|
 | 部署 | 本地桌面应用 (Inno Setup 打包), VPS 只做 License 发放 + 升级分发 |
 | 仓库 | Monorepo pnpm workspace (`packages/backend` + `packages/frontend` + `packages/shared` 预留) |
-| DB | **PostgreSQL 16** 强制, Docker 起本地在主机 `:5433` (避开 FAhubX 的 5432), SQLite 留到 M10 |
+| DB | **PostgreSQL 16** 强制, Docker 起本地在主机 `:5434` (避开 FAhubX 占用的 5433), Redis `:6381` (避 6380), Backend `:9700` (避 9600). SQLite 留到 M10 |
 | 后端 | NestJS 10 + TypeORM + pino, TS strict |
 | 前端 | React 18 + Vite 5 + antd 5, 品牌绿 `#25d366`, **中文单语言** (V1) |
 | 认证 | JWT 双 token (access 15m / refresh 7d) + **bcryptjs round=12** + 登录 5 次失败锁 15 分钟 |

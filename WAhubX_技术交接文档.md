@@ -334,7 +334,7 @@ CREATE TABLE chat_message (
 
 ---
 
-## 4. 核心 API（REST，localhost:3000/api）
+## 4. 核心 API（REST，localhost:9700/api）
 
 ### 4.1 认证
 ```

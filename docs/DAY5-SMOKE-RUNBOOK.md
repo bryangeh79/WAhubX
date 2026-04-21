@@ -85,7 +85,7 @@ build.bat
 ```
 双击 output/WAhubX-Setup-v<ver>.exe
 → 默认装到 C:\WAhubX
-→ 向导: 中文/English · 端口配置 (3000/5433/6380 默认) · 确认
+→ 向导: 中文/English · 端口配置 (9700/5434/6381 默认 · 避 FAhubX) · 确认
 → 安装期自动跑 init-db.bat
   [1/5] Initializing PostgreSQL data directory
   [2/5] Starting PostgreSQL
@@ -105,7 +105,7 @@ build.bat
 ```
 双击桌面 WAhubX 图标
 → start.bat 起 PG + Redis + Backend
-→ 浏览器自动打开 http://localhost:3000
+→ 浏览器自动打开 http://localhost:9700
 → Frontend 调 GET /version/bootstrap (Public)
    返 {fresh_install: true, license_activated: false, ...}
 → 跳 License Key 激活页 (走 M1 激活流程)
@@ -171,9 +171,9 @@ node scripts/sign-wupd.js verify --wupd /tmp/WAhubX-0.11.1-test.wupd --pubkey-he
 ### 3.1 Backend preview
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login ...)
+TOKEN=$(curl -s -X POST http://localhost:9700/api/v1/auth/login ...)
 
-curl -X POST http://localhost:3000/api/v1/version/verify-upd \
+curl -X POST http://localhost:9700/api/v1/version/verify-upd \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@/tmp/WAhubX-0.11.1-test.wupd"
 ```
@@ -385,18 +385,18 @@ cd /c/AI_WORKSPACE/Whatsapp\ Auto\ Bot
 
 ```bash
 # 1. 背景 backend 健在
-curl -sI http://localhost:3000/api/v1/health | head -1
+curl -sI http://localhost:9700/api/v1/health | head -1
 # HTTP/1.1 200 OK
 
 # 2. 登录
-PLAT=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+PLAT=$(curl -s -X POST http://localhost:9700/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"platform@wahubx.local","password":"Test1234!"}' \
   | python -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
 
 # 3. Backend /version/verify-upd · 期望 signature_valid=true (dev key 匹配)
 # ⚠ curl 路径必须 Windows 绝对 (/tmp 在 bash 和 node 解读不同)
-curl -s -X POST http://localhost:3000/api/v1/version/verify-upd \
+curl -s -X POST http://localhost:9700/api/v1/version/verify-upd \
   -H "Authorization: Bearer $PLAT" \
   -F "file=@C:/AI_WORKSPACE/Whatsapp Auto Bot/staging/day5-smoke/test.wupd"
 

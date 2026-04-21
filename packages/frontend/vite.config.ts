@@ -14,12 +14,12 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:9700',
         changeOrigin: true,
       },
       // M9 · 接管 UI · socket.io 透传 (WS + 长轮询)
       '/socket.io': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:9700',
         changeOrigin: true,
         ws: true,
       },

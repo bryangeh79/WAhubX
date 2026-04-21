@@ -161,7 +161,7 @@ begin
 
   AppPortLabel := TNewStaticText.Create(PortConfigPage);
   AppPortLabel.Parent := PortConfigPage.Surface;
-  AppPortLabel.Caption := 'WAhubX 后端端口 (Web Port · default: 3000):';
+  AppPortLabel.Caption := 'WAhubX 后端端口 (Web Port · default: 9700):';
   AppPortLabel.Top := 60;
   AppPortLabel.Left := 0;
 
@@ -170,11 +170,11 @@ begin
   AppPortEdit.Top := 80;
   AppPortEdit.Left := 0;
   AppPortEdit.Width := 120;
-  AppPortEdit.Text := '3000';
+  AppPortEdit.Text := '9700';
 
   PgPortLabel := TNewStaticText.Create(PortConfigPage);
   PgPortLabel.Parent := PortConfigPage.Surface;
-  PgPortLabel.Caption := 'PostgreSQL Port (default: 5433):';
+  PgPortLabel.Caption := 'PostgreSQL Port (default: 5434):';
   PgPortLabel.Top := 115;
   PgPortLabel.Left := 0;
 
@@ -183,11 +183,11 @@ begin
   PgPortEdit.Top := 135;
   PgPortEdit.Left := 0;
   PgPortEdit.Width := 120;
-  PgPortEdit.Text := '5433';
+  PgPortEdit.Text := '5434';
 
   RedisPortLabel := TNewStaticText.Create(PortConfigPage);
   RedisPortLabel.Parent := PortConfigPage.Surface;
-  RedisPortLabel.Caption := 'Redis Port (default: 6380):';
+  RedisPortLabel.Caption := 'Redis Port (default: 6381):';
   RedisPortLabel.Top := 170;
   RedisPortLabel.Left := 0;
 
@@ -196,7 +196,7 @@ begin
   RedisPortEdit.Top := 190;
   RedisPortEdit.Left := 0;
   RedisPortEdit.Width := 120;
-  RedisPortEdit.Text := '6380';
+  RedisPortEdit.Text := '6381';
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;

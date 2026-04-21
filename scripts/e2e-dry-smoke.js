@@ -29,7 +29,7 @@ const { execSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const BASE = 'http://localhost:3000/api/v1';
+const BASE = process.env.WAHUBX_BASE_URL || 'http://localhost:9700/api/v1';
 const ADMIN_EMAIL = 'platform@wahubx.local';
 const ADMIN_PASSWORD = 'Test1234!';
 

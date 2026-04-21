@@ -3,8 +3,8 @@
  *
  * 从 Inno Setup 向导端口配置生成 backend .env · 自动生成强密码
  *
- * Usage: node generate-env.js --mode local --app-port 3000
- *        --pg-port 5433 --redis-port 6380 --install-dir <path>
+ * Usage: node generate-env.js --mode local --app-port 9700
+ *        --pg-port 5434 --redis-port 6381 --install-dir <path>
  *
  * M10 note: APP_ENCRYPTION_KEY 会在首次启动后被 MasterKeyMigrationService 自动迁移到
  *           MachineBoundMasterKey · env key 仅作 bootstrap · 迁移完成后可从 .env 移除.
@@ -43,9 +43,9 @@ function main() {
   const params = parseArgs();
 
   // WAhubX V1 只 local 模式 (Inno .iss 已砍 Cloud 选项)
-  const appPort = params['app-port'] || '3000';
-  const pgPort = params['pg-port'] || '5433';
-  const redisPort = params['redis-port'] || '6380';
+  const appPort = params['app-port'] || '9700';
+  const pgPort = params['pg-port'] || '5434';
+  const redisPort = params['redis-port'] || '6381';
   const installDir = params['install-dir'] || process.cwd();
 
   // .env 在 app/backend/.env (升级时 app/ 替换但 .env 该保留 · 单独 install-dir 根)

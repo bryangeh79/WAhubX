@@ -12,9 +12,9 @@ set PG_BIN=%WAHUBX_HOME%\app\pgsql\bin
 set PG_DATA=%WAHUBX_HOME%\data\pgsql
 set ENV_FILE=%WAHUBX_HOME%\.env
 
-set PG_PORT=5433
-set REDIS_PORT=6380
-set APP_PORT=3000
+set PG_PORT=5434
+set REDIS_PORT=6381
+set APP_PORT=9700
 for /f "usebackq eol=# tokens=1,2 delims==" %%a in ("%ENV_FILE%") do (
     if "%%a"=="DB_PORT" set PG_PORT=%%b
     if "%%a"=="REDIS_PORT" set REDIS_PORT=%%b

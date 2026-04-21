@@ -44,7 +44,7 @@ if not exist "%BUILTIN_TARGET%" (
 )
 
 :: 从 .env 读端口 + 密码
-set PG_PORT=5433
+set PG_PORT=5434
 set DB_PASSWORD=
 for /f "usebackq eol=# tokens=1,2 delims==" %%a in ("%ENV_FILE%") do (
     if "%%a"=="DB_PORT" set PG_PORT=%%b

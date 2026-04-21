@@ -8,7 +8,7 @@
 
 装机后任何异常 · 先看这 4 条:
 
-1. **Backend 活吗** · Powershell `curl http://localhost:3000/api/v1/health` · 200 = OK
+1. **Backend 活吗** · Powershell `curl http://localhost:9700/api/v1/health` · 200 = OK
 2. **Docker PG 起了吗** (dev) / **PortablePG 起了吗** (prod): `netstat -ano | findstr 5432`
 3. **Redis 在** · `netstat -ano | findstr 6379`
 4. **日志在** · `C:\WAhubX\data\logs\backend-*.log` · 最后 50 行看关键词 `ERROR` / `WARN`
@@ -44,7 +44,7 @@
 **2A. PostgreSQL 没起**
 
 ```powershell
-netstat -ano | findstr ":5432"
+netstat -ano | findstr ":5434"
 ```
 
 空 = PG 没起. 见 `C:\WAhubX\logs\pg\postgresql-*.log`.
@@ -57,15 +57,15 @@ netstat -ano | findstr ":5432"
 **2B. Redis 没起**
 
 ```powershell
-netstat -ano | findstr ":6379"
+netstat -ano | findstr ":6381"
 ```
 
 同上思路. 启动: `C:\WAhubX\scripts\start-redis.bat`.
 
-**2C. 端口 3000 被占**
+**2C. 端口 9700 被占**
 
 ```powershell
-netstat -ano | findstr ":3000"
+netstat -ano | findstr ":9700"
 ```
 
 被其他程序占 (常见: Node.js dev 项目 / React 前端):

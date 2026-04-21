@@ -25,7 +25,7 @@ export class EnvSchema {
   @IsInt()
   @Min(1)
   @Max(65535)
-  PORT: number = 3000;
+  PORT: number = 9700;
 
   @IsEnum(LogLevel)
   LOG_LEVEL: LogLevel = LogLevel.Info;
@@ -90,7 +90,7 @@ export class EnvSchema {
   @IsInt()
   @Min(1)
   @Max(65535)
-  REDIS_PORT: number = 6380;
+  REDIS_PORT: number = 6381;
 
   @IsOptional()
   @IsString()

@@ -8,7 +8,7 @@ for %%i in ("%~dp0") do set WAHUBX_HOME=%%~fi
 set ENV_FILE=%WAHUBX_HOME%\.env
 
 :: 读 app port
-set APP_PORT=3000
+set APP_PORT=9700
 for /f "usebackq eol=# tokens=1,2 delims==" %%a in ("%ENV_FILE%") do (
     if "%%a"=="PORT" set APP_PORT=%%b
 )

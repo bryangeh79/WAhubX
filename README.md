@@ -34,7 +34,7 @@ WAhubX 是面向马来西亚市场的 WhatsApp 多账号自动化运营 SaaS。
 ```
 WAhubX/
 ├── packages/
-│   ├── backend/          NestJS API (localhost:3000)
+│   ├── backend/          NestJS API (localhost:9700 · 避开 FAhubX)
 │   ├── frontend/         React + Vite
 │   └── shared/           共享 DTO / 类型 / 枚举
 ├── installer/            Inno Setup 打包 (M11)
@@ -47,11 +47,11 @@ WAhubX/
 ## 快速启动
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d          # PG on :5433
+docker compose -f docker-compose.dev.yml up -d          # PG :5434 · Redis :6381
 pnpm install
 cp packages/backend/.env.example packages/backend/.env
 pnpm --filter @wahubx/backend migration:run
-pnpm dev:backend                                        # http://localhost:3000/api/v1
+pnpm dev:backend                                        # http://localhost:9700/api/v1
 pnpm dev:frontend                                       # http://localhost:5173
 ```
 

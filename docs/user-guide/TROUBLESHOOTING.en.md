@@ -8,7 +8,7 @@
 
 Post-install any anomaly · check these 4 first:
 
-1. **Backend alive?** · PowerShell `curl http://localhost:3000/api/v1/health` · 200 = OK
+1. **Backend alive?** · PowerShell `curl http://localhost:9700/api/v1/health` · 200 = OK
 2. **Docker PG running?** (dev) / **PortablePG running?** (prod): `netstat -ano | findstr 5432`
 3. **Redis on?** · `netstat -ano | findstr 6379`
 4. **Logs at** · `C:\WAhubX\data\logs\backend-*.log` · last 50 lines · look for `ERROR` / `WARN` keywords
@@ -44,7 +44,7 @@ Click desktop icon · flash-then-exit · or UI spins then "Cannot connect to bac
 **2A. PostgreSQL not running**
 
 ```powershell
-netstat -ano | findstr ":5432"
+netstat -ano | findstr ":5434"
 ```
 
 Empty = PG not up. See `C:\WAhubX\logs\pg\postgresql-*.log`.
@@ -57,15 +57,15 @@ Fix:
 **2B. Redis not running**
 
 ```powershell
-netstat -ano | findstr ":6379"
+netstat -ano | findstr ":6381"
 ```
 
 Same approach. Start: `C:\WAhubX\scripts\start-redis.bat`.
 
-**2C. Port 3000 taken**
+**2C. Port 9700 taken**
 
 ```powershell
-netstat -ano | findstr ":3000"
+netstat -ano | findstr ":9700"
 ```
 
 Taken by another program (common: Node.js dev project / React frontend):

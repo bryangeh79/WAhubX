@@ -22,7 +22,7 @@
 git clone https://github.com/bryangeh79/WAhubX.git
 cd WAhubX
 
-# 2. 起 PostgreSQL (host :5433, 避开 FAhubX 的 5432)
+# 2. 起 PostgreSQL (host :5434, 避开 FAhubX 的 5432/5433) + Redis (:6381, 避 6379/6380)
 docker compose -f docker-compose.dev.yml up -d
 
 # 3. 装依赖 (monorepo 根一次性安装所有 packages)
@@ -36,7 +36,7 @@ cp packages/backend/.env.example packages/backend/.env
 pnpm --filter @wahubx/backend migration:run
 
 # 6. 启动 (两个终端)
-pnpm dev:backend         # http://localhost:3000/api/v1
+pnpm dev:backend         # http://localhost:9700/api/v1
 pnpm dev:frontend        # http://localhost:5173
 ```
 
@@ -90,7 +90,9 @@ docker exec -it wahubx-dev-pg psql -U wahubx -d wahubx   # 进入 psql
 |---|---|---|
 | Backend (NestJS) | 3000 | `/api/v1/...` |
 | Frontend (Vite dev) | 5173 | 代理 `/api` 到 3000 |
-| PostgreSQL (dev docker) | **5433** | 主机侧 5433 → 容器 5432 (避让 FAhubX 占用的 5432) |
+| PostgreSQL (dev docker) | **5434** | 主机侧 5434 → 容器 5432 (避 FAhubX 占用的 5432/5433) |
+| Redis (dev docker) | **6381** | 主机侧 6381 → 容器 6379 (避 FAhubX 的 6380) |
+| Backend HTTP | **9700** | 原 3000 迁至 9700 (避 FAhubX 9600) |
 | Redis (未启用) | 6379 | M3 任务调度阶段加入 |
 
 ---
@@ -136,7 +138,7 @@ WAhubX/
 **`Error: Invalid environment variables`**
 → 忘了 `cp packages/backend/.env.example packages/backend/.env` 或 `.env` 少字段。
 
-**后端启动 `ECONNREFUSED 127.0.0.1:5433`**
+**后端启动 `ECONNREFUSED 127.0.0.1:5434`**
 → docker 容器没起来。`docker compose -f docker-compose.dev.yml up -d` 后等 5 秒（healthcheck）。
 
 **migration:run 报 `relation ... already exists`**
@@ -145,8 +147,8 @@ WAhubX/
 **`pnpm --filter @wahubx/backend` 提示 `No projects matched`**
 → 从仓库根目录跑，不是从 `packages/backend/`。
 
-**5432 端口冲突**
-→ 本机已有 PG 占用；docker-compose 已把 WAhubX 映射到 5433，若还冲突改 `docker-compose.dev.yml` 里的 `'5433:5432'` 首字段。
+**5434 端口冲突**
+→ 本机已有 PG 占用；docker-compose 已把 WAhubX 映射到 5434 (避 FAhubX 的 5433)，若仍冲突改 `docker-compose.dev.yml` 里的 `'5434:5432'` 首字段。
 
 ---
 
@@ -215,12 +217,12 @@ node scripts/sign-wupd.js verify \
 启动 backend (dev 模式 dry-run 不影响) · 登录拿 token · 上传 `.wupd` 看 preview:
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:9700/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"platform@wahubx.local","password":"Test1234!"}' \
   | python -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
 
-curl -s -X POST http://localhost:3000/api/v1/version/verify-upd \
+curl -s -X POST http://localhost:9700/api/v1/version/verify-upd \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@output/WAhubX-0.11.0-m11.wupd" | python -m json.tool
 ```
@@ -242,7 +244,7 @@ xxd -l 4 output/WAhubX-0.11.0-m11.wupd
 
 未登录可查:
 ```bash
-curl http://localhost:3000/api/v1/version/bootstrap
+curl http://localhost:9700/api/v1/version/bootstrap
 # {"fresh_install":false,"platform_admin_exists":true,"license_activated":true,"app_version":"0.1.0"}
 ```
 

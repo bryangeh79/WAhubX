@@ -16,9 +16,9 @@ services:
       POSTGRES_PASSWORD: wahubx
       TZ: Asia/Kuala_Lumpur
       PGTZ: Asia/Kuala_Lumpur
-    # 主机端口 5433 (避开 FAhubX 本机 PG 在 5432 的占用)
+    # 主机端口 5434 (避开 FAhubX 占用的 5433 · 原 WAhubX 5433 已让渡)
     ports:
-      - '5433:5432'
+      - '5434:5432'
     volumes:
       - wahubx-pg-data:/var/lib/postgresql/data
     healthcheck:
@@ -32,9 +32,9 @@ services:
     image: redis:7-alpine
     container_name: wahubx-dev-redis
     restart: unless-stopped
-    # 主机端口 6380 (避开 FAhubX / 其他项目可能占用的 6379)
+    # 主机端口 6381 (避开 FAhubX 占用的 6380 · 原 WAhubX 6380 已让渡)
     ports:
-      - '6380:6379'
+      - '6381:6379'
     volumes:
       - wahubx-redis-data:/data
     command: ['redis-server', '--appendonly', 'yes', '--save', '60', '1000']
