@@ -151,3 +151,36 @@
 - ✅ 不 rebase/amend
 - ✅ 不调付费 API
 - ✅ 不动 dev DB 既有数据
+
+---
+
+## Cascade [44]-[47] · Legal drafts 补齐 · 2026-04-21
+
+| time | step | result | tag/commit |
+|---|---|---|---|
+| 2026-04-21 05:20 | push rc3 + rc3-final | 远端 origin/main @ 1ec7af8 · 24 tags 全上 | push OK |
+| 2026-04-21 05:30 | [44] DISCLAIMER.md | 9 节 · 中英双版 · WA ToS 免责 / AI 内容 / 第三方 / AS IS / 红线 / PDPA / 升级 / 约束力 · 头部 AI-drafted warning | (draft) |
+| 2026-04-21 05:45 | [45] USER-AGREEMENT.md | 11 节 · 中英双版 · License/退款/范围/PDPA 7 原则/IP/责任上限 12 月/仲裁 AIAC KL · 含头部 warning | (draft) |
+| 2026-04-21 06:00 | [46] PILOT-AGREEMENT.md | 12 节 + 签字页 · 中英双版 · 4-8 周/免费 License/周 check-in/Bug SLA/转正 2 年价格锁/testimonial/24 月 NDA · 含头部 warning | (draft) |
+| 2026-04-21 06:05 | [47] wrap + tag rc3.1 | 3 文档 docs/legal/ · 累积 commit · 等授权 push | **tag v1.0.0-rc3.1** |
+
+### Legal drafts 交付摘要
+
+**3 份中英双语合同** · 每份头部固定 AI-drafted warning block (原文照抄):
+- ⚠️ AI 辅助起草 · 未经法律专业人士审阅
+- 4 条风险自担说明
+
+**DISCLAIMER.md** (产品内显示版 · About 页引用):
+- 字数 · ~1500 字中 / ~1200 字英
+- 覆盖 [DISCLAIMER-001-008]: WA 封号风险 · AI 审核义务 · 第三方中断 · AS IS · 红线 · 本地存储 · 升级风险 · 约束力
+
+**USER-AGREEMENT.md** (激活时同意):
+- 字数 · ~2300 字中 / ~1500 字英
+- 覆盖 [USER-AGR-001-011]: License 绑定/Recovery · 退款 7/30 天 · 禁止用途 · PDPA 2010 (6 原则 · 访问/更正/删除权) · IP 归属 · 责任上限 12 月 · 终止 · 马国管辖 · AIAC KL 仲裁
+- **责任上限** · Licensor 总责任 ≤ 12 月 License 费
+
+**PILOT-AGREEMENT.md** (试用客户签):
+- 字数 · ~2400 字中 / ~1000 字英
+- 覆盖 [PILOT-001-012]: 4-8 周期限 · Pilot 免费 · Wave 1/2/3 分波次 · 周 check-in · Bug SLA 4 级 · 数据 opt-in · NDA 24 月 · 1 次免费 License 重绑 · 转正 2 年价格锁 + v2 50% discount · testimonial 可选 · 签字页
+
+所有 3 份**含清晰交叉引用** · 互相指向 DISCLAIMER §X / USER-AGREEMENT §Y 等.
