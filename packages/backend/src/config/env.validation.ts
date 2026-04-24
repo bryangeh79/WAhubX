@@ -133,6 +133,16 @@ export class EnvSchema {
   // 运行时改通过 /ai-settings/text-enable API (M6), env 是冷启动默认.
   @IsString()
   AI_TEXT_ENABLED: string = 'false';
+
+  // ───────── License Server (2026-04-21 · Cloudflare Worker) ─────────
+  // 设了走 VPS 代理模式 · 不设走本地 DB (dev fallback)
+  @IsOptional()
+  @IsString()
+  LICENSE_SERVER_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  LICENSE_ADMIN_KEY?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvSchema {

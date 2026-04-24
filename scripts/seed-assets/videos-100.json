@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "description": "WAhubX 官方视频素材库 · 100 条 15-30s 短视频",
+    "source": "Pexels Videos (免版权 · 免费商用)",
+    "note": "视频文件大 · 实际下载需要大量带宽 · 建议选需要的 pool 下 · 或挑部分下",
+    "naming": "<pool>/<id>_<slug>.mp4"
+  },
+  "pools": [
+    {
+      "pool": "daily_life",
+      "label": "日常生活短视频",
+      "items": [
+        { "id": "dl001", "url": "https://videos.pexels.com/video-files/3209828/3209828-hd_1920_1080_25fps.mp4", "slug": "coffee_pour" },
+        { "id": "dl002", "url": "https://videos.pexels.com/video-files/3196220/3196220-hd_1920_1080_24fps.mp4", "slug": "breakfast" },
+        { "id": "dl003", "url": "https://videos.pexels.com/video-files/5752729/5752729-hd_1920_1080_30fps.mp4", "slug": "walking_street" },
+        { "id": "dl004", "url": "https://videos.pexels.com/video-files/4428976/4428976-hd_1920_1080_30fps.mp4", "slug": "sunset_drive" },
+        { "id": "dl005", "url": "https://videos.pexels.com/video-files/5532774/5532774-hd_1920_1080_30fps.mp4", "slug": "cooking" },
+        { "id": "dl006", "url": "https://videos.pexels.com/video-files/3175137/3175137-hd_1920_1080_30fps.mp4", "slug": "relaxing_cafe" },
+        { "id": "dl007", "url": "https://videos.pexels.com/video-files/2022395/2022395-hd_1920_1080_30fps.mp4", "slug": "raindrops" },
+        { "id": "dl008", "url": "https://videos.pexels.com/video-files/853751/853751-hd_1920_1080_24fps.mp4", "slug": "beach_wave" },
+        { "id": "dl009", "url": "https://videos.pexels.com/video-files/3403395/3403395-hd_1920_1080_30fps.mp4", "slug": "traffic_night" },
+        { "id": "dl010", "url": "https://videos.pexels.com/video-files/855128/855128-hd_1920_1080_25fps.mp4", "slug": "mountain_view" }
+      ]
+    },
+    {
+      "pool": "funny_cute",
+      "label": "搞笑可爱",
+      "items": [
+        { "id": "fc001", "url": "https://videos.pexels.com/video-files/5243390/5243390-hd_1920_1080_30fps.mp4", "slug": "cat_play" },
+        { "id": "fc002", "url": "https://videos.pexels.com/video-files/4109347/4109347-hd_1920_1080_30fps.mp4", "slug": "puppy_jump" },
+        { "id": "fc003", "url": "https://videos.pexels.com/video-files/3191420/3191420-hd_1920_1080_25fps.mp4", "slug": "kitten_sleep" },
+        { "id": "fc004", "url": "https://videos.pexels.com/video-files/4832035/4832035-hd_1920_1080_30fps.mp4", "slug": "dog_play" },
+        { "id": "fc005", "url": "https://videos.pexels.com/video-files/6853408/6853408-hd_1920_1080_30fps.mp4", "slug": "baby_laugh" }
+      ]
+    },
+    {
+      "pool": "business",
+      "label": "商业/产品展示",
+      "items": [
+        { "id": "bz001", "url": "https://videos.pexels.com/video-files/3209828/3209828-hd_1920_1080_25fps.mp4", "slug": "cafe_shop" },
+        { "id": "bz002", "url": "https://videos.pexels.com/video-files/3943888/3943888-hd_1920_1080_30fps.mp4", "slug": "office_work" },
+        { "id": "bz003", "url": "https://videos.pexels.com/video-files/3163534/3163534-hd_1920_1080_30fps.mp4", "slug": "typing_laptop" },
+        { "id": "bz004", "url": "https://videos.pexels.com/video-files/3252432/3252432-hd_1920_1080_30fps.mp4", "slug": "delivery_box" },
+        { "id": "bz005", "url": "https://videos.pexels.com/video-files/7722882/7722882-hd_1920_1080_25fps.mp4", "slug": "shopping_mall" }
+      ]
+    },
+    {
+      "pool": "scenery",
+      "label": "风景",
+      "items": [
+        { "id": "sc001", "url": "https://videos.pexels.com/video-files/4990100/4990100-hd_1920_1080_30fps.mp4", "slug": "sunset_sea" },
+        { "id": "sc002", "url": "https://videos.pexels.com/video-files/1093662/1093662-hd_1920_1080_30fps.mp4", "slug": "forest_walk" },
+        { "id": "sc003", "url": "https://videos.pexels.com/video-files/4010802/4010802-hd_1920_1080_25fps.mp4", "slug": "city_night" },
+        { "id": "sc004", "url": "https://videos.pexels.com/video-files/2491284/2491284-hd_1920_1080_30fps.mp4", "slug": "beach_aerial" },
+        { "id": "sc005", "url": "https://videos.pexels.com/video-files/2053855/2053855-hd_1920_1080_30fps.mp4", "slug": "flowers" }
+      ]
+    }
+  ],
+  "userTodo": "本 catalog 只列了 25 条 demo · 完整 100 条请租户从 Pexels/Pixabay 挑并加进 JSON · 或等 M7 AI 视频合成 · 执行 gen-videos.js 下载"
+}

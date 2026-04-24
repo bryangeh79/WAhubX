@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WarmupPlanEntity, WarmupPhase } from './warmup-plan.entity';
+import { GroupWarmupPlanEntity } from './group-warmup-plan.entity';
 import {
   getTemplate,
   MATURE_DAILY_WINDOWS,
@@ -15,9 +16,12 @@ import {
   WarmupTaskSpec,
 } from './warmup-plan.templates';
 import { WarmupPhaseService } from './warmup-phase.service';
+import { WarmupPairPicker } from './warmup-pair-picker.service';
 import { TaskEntity, TaskStatus, TaskTargetType } from '../tasks/task.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { ScriptEntity } from '../scripts/script.entity';
+import { IsNull } from 'typeorm';
+import { ExecutionGroupEntity } from '../execution-groups/execution-group.entity';
 
 // Warmup calendar 引擎.
 // 1h setInterval (与 M3 dispatcher 的 setInterval 风格一致, 不引入 BullMQ repeatable — M3 也没用).
@@ -37,7 +41,12 @@ export class WarmupCalendarService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly config: ConfigService,
     private readonly phaseService: WarmupPhaseService,
+    private readonly pairPicker: WarmupPairPicker,
     @InjectRepository(WarmupPlanEntity) private readonly planRepo: Repository<WarmupPlanEntity>,
+    @InjectRepository(GroupWarmupPlanEntity)
+    private readonly groupPlanRepo: Repository<GroupWarmupPlanEntity>,
+    @InjectRepository(ExecutionGroupEntity)
+    private readonly groupRepo: Repository<ExecutionGroupEntity>,
     @InjectRepository(TaskEntity) private readonly taskRepo: Repository<TaskEntity>,
     @InjectRepository(AccountSlotEntity) private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(ScriptEntity) private readonly scriptRepo: Repository<ScriptEntity>,
@@ -67,34 +76,184 @@ export class WarmupCalendarService implements OnModuleInit, OnModuleDestroy {
   /**
    * 主 tick 函数. 公开接口方便手动触发/测试.
    */
-  async tick(now: Date = new Date()): Promise<{ spawned: number; plans: number }> {
-    const plans = await this.planRepo.find({ where: { paused: false } });
+  async tick(now: Date = new Date()): Promise<{ spawned: number; plans: number; groupPlans: number }> {
+    // 独立 plan (无 group_plan_id) · 按原逻辑跑
+    const plans = await this.planRepo.find({
+      where: { paused: false, groupPlanId: IsNull() },
+    });
     let spawned = 0;
 
     for (const plan of plans) {
       try {
-        // 先 regress check (health=high → Phase 0)
         await this.phaseService.maybeRegress(plan, now);
-
-        // 跨日推进 (上次 advance 超 24h 就 + 1)
         const lastAdv = plan.lastAdvancedAt ?? plan.startedAt;
         if (lastAdv && now.getTime() - lastAdv.getTime() >= 24 * 3600 * 1000) {
           await this.phaseService.tickDay(plan.id, now);
-          // 重读, phase/day 已变
           const fresh = await this.planRepo.findOne({ where: { id: plan.id } });
           if (fresh) Object.assign(plan, fresh);
         }
-
         spawned += await this.spawnTodayWindow(plan, now);
       } catch (err) {
         this.logger.error(`plan ${plan.id} tick 失败: ${err instanceof Error ? err.message : err}`);
       }
     }
 
-    if (spawned > 0) {
-      this.logger.log(`warmup calendar tick · ${plans.length} plans · ${spawned} tasks spawned`);
+    // 2026-04-22 · Group 养号计划 · 整组调度 · script_chat 用 pair picker
+    const groupPlans = await this.groupPlanRepo.find({ where: { paused: false } });
+    for (const gp of groupPlans) {
+      try {
+        spawned += await this.spawnGroupTodayWindow(gp, now);
+      } catch (err) {
+        this.logger.error(`group-plan ${gp.id} tick 失败: ${err instanceof Error ? err.message : err}`);
+      }
     }
-    return { spawned, plans: plans.length };
+
+    if (spawned > 0) {
+      this.logger.log(
+        `warmup calendar tick · solo=${plans.length} group=${groupPlans.length} · ${spawned} tasks spawned`,
+      );
+    }
+    return { spawned, plans: plans.length, groupPlans: groupPlans.length };
+  }
+
+  /**
+   * 2026-04-22 · Group 计划的窗口调度
+   * - warmup/status_browse/status_post: 组内每号各自 enqueue (按该号 per-account plan 已有的 current_day 过滤?)
+   *   为简化 · 按 group plan 的 current_day 决定
+   * - script_chat: 用 pair picker 挑不重叠 pairs · 每 pair 1 task
+   */
+  private async spawnGroupTodayWindow(gp: GroupWarmupPlanEntity, now: Date): Promise<number> {
+    const template = getTemplate(gp.template) ?? V1_14DAY_TEMPLATE;
+    const day = template.days.find((d) => d.day === gp.currentDay);
+    const windows = day ? day.windows : gp.currentPhase === WarmupPhase.Mature ? MATURE_DAILY_WINDOWS : [];
+    if (windows.length === 0) return 0;
+
+    const group = await this.groupRepo.findOne({
+      where: { id: gp.groupId },
+      relations: ['slots'],
+    });
+    if (!group) return 0;
+    const members = (group.slots ?? []).filter((s) => s.accountId !== null);
+    if (members.length < 2) return 0;
+
+    const nowMs = now.getTime();
+    const windowEnd = nowMs + 3600 * 1000;
+    let count = 0;
+
+    for (const w of windows) {
+      const [hh, mm] = w.at.split(':').map(Number);
+      const base = new Date(now);
+      base.setHours(hh, mm, 0, 0);
+      const jitterMs = (Math.floor(Math.random() * 31) + 15) * 60 * 1000 * (Math.random() < 0.5 ? -1 : 1);
+      const scheduledAt = new Date(base.getTime() + jitterMs);
+      if (scheduledAt.getTime() < nowMs || scheduledAt.getTime() >= windowEnd) continue;
+
+      for (const spec of w.tasks) {
+        // status_post phase gate §B.20
+        if (spec.taskType === 'status_post' && gp.currentPhase < WarmupPhase.Activate) continue;
+
+        if (spec.taskType === 'script_chat') {
+          // pair picker 挑配对 · 每 pair 1 task
+          const memberIds = members.map((m) => m.accountId!) as number[];
+          const pairs = this.pairPicker.pickPairs(memberIds, gp.lastPairHistory ?? [], {
+            maxPairs: Math.floor(memberIds.length / 2),
+          });
+          if (pairs.length === 0) continue;
+          // 捞 script
+          const script = await this.scriptRepo
+            .createQueryBuilder('s')
+            .where('s.min_warmup_stage <= :stage', { stage: gp.currentPhase })
+            .andWhere('s.pack_id IN (SELECT id FROM script_pack WHERE enabled = true)')
+            .orderBy('RANDOM()')
+            .limit(1)
+            .getOne();
+          if (!script) continue;
+          for (const [aId, bId] of pairs) {
+            const dedupeKey = `gp${gp.id}_d${gp.currentDay}_${w.at}_pair${Math.min(aId, bId)}-${Math.max(aId, bId)}`;
+            if (await this.isGroupDuplicate(dedupeKey)) continue;
+            await this.taskRepo.save(
+              this.taskRepo.create({
+                tenantId: group.tenantId,
+                taskType: 'script_chat',
+                targetType: TaskTargetType.Account,
+                targetIds: [aId],
+                priority: 5,
+                scheduledAt,
+                repeatRule: null,
+                payload: {
+                  scriptId: script.id,
+                  roleAaccountId: aId,
+                  roleBaccountId: bId,
+                  _groupPlanId: gp.id,
+                  _planDay: gp.currentDay,
+                  _windowAt: w.at,
+                  _dedupeKey: dedupeKey,
+                },
+                status: TaskStatus.Pending,
+              }),
+            );
+            count++;
+          }
+          // 记录历史
+          gp.lastPairHistory = this.pairPicker.appendToHistory(
+            gp.lastPairHistory ?? [],
+            gp.currentDay,
+            pairs,
+          );
+          await this.groupPlanRepo.save(gp);
+          continue;
+        }
+
+        // 非 script_chat · 组内每号各自 enqueue
+        for (const member of members) {
+          const dedupeKey = `gp${gp.id}_d${gp.currentDay}_${w.at}_acc${member.accountId}_${spec.taskType}`;
+          if (await this.isGroupDuplicate(dedupeKey)) continue;
+          await this.taskRepo.save(
+            this.taskRepo.create({
+              tenantId: group.tenantId,
+              taskType: spec.taskType,
+              targetType: TaskTargetType.Account,
+              targetIds: [member.accountId!],
+              priority: 5,
+              scheduledAt,
+              repeatRule: null,
+              payload: {
+                ...(spec.payload ?? {}),
+                _groupPlanId: gp.id,
+                _planDay: gp.currentDay,
+                _windowAt: w.at,
+                _dedupeKey: dedupeKey,
+              },
+              status: TaskStatus.Pending,
+            }),
+          );
+          count++;
+        }
+      }
+    }
+
+    // group plan 跨日推进 (简化版 · 不走 phaseService)
+    const lastAdv = gp.updatedAt;
+    if (lastAdv && now.getTime() - lastAdv.getTime() >= 24 * 3600 * 1000) {
+      gp.currentDay = Math.min(gp.currentDay + 1, template.totalDays + 7); // 最多 Day totalDays+7 (进 Mature)
+      // phase threshold
+      for (const [phase, threshold] of Object.entries(template.phaseThresholds)) {
+        if (gp.currentDay >= (threshold as number)) gp.currentPhase = Number(phase);
+      }
+      await this.groupPlanRepo.save(gp);
+    }
+
+    return count;
+  }
+
+  private async isGroupDuplicate(dedupeKey: string): Promise<boolean> {
+    const qb = this.taskRepo
+      .createQueryBuilder('t')
+      .where("t.payload ->> '_dedupeKey' = :k", { k: dedupeKey })
+      .andWhere('t.status IN (:...statuses)', {
+        statuses: [TaskStatus.Pending, TaskStatus.Queued, TaskStatus.Running, TaskStatus.Done],
+      });
+    return (await qb.getCount()) > 0;
   }
 
   /**

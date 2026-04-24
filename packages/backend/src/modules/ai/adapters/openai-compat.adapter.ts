@@ -21,10 +21,13 @@ export class OpenAICompatAdapter implements RewriteAdapter {
     cfg: { baseUrl: string; apiKey: string; model: string },
     input: RewriteInput,
   ): Promise<RewriteResult> {
-    const systemPrompt = input.personaHint
-      ? `你是在 WhatsApp 聊天的自然口语用户. 人设: ${input.personaHint}. 保持原意, 用更自然的口语表达, 不要照抄给定文本, 一句话以内.`
-      : '你是在 WhatsApp 聊天的自然口语用户. 保持原意, 用更自然的口语表达, 不要照抄给定文本, 一句话以内.';
-    const userPrompt = `改写这句: ${input.originalText}`;
+    // 2026-04-24 · 优先用 override (营销场景会传自定义人设) · 否则走默认聊天改写 prompt
+    const systemPrompt =
+      input.systemPromptOverride ??
+      (input.personaHint
+        ? `你是在 WhatsApp 聊天的自然口语用户. 人设: ${input.personaHint}. 保持原意, 用更自然的口语表达, 不要照抄给定文本, 一句话以内.`
+        : '你是在 WhatsApp 聊天的自然口语用户. 保持原意, 用更自然的口语表达, 不要照抄给定文本, 一句话以内.');
+    const userPrompt = input.userPromptOverride ?? `改写这句: ${input.originalText}`;
 
     return this.call(cfg, {
       system: systemPrompt,

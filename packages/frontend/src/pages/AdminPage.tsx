@@ -7,6 +7,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Radio,
   Select,
   Space,
   Table,
@@ -162,7 +163,7 @@ function TenantsTab() {
 }
 
 // ── License ──────────────────────────────────────────────
-function LicensesTab() {
+export function LicensesTab() {
   const { user } = useAuth();
   const isPlatformAdmin = user?.tenantId === null;
   const [data, setData] = useState<LicenseRow[]>([]);
@@ -265,7 +266,7 @@ function LicensesTab() {
         <Space>
           {isPlatformAdmin && (
             <Button type="primary" size="small" onClick={() => setModalOpen(true)}>
-              + 生成 License
+              + 创建新租户
             </Button>
           )}
           <Button size="small" onClick={() => void load()} loading={loading}>刷新</Button>
@@ -302,6 +303,8 @@ function LicensesTab() {
   );
 }
 
+// 2026-04-21 · 改名 "生成 License" → "创建新租户"
+// 加租户 admin 登录凭据字段 (email/username/password/fullName) · 激活时自动建本地 user
 function GenerateLicenseModal({
   open,
   onClose,
@@ -314,20 +317,52 @@ function GenerateLicenseModal({
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const [generatedKey, setGeneratedKey] = useState<string | null>(null);
+  const [generatedInfo, setGeneratedInfo] = useState<{
+    email?: string;
+    password?: string;
+  } | null>(null);
+
+  const [expireMode, setExpireMode] = useState<'never' | '1m' | '3m' | '6m' | '1y' | 'custom'>('1y');
+  const [customExpireDate, setCustomExpireDate] = useState<string>('');
+
+  // 按 preset 算过期 ISO · 基准=今天
+  const computeExpiresAt = (mode: typeof expireMode): string | undefined => {
+    if (mode === 'never') return undefined;
+    if (mode === 'custom') {
+      if (!customExpireDate) return undefined;
+      return new Date(customExpireDate + 'T23:59:59Z').toISOString();
+    }
+    const now = new Date();
+    const months = mode === '1m' ? 1 : mode === '3m' ? 3 : mode === '6m' ? 6 : 12;
+    now.setMonth(now.getMonth() + months);
+    return now.toISOString();
+  };
+
+  const previewText = (): string => {
+    const iso = computeExpiresAt(expireMode);
+    if (!iso) return expireMode === 'custom' ? '(请选择日期)' : '永久有效';
+    return new Date(iso).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+  };
 
   const handleFinish = async (values: {
     tenantName: string;
     plan: 'basic' | 'pro' | 'enterprise';
-    tenantEmail?: string;
-    expiresAt?: string;
+    tenantEmail: string;
+    tenantUsername: string;
+    tenantPassword: string;
+    tenantFullName?: string;
   }) => {
     setSubmitting(true);
     try {
-      const res = await api.post<{ licenseKey: string }>('/admin/licenses', values);
+      const payload = { ...values, expiresAt: computeExpiresAt(expireMode) };
+      const res = await api.post<{ licenseKey: string }>('/admin/licenses', payload);
       setGeneratedKey(res.data.licenseKey);
+      setGeneratedInfo({ email: values.tenantEmail, password: values.tenantPassword });
       form.resetFields();
+      setExpireMode('1y');
+      setCustomExpireDate('');
     } catch (err) {
-      message.error(extractErrorMessage(err, '生成失败'));
+      message.error(extractErrorMessage(err, '创建失败'));
     } finally {
       setSubmitting(false);
     }
@@ -335,6 +370,7 @@ function GenerateLicenseModal({
 
   const handleClose = () => {
     setGeneratedKey(null);
+    setGeneratedInfo(null);
     form.resetFields();
     onClose();
     if (generatedKey) onDone();
@@ -342,24 +378,42 @@ function GenerateLicenseModal({
 
   return (
     <Modal
-      title="生成 License"
+      title="创建新租户"
       open={open}
       onCancel={handleClose}
       footer={null}
       destroyOnClose
+      width={560}
     >
       {generatedKey ? (
         <>
           <Alert
             type="success"
             showIcon
-            message="生成成功"
-            description="请立即复制下面的 License Key 给客户. 关闭后无法再次查看完整 Key (在列表里只显示缩略)."
+            message="租户创建成功"
+            description="请把下列信息一起发给客户 (License Key + 邮箱 + 密码). 客户激活时自动建本地 admin 账号, 用这套邮箱密码直接登录."
             style={{ marginBottom: 16 }}
           />
-          <Paragraph copyable={{ text: generatedKey }}>
-            <code style={{ fontSize: 16, fontWeight: 600 }}>{generatedKey}</code>
-          </Paragraph>
+          <Card size="small" style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>License Key</div>
+            <Paragraph copyable={{ text: generatedKey }} style={{ marginBottom: 8 }}>
+              <code style={{ fontSize: 16, fontWeight: 600 }}>{generatedKey}</code>
+            </Paragraph>
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>登录邮箱</div>
+            <Paragraph copyable={{ text: generatedInfo?.email }} style={{ marginBottom: 8 }}>
+              <code>{generatedInfo?.email}</code>
+            </Paragraph>
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>初始密码</div>
+            <Paragraph copyable={{ text: generatedInfo?.password }} style={{ marginBottom: 0 }}>
+              <code>{generatedInfo?.password}</code>
+            </Paragraph>
+          </Card>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12, fontSize: 12 }}
+            message="⚠ 关闭后密码不再显示 · 请务必先复制"
+          />
           <Button type="primary" block onClick={handleClose}>
             完成
           </Button>
@@ -367,7 +421,7 @@ function GenerateLicenseModal({
       ) : (
         <Form form={form} layout="vertical" onFinish={handleFinish} requiredMark={false}>
           <Form.Item
-            label="租户名称"
+            label="租户名称 (公司/品牌名)"
             name="tenantName"
             rules={[{ required: true, message: '请输入租户名称' }]}
           >
@@ -387,19 +441,80 @@ function GenerateLicenseModal({
               ]}
             />
           </Form.Item>
+
+          <div style={{ margin: '16px -24px 8px', padding: '4px 24px', background: '#fafafa', fontSize: 12, color: '#666' }}>
+            租户 admin 账号 (客户用这套登录)
+          </div>
+
           <Form.Item
-            label="租户邮箱 (选填)"
+            label="管理员邮箱"
             name="tenantEmail"
-            rules={[{ type: 'email', message: '邮箱格式错误' }]}
+            rules={[
+              { required: true, message: '请输入邮箱' },
+              { type: 'email', message: '邮箱格式错误' },
+            ]}
           >
-            <Input placeholder="billing@acme.com" />
+            <Input placeholder="admin@acme.com" autoComplete="off" />
           </Form.Item>
-          <Form.Item label="过期时间 (选填, ISO)" name="expiresAt">
-            <Input placeholder="2027-04-19T00:00:00Z" />
+          <Form.Item
+            label="管理员用户名"
+            name="tenantUsername"
+            rules={[
+              { required: true, message: '请输入用户名' },
+              { pattern: /^[a-zA-Z0-9_]+$/, message: '只能字母/数字/下划线' },
+              { min: 3, message: '至少 3 位' },
+            ]}
+          >
+            <Input placeholder="acme_admin" autoComplete="off" name="tenant-username-new" />
+          </Form.Item>
+          <Form.Item
+            label="初始密码"
+            name="tenantPassword"
+            rules={[
+              { required: true, message: '请设置密码' },
+              { min: 8, message: '密码至少 8 位' },
+            ]}
+            extra="发给客户首次登录用 · 客户登入后可自行改"
+          >
+            <Input.Password placeholder="至少 8 位" autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item
+            label="姓名 / 显示名 (选填)"
+            name="tenantFullName"
+          >
+            <Input placeholder="张三" />
+          </Form.Item>
+
+          <Form.Item label="License 有效期" required>
+            <Radio.Group
+              value={expireMode}
+              onChange={(e) => setExpireMode(e.target.value)}
+              style={{ marginBottom: 8 }}
+              buttonStyle="solid"
+            >
+              <Radio.Button value="1m">1 个月</Radio.Button>
+              <Radio.Button value="3m">3 个月</Radio.Button>
+              <Radio.Button value="6m">半年</Radio.Button>
+              <Radio.Button value="1y">1 年</Radio.Button>
+              <Radio.Button value="never">永久</Radio.Button>
+              <Radio.Button value="custom">自选日期</Radio.Button>
+            </Radio.Group>
+            {expireMode === 'custom' && (
+              <Input
+                type="date"
+                value={customExpireDate}
+                onChange={(e) => setCustomExpireDate(e.target.value)}
+                min={new Date().toISOString().slice(0, 10)}
+                style={{ display: 'block', marginBottom: 4 }}
+              />
+            )}
+            <div style={{ fontSize: 12, color: '#666' }}>
+              到期日: <strong style={{ color: expireMode === 'never' ? '#25d366' : '#1677ff' }}>{previewText()}</strong>
+            </div>
           </Form.Item>
           <Form.Item>
             <Button type="primary" htmlType="submit" loading={submitting} block>
-              生成
+              创建租户 + 生成 License
             </Button>
           </Form.Item>
         </Form>

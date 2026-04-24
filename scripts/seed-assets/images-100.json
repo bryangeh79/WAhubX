@@ -1,0 +1,143 @@
+{
+  "meta": {
+    "description": "WAhubX 官方图片素材库 · 100 张通用表情/日常图",
+    "source": "Pexels (免版权 · 免费商用)",
+    "naming": "<pool>/<id>_<slug>.jpg"
+  },
+  "pools": [
+    {
+      "pool": "reaction_emoji",
+      "label": "表情反应",
+      "note": "猫猫狗狗搞笑/表情丰富的动物和人脸 · 适合聊天回应",
+      "items": [
+        { "id": "re001", "url": "https://images.pexels.com/photos/416160/pexels-photo-416160.jpeg?w=800", "slug": "cat_surprised" },
+        { "id": "re002", "url": "https://images.pexels.com/photos/1170986/pexels-photo-1170986.jpeg?w=800", "slug": "dog_happy" },
+        { "id": "re003", "url": "https://images.pexels.com/photos/45201/kitty-cat-kitten-pet-45201.jpeg?w=800", "slug": "kitten_cute" },
+        { "id": "re004", "url": "https://images.pexels.com/photos/2064466/pexels-photo-2064466.jpeg?w=800", "slug": "puppy_smile" },
+        { "id": "re005", "url": "https://images.pexels.com/photos/1108099/pexels-photo-1108099.jpeg?w=800", "slug": "dog_tongue" },
+        { "id": "re006", "url": "https://images.pexels.com/photos/1404819/pexels-photo-1404819.jpeg?w=800", "slug": "cat_loaf" },
+        { "id": "re007", "url": "https://images.pexels.com/photos/991831/pexels-photo-991831.jpeg?w=800", "slug": "kitten_bed" },
+        { "id": "re008", "url": "https://images.pexels.com/photos/1108099/pexels-photo-1108099.jpeg?w=800", "slug": "dog_sleepy" },
+        { "id": "re009", "url": "https://images.pexels.com/photos/3763188/pexels-photo-3763188.jpeg?w=800", "slug": "thumbs_up_girl" },
+        { "id": "re010", "url": "https://images.pexels.com/photos/3762810/pexels-photo-3762810.jpeg?w=800", "slug": "ok_hand" },
+        { "id": "re011", "url": "https://images.pexels.com/photos/4050291/pexels-photo-4050291.jpeg?w=800", "slug": "laughing_girl" },
+        { "id": "re012", "url": "https://images.pexels.com/photos/2379004/pexels-photo-2379004.jpeg?w=800", "slug": "surprised_face" },
+        { "id": "re013", "url": "https://images.pexels.com/photos/1181519/pexels-photo-1181519.jpeg?w=800", "slug": "thinking_guy" },
+        { "id": "re014", "url": "https://images.pexels.com/photos/769749/pexels-photo-769749.jpeg?w=800", "slug": "cat_serious" },
+        { "id": "re015", "url": "https://images.pexels.com/photos/208984/pexels-photo-208984.jpeg?w=800", "slug": "thumbs_up_office" },
+        { "id": "re016", "url": "https://images.pexels.com/photos/3771069/pexels-photo-3771069.jpeg?w=800", "slug": "excited_girl" },
+        { "id": "re017", "url": "https://images.pexels.com/photos/1181686/pexels-photo-1181686.jpeg?w=800", "slug": "cool_guy" },
+        { "id": "re018", "url": "https://images.pexels.com/photos/3771047/pexels-photo-3771047.jpeg?w=800", "slug": "wink_girl" },
+        { "id": "re019", "url": "https://images.pexels.com/photos/2379005/pexels-photo-2379005.jpeg?w=800", "slug": "facepalm" },
+        { "id": "re020", "url": "https://images.pexels.com/photos/428339/pexels-photo-428339.jpeg?w=800", "slug": "cat_stretch" }
+      ]
+    },
+    {
+      "pool": "food_general",
+      "label": "美食图 (通用)",
+      "note": "咖啡/早餐/甜点 · 适合早/晚问候场景",
+      "items": [
+        { "id": "fo001", "url": "https://images.pexels.com/photos/1833306/pexels-photo-1833306.jpeg?w=800", "slug": "coffee_morning" },
+        { "id": "fo002", "url": "https://images.pexels.com/photos/302896/pexels-photo-302896.jpeg?w=800", "slug": "breakfast" },
+        { "id": "fo003", "url": "https://images.pexels.com/photos/236795/pexels-photo-236795.jpeg?w=800", "slug": "pasta" },
+        { "id": "fo004", "url": "https://images.pexels.com/photos/376464/pexels-photo-376464.jpeg?w=800", "slug": "pizza" },
+        { "id": "fo005", "url": "https://images.pexels.com/photos/1640774/pexels-photo-1640774.jpeg?w=800", "slug": "donuts" },
+        { "id": "fo006", "url": "https://images.pexels.com/photos/414262/pexels-photo-414262.jpeg?w=800", "slug": "sushi" },
+        { "id": "fo007", "url": "https://images.pexels.com/photos/1099680/pexels-photo-1099680.jpeg?w=800", "slug": "burger" },
+        { "id": "fo008", "url": "https://images.pexels.com/photos/1279330/pexels-photo-1279330.jpeg?w=800", "slug": "cake" },
+        { "id": "fo009", "url": "https://images.pexels.com/photos/1337825/pexels-photo-1337825.jpeg?w=800", "slug": "fruit_bowl" },
+        { "id": "fo010", "url": "https://images.pexels.com/photos/1640771/pexels-photo-1640771.jpeg?w=800", "slug": "bubble_tea" },
+        { "id": "fo011", "url": "https://images.pexels.com/photos/1640772/pexels-photo-1640772.jpeg?w=800", "slug": "ice_cream" },
+        { "id": "fo012", "url": "https://images.pexels.com/photos/2097090/pexels-photo-2097090.jpeg?w=800", "slug": "salad" },
+        { "id": "fo013", "url": "https://images.pexels.com/photos/1660030/pexels-photo-1660030.jpeg?w=800", "slug": "noodles" },
+        { "id": "fo014", "url": "https://images.pexels.com/photos/3609894/pexels-photo-3609894.jpeg?w=800", "slug": "dim_sum" },
+        { "id": "fo015", "url": "https://images.pexels.com/photos/2673353/pexels-photo-2673353.jpeg?w=800", "slug": "malay_food" },
+        { "id": "fo016", "url": "https://images.pexels.com/photos/1435895/pexels-photo-1435895.jpeg?w=800", "slug": "rice_bowl" },
+        { "id": "fo017", "url": "https://images.pexels.com/photos/3298180/pexels-photo-3298180.jpeg?w=800", "slug": "tea_time" },
+        { "id": "fo018", "url": "https://images.pexels.com/photos/414646/pexels-photo-414646.jpeg?w=800", "slug": "croissant" },
+        { "id": "fo019", "url": "https://images.pexels.com/photos/1337824/pexels-photo-1337824.jpeg?w=800", "slug": "healthy_lunch" },
+        { "id": "fo020", "url": "https://images.pexels.com/photos/67636/rose-red-blossom-bloom-67636.jpeg?w=800", "slug": "dessert" }
+      ]
+    },
+    {
+      "pool": "scenery",
+      "label": "风景 / 日常",
+      "note": "风景/城市夜景 · 适合节假日或问候",
+      "items": [
+        { "id": "sc001", "url": "https://images.pexels.com/photos/417074/pexels-photo-417074.jpeg?w=800", "slug": "sunrise_beach" },
+        { "id": "sc002", "url": "https://images.pexels.com/photos/2098428/pexels-photo-2098428.jpeg?w=800", "slug": "sunset_city" },
+        { "id": "sc003", "url": "https://images.pexels.com/photos/1007657/pexels-photo-1007657.jpeg?w=800", "slug": "mountain_lake" },
+        { "id": "sc004", "url": "https://images.pexels.com/photos/2387873/pexels-photo-2387873.jpeg?w=800", "slug": "forest_path" },
+        { "id": "sc005", "url": "https://images.pexels.com/photos/1181454/pexels-photo-1181454.jpeg?w=800", "slug": "kl_tower" },
+        { "id": "sc006", "url": "https://images.pexels.com/photos/459225/pexels-photo-459225.jpeg?w=800", "slug": "petronas" },
+        { "id": "sc007", "url": "https://images.pexels.com/photos/2387418/pexels-photo-2387418.jpeg?w=800", "slug": "sea_wave" },
+        { "id": "sc008", "url": "https://images.pexels.com/photos/289327/pexels-photo-289327.jpeg?w=800", "slug": "flower_field" },
+        { "id": "sc009", "url": "https://images.pexels.com/photos/1323550/pexels-photo-1323550.jpeg?w=800", "slug": "city_skyline" },
+        { "id": "sc010", "url": "https://images.pexels.com/photos/1098460/pexels-photo-1098460.jpeg?w=800", "slug": "rain_window" },
+        { "id": "sc011", "url": "https://images.pexels.com/photos/531880/pexels-photo-531880.jpeg?w=800", "slug": "tropical_beach" },
+        { "id": "sc012", "url": "https://images.pexels.com/photos/1194420/pexels-photo-1194420.jpeg?w=800", "slug": "blue_sky" },
+        { "id": "sc013", "url": "https://images.pexels.com/photos/325807/pexels-photo-325807.jpeg?w=800", "slug": "night_city" },
+        { "id": "sc014", "url": "https://images.pexels.com/photos/36717/amazing-animal-beautiful-beautifull.jpg?w=800", "slug": "bird_nature" },
+        { "id": "sc015", "url": "https://images.pexels.com/photos/572897/pexels-photo-572897.jpeg?w=800", "slug": "palm_tree" }
+      ]
+    },
+    {
+      "pool": "festivals",
+      "label": "节日图",
+      "items": [
+        { "id": "fs001", "url": "https://images.pexels.com/photos/776538/pexels-photo-776538.jpeg?w=800", "slug": "cny_lanterns" },
+        { "id": "fs002", "url": "https://images.pexels.com/photos/1553957/pexels-photo-1553957.jpeg?w=800", "slug": "cny_decoration" },
+        { "id": "fs003", "url": "https://images.pexels.com/photos/1303081/pexels-photo-1303081.jpeg?w=800", "slug": "raya_lights" },
+        { "id": "fs004", "url": "https://images.pexels.com/photos/712318/pexels-photo-712318.jpeg?w=800", "slug": "deepavali_diya" },
+        { "id": "fs005", "url": "https://images.pexels.com/photos/712321/pexels-photo-712321.jpeg?w=800", "slug": "christmas_tree" },
+        { "id": "fs006", "url": "https://images.pexels.com/photos/754113/pexels-photo-754113.jpeg?w=800", "slug": "birthday_cake" },
+        { "id": "fs007", "url": "https://images.pexels.com/photos/321576/pexels-photo-321576.jpeg?w=800", "slug": "fireworks" },
+        { "id": "fs008", "url": "https://images.pexels.com/photos/1303080/pexels-photo-1303080.jpeg?w=800", "slug": "mooncake" },
+        { "id": "fs009", "url": "https://images.pexels.com/photos/1303081/pexels-photo-1303081.jpeg?w=800", "slug": "festival_night" },
+        { "id": "fs010", "url": "https://images.pexels.com/photos/681329/pexels-photo-681329.jpeg?w=800", "slug": "new_year" }
+      ]
+    },
+    {
+      "pool": "business_promo",
+      "label": "商业/促销配图",
+      "note": "办公场景/购物/产品图 · 业务号常用",
+      "items": [
+        { "id": "bz001", "url": "https://images.pexels.com/photos/210607/pexels-photo-210607.jpeg?w=800", "slug": "laptop_workspace" },
+        { "id": "bz002", "url": "https://images.pexels.com/photos/265087/pexels-photo-265087.jpeg?w=800", "slug": "handshake" },
+        { "id": "bz003", "url": "https://images.pexels.com/photos/3183150/pexels-photo-3183150.jpeg?w=800", "slug": "meeting" },
+        { "id": "bz004", "url": "https://images.pexels.com/photos/264636/pexels-photo-264636.jpeg?w=800", "slug": "phone_business" },
+        { "id": "bz005", "url": "https://images.pexels.com/photos/7319307/pexels-photo-7319307.jpeg?w=800", "slug": "shopping_cart" },
+        { "id": "bz006", "url": "https://images.pexels.com/photos/1667088/pexels-photo-1667088.jpeg?w=800", "slug": "shopping_bags" },
+        { "id": "bz007", "url": "https://images.pexels.com/photos/3944454/pexels-photo-3944454.jpeg?w=800", "slug": "online_shop" },
+        { "id": "bz008", "url": "https://images.pexels.com/photos/459654/pexels-photo-459654.jpeg?w=800", "slug": "delivery_box" },
+        { "id": "bz009", "url": "https://images.pexels.com/photos/3184435/pexels-photo-3184435.jpeg?w=800", "slug": "team_office" },
+        { "id": "bz010", "url": "https://images.pexels.com/photos/3184465/pexels-photo-3184465.jpeg?w=800", "slug": "brainstorm" },
+        { "id": "bz011", "url": "https://images.pexels.com/photos/7974/pexels-photo.jpg?w=800", "slug": "writing_notes" },
+        { "id": "bz012", "url": "https://images.pexels.com/photos/1181675/pexels-photo-1181675.jpeg?w=800", "slug": "celebrate_team" },
+        { "id": "bz013", "url": "https://images.pexels.com/photos/1181328/pexels-photo-1181328.jpeg?w=800", "slug": "office_laugh" },
+        { "id": "bz014", "url": "https://images.pexels.com/photos/265108/pexels-photo-265108.jpeg?w=800", "slug": "office_desk" },
+        { "id": "bz015", "url": "https://images.pexels.com/photos/3184418/pexels-photo-3184418.jpeg?w=800", "slug": "remote_work" },
+        { "id": "bz016", "url": "https://images.pexels.com/photos/669615/pexels-photo-669615.jpeg?w=800", "slug": "credit_card" },
+        { "id": "bz017", "url": "https://images.pexels.com/photos/3243090/pexels-photo-3243090.jpeg?w=800", "slug": "store_front" },
+        { "id": "bz018", "url": "https://images.pexels.com/photos/1181696/pexels-photo-1181696.jpeg?w=800", "slug": "office_smile" },
+        { "id": "bz019", "url": "https://images.pexels.com/photos/3768131/pexels-photo-3768131.jpeg?w=800", "slug": "mobile_shopping" },
+        { "id": "bz020", "url": "https://images.pexels.com/photos/3184465/pexels-photo-3184465.jpeg?w=800", "slug": "team_work" },
+        { "id": "bz021", "url": "https://images.pexels.com/photos/7319076/pexels-photo-7319076.jpeg?w=800", "slug": "small_business" },
+        { "id": "bz022", "url": "https://images.pexels.com/photos/3965545/pexels-photo-3965545.jpeg?w=800", "slug": "boxes_delivery" },
+        { "id": "bz023", "url": "https://images.pexels.com/photos/3184293/pexels-photo-3184293.jpeg?w=800", "slug": "office_space" },
+        { "id": "bz024", "url": "https://images.pexels.com/photos/3861969/pexels-photo-3861969.jpeg?w=800", "slug": "startup" },
+        { "id": "bz025", "url": "https://images.pexels.com/photos/3182759/pexels-photo-3182759.jpeg?w=800", "slug": "product_photo" },
+        { "id": "bz026", "url": "https://images.pexels.com/photos/3153198/pexels-photo-3153198.jpeg?w=800", "slug": "customer_service" },
+        { "id": "bz027", "url": "https://images.pexels.com/photos/3184357/pexels-photo-3184357.jpeg?w=800", "slug": "marketing" },
+        { "id": "bz028", "url": "https://images.pexels.com/photos/265152/pexels-photo-265152.jpeg?w=800", "slug": "presentation" },
+        { "id": "bz029", "url": "https://images.pexels.com/photos/7319328/pexels-photo-7319328.jpeg?w=800", "slug": "e_commerce" },
+        { "id": "bz030", "url": "https://images.pexels.com/photos/5632402/pexels-photo-5632402.jpeg?w=800", "slug": "promo_banner" },
+        { "id": "bz031", "url": "https://images.pexels.com/photos/5632382/pexels-photo-5632382.jpeg?w=800", "slug": "promo_sale" },
+        { "id": "bz032", "url": "https://images.pexels.com/photos/7319073/pexels-photo-7319073.jpeg?w=800", "slug": "local_biz" },
+        { "id": "bz033", "url": "https://images.pexels.com/photos/4569340/pexels-photo-4569340.jpeg?w=800", "slug": "package" },
+        { "id": "bz034", "url": "https://images.pexels.com/photos/5417639/pexels-photo-5417639.jpeg?w=800", "slug": "discount_tag" },
+        { "id": "bz035", "url": "https://images.pexels.com/photos/3184343/pexels-photo-3184343.jpeg?w=800", "slug": "data_analysis" }
+      ]
+    }
+  ]
+}

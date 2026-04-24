@@ -34,6 +34,7 @@ export class ScriptChatExecutor implements TaskExecutor {
       sessionIndex?: number;
       fastMode?: boolean;
       _needPair?: boolean;
+      forceOverride?: boolean;  // 2026-04-21 · admin 前端强制覆盖 warmup gate
     };
     if (!payload.scriptId || !payload.roleAaccountId) {
       return {
@@ -74,6 +75,7 @@ export class ScriptChatExecutor implements TaskExecutor {
         roleBaccountId: roleB,
         sessionIndex: payload.sessionIndex,
         fastMode: payload.fastMode ?? false,
+        forceOverride: payload.forceOverride ?? false,
       });
       ctx.log('script-done', result.errors.length === 0, {
         turnsExecuted: result.turnsExecuted,

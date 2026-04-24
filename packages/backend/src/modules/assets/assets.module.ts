@@ -10,6 +10,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AssetsController } from './assets.controller';
 import { AssetService } from './asset.service';
+import { AssetPoolService } from './asset-pool.service';
 import { PersonaGeneratorService } from './persona-generator.service';
 import { AvatarGeneratorService } from './avatar-generator.service';
 import { PersonaPoolScheduler } from './persona-pool.scheduler';
@@ -30,10 +31,11 @@ import { PiperModule } from './piper/piper.module';
   controllers: [AssetsController],
   providers: [
     AssetService,
+    AssetPoolService,
     PersonaGeneratorService,
     AvatarGeneratorService,
     PersonaPoolScheduler,
   ],
-  exports: [AssetService, PersonaGeneratorService, AvatarGeneratorService],
+  exports: [AssetService, AssetPoolService, PersonaGeneratorService, AvatarGeneratorService],
 })
 export class AssetsModule {}

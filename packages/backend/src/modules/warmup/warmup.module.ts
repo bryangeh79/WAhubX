@@ -1,46 +1,54 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WarmupPlanEntity } from './warmup-plan.entity';
+import { GroupWarmupPlanEntity } from './group-warmup-plan.entity';
 import { TaskEntity } from '../tasks/task.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity } from '../slots/account-health.entity';
+import { ExecutionGroupEntity } from '../execution-groups/execution-group.entity';
 import { ScriptEntity } from '../scripts/script.entity';
 import { ScriptPackEntity } from '../scripts/script-pack.entity';
 import { AssetEntity } from '../scripts/asset.entity';
 import { WarmupPlanService } from './warmup-plan.service';
 import { WarmupPhaseService } from './warmup-phase.service';
 import { WarmupPairService } from './warmup-pair.service';
+import { WarmupPairPicker } from './warmup-pair-picker.service';
 import { WarmupCalendarService } from './warmup-calendar.service';
+import { GroupWarmupService } from './group-warmup.service';
 import { WarmupExecutor } from '../tasks/executors/warmup.executor';
 import { StatusPostExecutor } from './status-post.executor';
 import { StatusBrowseExecutor } from './status-browse.executor';
 import { WarmupController } from './warmup.controller';
+import { GroupWarmupController } from './group-warmup.controller';
+import { StatusPostSeedsController } from './status-post-seeds.controller';
 import { AdminDebugController } from './admin-debug.controller';
 import { BaileysModule } from '../baileys/baileys.module';
 
-// WarmupModule 集中托管养号日历 + 4 种 warmup-family executor (warmup/script_chat pair 协同/status_post/status_browse).
-// 不 import ScriptsModule / SlotsModule, 通过 TypeOrmModule.forFeature 直接拿 repos — 打破 scripts ↔ warmup 潜在循环依赖.
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       WarmupPlanEntity,
+      GroupWarmupPlanEntity,
       TaskEntity,
       AccountSlotEntity,
       WaAccountEntity,
       AccountHealthEntity,
+      ExecutionGroupEntity,
       ScriptEntity,
       ScriptPackEntity,
       AssetEntity,
     ]),
     BaileysModule,
   ],
-  controllers: [WarmupController, AdminDebugController],
+  controllers: [WarmupController, GroupWarmupController, StatusPostSeedsController, AdminDebugController],
   providers: [
     WarmupPlanService,
     WarmupPhaseService,
     WarmupPairService,
+    WarmupPairPicker,
     WarmupCalendarService,
+    GroupWarmupService,
     WarmupExecutor,
     StatusPostExecutor,
     StatusBrowseExecutor,
@@ -49,7 +57,9 @@ import { BaileysModule } from '../baileys/baileys.module';
     WarmupPlanService,
     WarmupPhaseService,
     WarmupPairService,
+    WarmupPairPicker,
     WarmupCalendarService,
+    GroupWarmupService,
     WarmupExecutor,
     StatusPostExecutor,
     StatusBrowseExecutor,

@@ -25,6 +25,7 @@ import { RISK_EVENT_CHANNEL, type RiskRawEvent } from '../account-health/risk.ev
 import { RiskEventCode } from '../account-health/risk-event.entity';
 import { TakeoverLockService } from '../takeover/takeover-lock.service';
 import { TaskPausedError, TaskInterruptedError } from '../takeover/takeover.errors';
+import { OnEvent } from '@nestjs/event-emitter';
 
 // 5 条拒绝路径 + soft skip (warmup_stage)
 // M8 · 加第 6 条: skip-health-high (risk_level=high 且非 dry_run 时)
@@ -36,6 +37,7 @@ export type DispatchDecision =
   | { action: 'skip-takeover-active' }      // #4 该账号在接管中
   | { action: 'skip-night-window' }         // 夜间只放行 warmup/maintenance
   | { action: 'skip-health-high' }          // #6 M8 · 健康分 high 暂停主动任务
+  | { action: 'skip-slot-offline' }         // 2026-04-22 · 槽位 suspended/empty · 留 pending 等 recover
   | { action: 'soft-warn-warmup-stage' }    // #5 soft: warmup_stage 不够, 允许执行 + 记警告
   | { action: 'leave-pending-unknown-type' }; // executor 未注册 → 不 reject 不 run, 保 pending
 
@@ -62,6 +64,18 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DispatcherService.name);
   private pollTimer: NodeJS.Timeout | null = null;
   private busy = false; // 防止上一轮未结束下一轮开始 (长任务并发调度)
+  // 2026-04-22 · Gap 2 · 被 suspend 的 account · 跑中的 executor 下次 throwIfPaused 抛错
+  private cancelledAccounts = new Set<number>();
+
+  @OnEvent('slot.suspended')
+  onSlotSuspended(payload: { slotId: number; accountId: number }): void {
+    this.logger.warn(
+      `📢 slot ${payload.slotId} suspended · account ${payload.accountId} · 中断该号运行中任务`,
+    );
+    this.cancelledAccounts.add(payload.accountId);
+    // 5 分钟后自动清 · 避免永远 cancel
+    setTimeout(() => this.cancelledAccounts.delete(payload.accountId), 5 * 60 * 1000);
+  }
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -74,7 +88,18 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly takeoverLock?: TakeoverLockService,
   ) {}
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // 2026-04-21 · 启动时清理僵尸 running task_run (上次 backend 崩/被 kill 留下)
+    // 否则 dispatcher 误以为那些 account 还在跑, 永远 skip-account-busy
+    const orphans = await this.dataSource.query(
+      `UPDATE task_run SET status='interrupted', finished_at=NOW(),
+         error_code='ORPHAN_ON_RESTART', error_message='backend 重启时 auto-cleanup'
+       WHERE status='running' RETURNING id`,
+    );
+    if (orphans.length > 0) {
+      this.logger.warn(`清理 ${orphans.length} 条僵尸 task_run (backend 重启前未完成): ${orphans.map((r: { id: number }) => r.id).join(',')}`);
+    }
+
     const interval = this.config.get<number>('SCHEDULER_POLL_INTERVAL_MS', 3000);
     this.pollTimer = setInterval(() => {
       if (this.busy) return;
@@ -144,12 +169,17 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     }
     const accountId = task.targetIds[0];
 
-    // 读槽位信息 (需要 proxy_id + takeover_active + account.warmup_stage)
+    // 读槽位信息 (需要 proxy_id + takeover_active + account.warmup_stage + status)
     const slot = await this.dataSource.getRepository(AccountSlotEntity).findOne({
       where: { accountId },
     });
     if (!slot) {
       return { action: 'leave-pending-unknown-type' }; // 账号不存在或未挂槽, 保 pending 让人工排查
+    }
+
+    // 2026-04-22 · Gap 1 · 槽位 suspended/empty 不分发 · 保 pending · 等 recover
+    if (slot.status === 'suspended' || slot.status === 'empty') {
+      return { action: 'skip-slot-offline' };
     }
 
     // #1 全局并发
@@ -220,6 +250,7 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       case 'skip-ip-group-busy':
       case 'skip-takeover-active':
       case 'skip-night-window':
+      case 'skip-slot-offline':
         // 保 pending 让下一轮 tick 重新评估
         return;
       case 'skip-health-high':
@@ -300,6 +331,10 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       throwIfPaused: () => {
         if (this.takeoverLock?.isPaused(accountId)) {
           throw new TaskPausedError(accountId);
+        }
+        // 2026-04-22 · Gap 2 · slot suspended · 中断任务
+        if (this.cancelledAccounts.has(accountId)) {
+          throw new TaskInterruptedError(accountId, 'slot suspended mid-task');
         }
       },
     };

@@ -1,0 +1,70 @@
+# WAhubX 频道种子库 CSV 模板
+# Header 固定: name,invite_code,tags,description
+# tags 多个用 | 分隔
+# 以 # 开头的行会被忽略 (注释)
+# invite_code = whatsapp.com/channel/XXX 的最后一段 · 不是完整链接
+#
+# 填法示例:
+# Forex Signals Daily,0029VaXXXXXXXXX,forex|finance-edu,每日外汇信号
+#
+# 导入方式:
+# 1. Admin UI: 设置 → 素材库 → 频道 → 批量导入 · 粘此 CSV
+# 2. CLI: psql ... -c "COPY channel_item(name,invite_code,tags,description) FROM ..."
+#
+# ══════════ 种子示例 (占位 invite_code · 需替换真数据) ══════════
+name,invite_code,tags,description
+# ── 金融 / 投资 ──
+Forex Signals Daily,PLACEHOLDER_FOREX_001,forex|finance-edu,每日外汇交易信号与分析
+MyForex Malaysia,PLACEHOLDER_FOREX_002,forex|news-my,马来本地外汇交易社群
+FX Pips Pro,PLACEHOLDER_FOREX_003,forex,专业外汇 pips 预测
+Crypto Daily Updates,PLACEHOLDER_CRYPTO_001,crypto,加密货币每日行情
+Bitcoin Malaysia,PLACEHOLDER_CRYPTO_002,crypto|news-my,马来比特币爱好者社群
+NFT Alpha,PLACEHOLDER_CRYPTO_003,crypto|web3,NFT 新项目早期信息
+# ── 商业 / 营销 ──
+Marketing Masters,PLACEHOLDER_MKT_001,marketing,营销策略分享
+Ecom Gold MY,PLACEHOLDER_ECOM_001,ecommerce|marketing,马来电商运营案例
+Startup KL,PLACEHOLDER_STARTUP_001,startup|news-my,KL 创业圈动态
+Shopee 卖家交流,PLACEHOLDER_ECOM_002,ecommerce,Shopee 卖家运营技巧
+Lazada 卖家圈,PLACEHOLDER_ECOM_003,ecommerce,Lazada 卖家运营
+# ── 新闻 ──
+The Star Malaysia,PLACEHOLDER_NEWS_001,news-my|news-world,马来西亚英文新闻
+Sin Chew Daily,PLACEHOLDER_NEWS_002,news-my|news-zh,星洲日报
+Oriental Daily,PLACEHOLDER_NEWS_003,news-my|news-zh,东方日报
+China Press MY,PLACEHOLDER_NEWS_004,news-my|news-zh,中国报
+# ── 科技 / AI ──
+AI News Daily,PLACEHOLDER_TECH_001,tech|ai,AI 行业每日新闻
+Tech Malaysia,PLACEHOLDER_TECH_002,tech|news-my,马来本地科技动态
+ChatGPT 玩家社群,PLACEHOLDER_AI_001,ai|tech,ChatGPT 使用技巧分享
+# ── 美食 / 生活 ──
+KL Foodie,PLACEHOLDER_FOOD_001,food|food-kl|lifestyle,KL 美食探店
+Penang Foodie,PLACEHOLDER_FOOD_002,food|food-my,槟城美食
+Travel Malaysia,PLACEHOLDER_TRAVEL_001,travel|news-my,马来境内旅游攻略
+# ── 时尚 / 美妆 ──
+KL Fashion Style,PLACEHOLDER_FASHION_001,fashion|lifestyle,KL 时尚穿搭
+Skincare Malaysia,PLACEHOLDER_BEAUTY_001,skincare|beauty,马来美妆护肤
+# ── 房产 / 汽车 ──
+Property Malaysia,PLACEHOLDER_PROP_001,real-estate-my|real-estate,马来房产资讯
+iProperty KL,PLACEHOLDER_PROP_002,real-estate-my,KL 房产交易
+Auto Malaysia,PLACEHOLDER_AUTO_001,auto|news-my,马来汽车市场
+# ── 教育 ──
+English Daily,PLACEHOLDER_EDU_001,english-learning|education,英语每日学习
+Productivity Hacks,PLACEHOLDER_EDU_002,productivity|education,效率工具分享
+# ── 娱乐 ──
+K-Pop Malaysia,PLACEHOLDER_ENT_001,kpop|entertainment,K-Pop 马来粉丝
+Movie Reviews,PLACEHOLDER_ENT_002,movies|entertainment,电影点评
+# ── 体育 ──
+EPL Malaysia,PLACEHOLDER_SPORTS_001,football|sports,英超马来粉丝
+Badminton MY,PLACEHOLDER_SPORTS_002,sports|news-my,马来羽毛球
+# ── 健康 ──
+Fitness Malaysia,PLACEHOLDER_HEALTH_001,fitness|health,马来健身社群
+Wellness Daily,PLACEHOLDER_HEALTH_002,wellness|health,每日健康建议
+#
+# ═══════════════════════════════════════════════════════════════
+# 以上 30 条为示例 · 继续补至 1000 条
+# 真 invite_code 可通过以下方式收集:
+#   1. 加入行业 WA 群 · 抓群友贴的 channel 链接
+#   2. Google: site:whatsapp.com/channel + 行业关键词
+#   3. 客户 / 同行主动推荐
+#   4. 第三方 channel aggregator 网站 (注意 ToS)
+# 当前示例用 PLACEHOLDER_XXX · 导入后不能直接 follow · 需手动替换真 code
+# ═══════════════════════════════════════════════════════════════

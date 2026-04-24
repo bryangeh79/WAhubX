@@ -17,10 +17,12 @@ import {
   Delete,
   Get,
   HttpCode,
+  NotFoundException,
   Param,
   ParseIntPipe,
   Post,
   Query,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -28,14 +30,20 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import type { Response } from 'express';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { getDataDir } from '../../common/storage';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { UserRole } from '../users/user.entity';
 import { AssetService } from './asset.service';
 import { PersonaGeneratorService } from './persona-generator.service';
 import { PersonaEntity } from './persona.entity';
 import { AssetEntity, AssetKind, AssetSource } from '../scripts/asset.entity';
 import { EthnicityMY, type EthnicityMY as EthnicityMyType } from './persona.types';
+import { AssetPoolService } from './asset-pool.service';
 
 const MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
 const QUOTA_IMAGE_PER_PERSONA = 100;
@@ -50,7 +58,80 @@ export class AssetsController {
     private readonly personaGen: PersonaGeneratorService,
     @InjectRepository(PersonaEntity) private readonly personaRepo: Repository<PersonaEntity>,
     @InjectRepository(AssetEntity) private readonly assetRepo: Repository<AssetEntity>,
+    private readonly assetPool: AssetPoolService,
   ) {}
+
+  // 2026-04-22 · 素材池管理 · 给 send_* executor 用
+  @Get('pools')
+  async listPools(@Query('kind') kind?: string) {
+    const k = kind && (Object.values(AssetKind) as string[]).includes(kind)
+      ? (kind as AssetKind) : undefined;
+    return this.assetPool.listPools(k);
+  }
+
+  @Post('reindex')
+  @HttpCode(200)
+  async reindex() {
+    return this.assetPool.reindexAll();
+  }
+
+  // 2026-04-22 · 按 kind + pool 列 asset · 前端素材库 UI 预览用
+  @Get()
+  async listByKindPool(
+    @Query('kind') kind: string,
+    @Query('pool') pool: string,
+  ) {
+    if (!kind || !pool) throw new BadRequestException('kind + pool 必填');
+    if (!(Object.values(AssetKind) as string[]).includes(kind)) {
+      throw new BadRequestException(`kind 必须是 ${Object.values(AssetKind).join('/')}`);
+    }
+    return this.assetPool.listInPool(kind as AssetKind, pool);
+  }
+
+  // 2026-04-24 · 单条 asset 元数据 · 给前端预览/列表渲染 · 不带文件
+  @Get('meta/:id')
+  async getMeta(@Param('id', ParseIntPipe) id: number): Promise<AssetEntity> {
+    const asset = await this.assetRepo.findOne({ where: { id } });
+    if (!asset) throw new NotFoundException('asset 不存在');
+    return asset;
+  }
+
+  // 2026-04-22 · 文件 serve · 给前端 <img/audio/video> 预览用
+  // @Public: <img src> 浏览器直发 · 不经 axios · 不带 JWT. 本地桌面应用单租户场景安全.
+  @Public()
+  @Get('file/:id')
+  async serveFile(
+    @Param('id', ParseIntPipe) id: number,
+    @Res() res: Response,
+  ) {
+    const asset = await this.assetRepo.findOne({ where: { id } });
+    if (!asset) throw new NotFoundException('asset 不存在');
+    const abs = path.join(getDataDir(), asset.filePath);
+    if (!fs.existsSync(abs)) throw new NotFoundException('文件已删除');
+    const mime = this.guessMime(abs);
+    if (mime) res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    fs.createReadStream(abs).pipe(res);
+  }
+
+  private guessMime(filePath: string): string | null {
+    const ext = path.extname(filePath).toLowerCase();
+    const map: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mov': 'video/quicktime',
+      '.mp3': 'audio/mpeg',
+      '.ogg': 'audio/ogg',
+      '.opus': 'audio/opus',
+      '.m4a': 'audio/mp4',
+    };
+    return map[ext] ?? null;
+  }
 
   @Get('personas')
   async listPersonas(): Promise<PersonaEntity[]> {

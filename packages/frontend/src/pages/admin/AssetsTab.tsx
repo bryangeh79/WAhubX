@@ -227,6 +227,8 @@ export function AssetsTab() {
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError(null)} /> : null}
 
+      <SharedPoolsCard />
+
       <Card
         title="Persona 库"
         extra={
@@ -375,5 +377,209 @@ disabled={!selectedPersona}
         </Space>
       </Modal>
     </Space>
+  );
+}
+
+// 2026-04-22 · 共享素材池 (不绑 persona)
+// 显示 voice / image / video 三大类 · 每类下 N 个池 · 每池 count
+function SharedPoolsCard() {
+  const [pools, setPools] = useState<Array<{ kind: string; pool: string; count: number }>>([]);
+  const [loading, setLoading] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
+  const [selectedKind, setSelectedKind] = useState<string>('voice');
+  const [selectedPool, setSelectedPool] = useState<string | null>(null);
+  const [previewAssets, setPreviewAssets] = useState<Array<{ id: number; filePath: string; meta: Record<string, unknown> | null }>>([]);
+
+  const loadPools = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api.get<typeof pools>('/assets/pools');
+      setPools(r.data);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPools();
+  }, [loadPools]);
+
+  const loadPreview = useCallback(
+    async (kind: string, pool: string) => {
+      try {
+        const r = await api.get<typeof previewAssets>('/assets', {
+          params: { kind, pool },
+        });
+        setPreviewAssets(r.data);
+      } catch {
+        setPreviewAssets([]);
+      }
+    },
+    [],
+  );
+
+  const handleReindex = async () => {
+    setReindexing(true);
+    try {
+      const r = await api.post<{ scanned: number; added: number; skipped: number }>(
+        '/assets/reindex',
+      );
+      antdMessage.success(
+        `扫描 ${r.data.scanned} · 新增 ${r.data.added} · 跳过 ${r.data.skipped}`,
+      );
+      await loadPools();
+    } catch (err) {
+      antdMessage.error(extractErrorMessage(err, '重扫失败'));
+    } finally {
+      setReindexing(false);
+    }
+  };
+
+  const handleSelectPool = (kind: string, pool: string) => {
+    setSelectedKind(kind);
+    setSelectedPool(pool);
+    void loadPreview(kind, pool);
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      await api.delete(`/assets/${id}`);
+      antdMessage.success('已删除');
+      if (selectedPool) void loadPreview(selectedKind, selectedPool);
+      void loadPools();
+    } catch (err) {
+      antdMessage.error(extractErrorMessage(err));
+    }
+  };
+
+  const poolsByKind = pools.reduce<Record<string, Array<{ pool: string; count: number }>>>(
+    (acc, p) => {
+      if (!acc[p.kind]) acc[p.kind] = [];
+      acc[p.kind].push({ pool: p.pool, count: p.count });
+      return acc;
+    },
+    {},
+  );
+
+  const kindLabel: Record<string, string> = {
+    voice: '🎙️ 语音',
+    image: '🖼️ 图片',
+    video: '🎥 视频',
+    file: '📎 文件',
+    sticker: '🎭 贴纸',
+  };
+
+  const totalByKind: Record<string, number> = {};
+  for (const p of pools) totalByKind[p.kind] = (totalByKind[p.kind] ?? 0) + p.count;
+
+  return (
+    <Card
+      title="共享素材池 (图/视频/语音)"
+      extra={
+        <Space>
+          <Button size="small" onClick={() => void loadPools()} loading={loading}>
+            刷新
+          </Button>
+          <Button size="small" type="primary" onClick={handleReindex} loading={reindexing}>
+            🔁 重扫磁盘
+          </Button>
+        </Space>
+      }
+    >
+      <Paragraph type="secondary" style={{ fontSize: 12 }}>
+        这些池供 <code>send_voice / send_image / send_video</code> 任务随机挑.
+        文件放在 <code>data/assets/&lt;kind&gt;/&lt;pool&gt;/</code> · 点 "重扫磁盘" 新文件入库.
+      </Paragraph>
+
+      <Space size="large" style={{ marginBottom: 12 }}>
+        <Text>
+          🎙️ 语音: <strong>{totalByKind.voice ?? 0}</strong>
+        </Text>
+        <Text>
+          🖼️ 图片: <strong>{totalByKind.image ?? 0}</strong>
+        </Text>
+        <Text>
+          🎥 视频: <strong>{totalByKind.video ?? 0}</strong>
+        </Text>
+      </Space>
+
+      {Object.keys(poolsByKind).length === 0 ? (
+        <Empty description="素材池为空 · 跑 scripts/seed-assets/gen-*.js 或上传文件后点重扫" />
+      ) : (
+        Object.entries(poolsByKind).map(([kind, list]) => (
+          <div key={kind} style={{ marginBottom: 12 }}>
+            <Text strong>{kindLabel[kind] ?? kind}</Text>
+            <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {list.map((p) => (
+                <Tag
+                  key={p.pool}
+                  color={selectedKind === kind && selectedPool === p.pool ? 'green' : 'default'}
+                  style={{ cursor: 'pointer', padding: '4px 10px' }}
+                  onClick={() => handleSelectPool(kind, p.pool)}
+                >
+                  📁 {p.pool} · {p.count}
+                </Tag>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+
+      {selectedPool && (
+        <Card
+          size="small"
+          type="inner"
+          title={`${kindLabel[selectedKind]} / ${selectedPool} · ${previewAssets.length} 条`}
+          style={{ marginTop: 12 }}
+        >
+          {previewAssets.length === 0 ? (
+            <Empty description="空池" />
+          ) : (
+            <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              <Table
+                rowKey="id"
+                size="small"
+                columns={[
+                  { title: 'ID', dataIndex: 'id', width: 60 },
+                  {
+                    title: '预览',
+                    width: 160,
+                    render: (_, r) => {
+                      const url = `/api/v1/assets/file/${r.id}`;
+                      if (selectedKind === 'image') {
+                        return <img src={url} alt="" style={{ maxHeight: 60, maxWidth: 120 }} />;
+                      }
+                      if (selectedKind === 'voice') {
+                        return <audio controls src={url} style={{ height: 30, maxWidth: 200 }} />;
+                      }
+                      if (selectedKind === 'video') {
+                        return <video controls src={url} style={{ maxHeight: 80 }} />;
+                      }
+                      return '—';
+                    },
+                  },
+                  { title: '文件', dataIndex: 'filePath', ellipsis: true },
+                  {
+                    title: '操作',
+                    width: 80,
+                    render: (_, r) => (
+                      <Popconfirm title="确认删除?" onConfirm={() => void handleDelete(r.id)}>
+                        <Button type="link" size="small" danger>
+                          删
+                        </Button>
+                      </Popconfirm>
+                    ),
+                  },
+                ]}
+                dataSource={previewAssets}
+                pagination={{ pageSize: 10 }}
+              />
+            </div>
+          )}
+        </Card>
+      )}
+    </Card>
   );
 }

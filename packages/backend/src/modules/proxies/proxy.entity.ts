@@ -10,6 +10,12 @@ import {
 import { TenantEntity } from '../tenants/tenant.entity';
 
 export enum ProxyType {
+  // 协议 (2026-04-22 扩 · 和 buildProxyAgent / 前端 bind modal 对齐)
+  Http = 'http',
+  Https = 'https',
+  Socks4 = 'socks4',
+  Socks5 = 'socks5',
+  // IP 源分类 (原值 · 保留向后兼容)
   ResidentialStatic = 'residential_static',
   ResidentialRotating = 'residential_rotating',
   Datacenter = 'datacenter',

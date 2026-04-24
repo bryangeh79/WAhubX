@@ -43,6 +43,8 @@ export interface ScriptRunParams {
   sessionIndex?: number;      // 默认跑第一个 session
   // dev/smoke 加速: 跳过 typing 和 send 延迟 (生产永不开)
   fastMode?: boolean;
+  // 2026-04-21 · 用户改决: warmup_stage 不足从硬阻拦变软提示 · admin 前端可强制覆盖
+  forceOverride?: boolean;
 }
 
 export interface ScriptRunResult {
@@ -85,12 +87,18 @@ export class ScriptRunnerService {
     if (!accA || !accB) throw new NotFoundException('A/B 账号不存在');
 
     // M5 gate: 双方 warmup_stage 必须 >= script.min_warmup_stage
-    // 用户 2026-04-20 定: "gate 真开启, 不允许再临时关闭"
+    // 2026-04-21 · 用户改决: 软提示 · admin 可前端强制覆盖 (forceOverride) · 日志必记
     const minStage = script.minWarmupStage ?? 0;
     if (accA.warmupStage < minStage || accB.warmupStage < minStage) {
-      throw new Error(
-        `warmup_stage 不足: script=${script.scriptId} 要求 ≥ ${minStage}, A=${accA.warmupStage} B=${accB.warmupStage}`,
-      );
+      if (params.forceOverride) {
+        this.logger.warn(
+          `FORCE OVERRIDE · warmup_stage 不足但被 admin 强制执行: script=${script.scriptId} 要求 ≥ ${minStage}, A=${accA.warmupStage} B=${accB.warmupStage}`,
+        );
+      } else {
+        throw new Error(
+          `warmup_stage 不足: script=${script.scriptId} 要求 ≥ ${minStage}, A=${accA.warmupStage} B=${accB.warmupStage}. 前端可选"强制执行"忽略此检查.`,
+        );
+      }
     }
 
     const result: ScriptRunResult = { turnsExecuted: 0, turnsSkipped: 0, errors: [] };
@@ -179,9 +187,18 @@ export class ScriptRunnerService {
     }
 
     // send_delay (发完后等到下一 turn)
+    // 2026-04-21 · 用户改决: 太久 · 改默认 [30, 90] 秒 · 可通过 env 调
     if (!ctx.fastMode && turn.send_delay_sec) {
-      const [lo, hi] = turn.send_delay_sec;
-      await this.sleep(this.randomInt(lo, hi) * 1000);
+      const envMin = parseInt(process.env.SCRIPT_REPLY_DELAY_MIN_SEC ?? '30', 10);
+      const envMax = parseInt(process.env.SCRIPT_REPLY_DELAY_MAX_SEC ?? '90', 10);
+      const [scriptLo, scriptHi] = turn.send_delay_sec;
+      // 用 env 的 [min, max] 替换剧本原值 (剧本原来 [60, 240] 太久 · 按用户要求压到 [30, 90])
+      // 保留一点脚本意图: 如果脚本原 min 比 env min 低, 用脚本的 (可能某些对话需要快应)
+      const lo = Math.min(scriptLo, envMin);
+      const hi = Math.min(scriptHi, envMax);
+      const finalLo = Math.min(lo, hi);
+      const finalHi = Math.max(lo, hi);
+      await this.sleep(this.randomInt(finalLo, finalHi) * 1000);
     }
 
     return true;

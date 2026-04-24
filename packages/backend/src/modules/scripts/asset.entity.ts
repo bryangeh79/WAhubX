@@ -12,6 +12,7 @@ import {
 export enum AssetKind {
   Voice = 'voice',
   Image = 'image',
+  Video = 'video', // 2026-04-22 · 短视频
   File = 'file',
   Sticker = 'sticker',
 }

@@ -23,6 +23,10 @@ import { BackupModule } from './modules/backup/backup.module';
 import { SigningModule } from './modules/signing/signing.module';
 import { UpdateModule } from './modules/update/update.module';
 import { AssetsModule } from './modules/assets/assets.module';
+import { ExecutionGroupsModule } from './modules/execution-groups/execution-groups.module';
+import { ChannelItemsModule } from './modules/channel-items/channel-items.module';
+import { CampaignsModule } from './modules/campaigns/campaigns.module';
+import { IntelligentReplyModule } from './modules/intelligent-reply/intelligent-reply.module';
 
 @Module({
   imports: [
@@ -49,7 +53,11 @@ import { AssetsModule } from './modules/assets/assets.module';
     SigningModule,
     UpdateModule,
     AssetsModule,
+    ExecutionGroupsModule,
+    ChannelItemsModule,
     TasksModule,
+    CampaignsModule,
+    IntelligentReplyModule,
     HealthModule,
   ],
   providers: [

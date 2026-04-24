@@ -76,6 +76,10 @@ export class WarmupPlanEntity {
   @Column({ type: 'jsonb', default: () => `'[]'::jsonb` })
   history!: WarmupHistoryEvent[];
 
+  // 2026-04-22 · 关联的 group 养号 plan · NULL = 独立跑 · 非 NULL = 被组计划托管
+  @Column({ type: 'int', name: 'group_plan_id', nullable: true })
+  groupPlanId!: number | null;
+
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;
 

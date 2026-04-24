@@ -32,6 +32,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  // 2026-04-21 · 新号注册走 pair code · 现有号扫 QR
+  initialMode?: 'qr' | 'pairing-code';
 }
 
 const TERMINAL_STATES: BindState[] = ['connected', 'failed', 'cancelled', 'timeout'];
@@ -39,8 +41,8 @@ const POLL_INTERVAL_MS = 1500;
 
 type Mode = 'qr' | 'pairing-code';
 
-export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess }: Props) {
-  const [mode, setMode] = useState<Mode>('qr');
+export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess, initialMode }: Props) {
+  const [mode, setMode] = useState<Mode>(initialMode ?? 'qr');
   const [phoneInput, setPhoneInput] = useState('');
   const [started, setStarted] = useState(false);
   const [status, setStatus] = useState<BindStatus | null>(null);

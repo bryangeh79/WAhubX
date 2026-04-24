@@ -84,3 +84,7 @@ junit.xml
 *.seed
 *.tgz
 .eslintcache
+
+# 2026-04-24 · backend runtime data · 绝不提交
+packages/backend/data/
+packages/backend/logs/

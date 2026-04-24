@@ -14,12 +14,38 @@ import { WarmupModule } from '../warmup/warmup.module';
 import { WarmupExecutor } from './executors/warmup.executor';
 import { StatusPostExecutor } from '../warmup/status-post.executor';
 import { StatusBrowseExecutor } from '../warmup/status-browse.executor';
+// 2026-04-21 · 新增 5 个 executor (task-scheduler-tab.md)
+import { JoinGroupExecutor } from './executors/join-group.executor';
+import { FollowChannelExecutor } from './executors/follow-channel.executor';
+import { StatusReactExecutor } from './executors/status-react.executor';
+import { AutoAcceptExecutor } from './executors/auto-accept.executor';
+import { StatusBrowseBulkExecutor } from './executors/status-browse-bulk.executor';
+import { AutoReplyExecutor } from './executors/auto-reply.executor';
+import { AddContactExecutor } from './executors/add-contact.executor';
+import { GroupChatExecutor } from './executors/group-chat.executor';
+import { ProfileRefreshExecutor } from './executors/profile-refresh.executor';
+import { SendVoiceExecutor } from './executors/send-voice.executor';
+import { SendImageExecutor } from './executors/send-image.executor';
+import { SendVideoExecutor } from './executors/send-video.executor';
+import { AssetsModule } from '../assets/assets.module';
+import { BaileysModule } from '../baileys/baileys.module';
+import { AccountSlotEntity } from '../slots/account-slot.entity';
+import { WarmupPlanEntity } from '../warmup/warmup-plan.entity';
+import { ChannelItemsModule } from '../channel-items/channel-items.module';
+import { ChannelItemEntity } from '../channel-items/channel-item.entity';
+// 2026-04-23 · 广告投放 send-ad executor 需要注册到 TASK_EXECUTORS · dispatcher 才能捡 task_type='send_ad'
+import { CampaignsModule } from '../campaigns/campaigns.module';
+import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TaskEntity, TaskRunEntity]),
-    ScriptsModule, // 提供 ScriptChatExecutor
-    WarmupModule, // 提供 WarmupExecutor / StatusPostExecutor / StatusBrowseExecutor
+    TypeOrmModule.forFeature([TaskEntity, TaskRunEntity, AccountSlotEntity, WarmupPlanEntity, ChannelItemEntity]),
+    ScriptsModule,
+    WarmupModule,
+    BaileysModule,
+    ChannelItemsModule,
+    AssetsModule,
+    CampaignsModule,
   ],
   controllers: [TasksController],
   providers: [
@@ -27,7 +53,18 @@ import { StatusBrowseExecutor } from '../warmup/status-browse.executor';
     DispatcherService,
     ExecutorRegistry,
     ChatExecutor,
-    // 加新 type 在此 providers 加 class (或从其他 module 导入), 然后下方 factory 加入 array
+    JoinGroupExecutor,
+    FollowChannelExecutor,
+    StatusReactExecutor,
+    AutoAcceptExecutor,
+    StatusBrowseBulkExecutor,
+    AutoReplyExecutor,
+    AddContactExecutor,
+    GroupChatExecutor,
+    ProfileRefreshExecutor,
+    SendVoiceExecutor,
+    SendImageExecutor,
+    SendVideoExecutor,
     {
       provide: TASK_EXECUTORS,
       useFactory: (
@@ -36,8 +73,59 @@ import { StatusBrowseExecutor } from '../warmup/status-browse.executor';
         scriptChat: ScriptChatExecutor,
         statusPost: StatusPostExecutor,
         statusBrowse: StatusBrowseExecutor,
-      ) => [chat, warmup, scriptChat, statusPost, statusBrowse],
-      inject: [ChatExecutor, WarmupExecutor, ScriptChatExecutor, StatusPostExecutor, StatusBrowseExecutor],
+        joinGroup: JoinGroupExecutor,
+        followChannel: FollowChannelExecutor,
+        statusReact: StatusReactExecutor,
+        autoAccept: AutoAcceptExecutor,
+        statusBrowseBulk: StatusBrowseBulkExecutor,
+        autoReply: AutoReplyExecutor,
+        addContact: AddContactExecutor,
+        groupChat: GroupChatExecutor,
+        profileRefresh: ProfileRefreshExecutor,
+        sendVoice: SendVoiceExecutor,
+        sendImage: SendImageExecutor,
+        sendVideo: SendVideoExecutor,
+        sendAd: SendAdExecutor,
+      ) => [
+        chat,
+        warmup,
+        scriptChat,
+        statusPost,
+        statusBrowse,
+        joinGroup,
+        followChannel,
+        statusReact,
+        autoAccept,
+        statusBrowseBulk,
+        autoReply,
+        addContact,
+        groupChat,
+        profileRefresh,
+        sendVoice,
+        sendImage,
+        sendVideo,
+        sendAd,
+      ],
+      inject: [
+        ChatExecutor,
+        WarmupExecutor,
+        ScriptChatExecutor,
+        StatusPostExecutor,
+        StatusBrowseExecutor,
+        JoinGroupExecutor,
+        FollowChannelExecutor,
+        StatusReactExecutor,
+        AutoAcceptExecutor,
+        StatusBrowseBulkExecutor,
+        AutoReplyExecutor,
+        AddContactExecutor,
+        GroupChatExecutor,
+        ProfileRefreshExecutor,
+        SendVoiceExecutor,
+        SendImageExecutor,
+        SendVideoExecutor,
+        SendAdExecutor,
+      ],
     },
   ],
   exports: [TasksService],

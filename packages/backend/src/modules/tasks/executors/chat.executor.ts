@@ -1,33 +1,80 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
+import { BaileysService } from '../../baileys/baileys.service';
+import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
-// M3 stub: payload 最小结构 { to: string, text: string }, 调用 sendText (M2 已实装).
-// M4 剧本引擎会发更丰富的 payload (剧本 id, 步骤 index 等).
+// 2026-04-21 · 重写: 从 M3 stub 升级到真接 Baileys sendText / sendMedia
+// payload schema:
+//   text 类:  { to, contentType: 'text', text }
+//   媒体类:   { to, contentType: 'image'|'video'|'voice'|'file', mediaBase64, mimeType?, filename?, caption? }
+//   AI 生成:  { to, contentType: 'text', aiGenerate: true, aiPrompt: '...' } — 目前先走传 text, AI 走 rewrite M6 (后续接)
+type ChatContentType = 'text' | 'image' | 'video' | 'voice' | 'file';
+
+interface ChatPayload {
+  to?: string;
+  contentType?: ChatContentType;
+  text?: string;
+  mediaBase64?: string;
+  mimeType?: string;
+  filename?: string;
+  caption?: string;
+}
+
 @Injectable()
 export class ChatExecutor implements TaskExecutor {
   readonly taskType = 'chat';
-  readonly allowedInNightWindow = false; // 夜间不放 (按技术交接文档 § 5.2)
+  readonly allowedInNightWindow = false;
 
   private readonly logger = new Logger(ChatExecutor.name);
 
+  constructor(
+    private readonly baileys: BaileysService,
+    @InjectRepository(AccountSlotEntity)
+    private readonly slotRepo: Repository<AccountSlotEntity>,
+  ) {}
+
   async execute(ctx: TaskExecutorContext): Promise<TaskExecutorResult> {
-    const payload = (ctx.task.payload ?? {}) as { to?: string; text?: string };
-    if (!payload.to || !payload.text) {
-      return {
-        success: false,
-        errorCode: 'INVALID_PAYLOAD',
-        errorMessage: 'chat task payload 需要 { to, text } 两个字段',
-      };
+    const payload = (ctx.task.payload ?? {}) as ChatPayload;
+    const contentType: ChatContentType = payload.contentType ?? 'text';
+
+    if (!payload.to) {
+      return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'to 必填' };
     }
-    this.logger.log(`chat task ${ctx.task.id} on account ${ctx.accountId} → ${payload.to} (stub M3)`);
-    ctx.log('chat-prepared', true, { to: payload.to, textLen: payload.text.length });
-    // M9 · 接管抢占 breakpoint · 若已被接管, throw TaskPausedError · dispatcher 标 paused 不扣分
+
+    // 解析 slot from account_id
+    const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
+    if (!slot) {
+      return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: `account ${ctx.accountId} 无绑定槽位` };
+    }
+
+    ctx.log('chat-prepared', true, { to: payload.to, contentType });
     ctx.throwIfPaused?.();
-    // M3 stub: 不真调 Baileys, 留给 M4 剧本引擎把 sendText 接进 ctx
-    // M4 会在 ctx 里注入 BaileysService.sendText 的绑定, 避免 executor 直接耦合业务服务
-    await new Promise((r) => setTimeout(r, 300));
-    ctx.throwIfPaused?.();
-    ctx.log('chat-sent', true, {});
-    return { success: true };
+
+    try {
+      if (contentType === 'text') {
+        if (!payload.text) {
+          return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'text 必填' };
+        }
+        await this.baileys.sendText(slot.id, payload.to, payload.text);
+      } else {
+        if (!payload.mediaBase64) {
+          return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'mediaBase64 必填' };
+        }
+        await this.baileys.sendMedia(slot.id, payload.to, contentType, payload.mediaBase64, {
+          mimeType: payload.mimeType,
+          filename: payload.filename,
+          caption: payload.caption,
+        });
+      }
+      ctx.throwIfPaused?.();
+      ctx.log('chat-sent', true, { contentType });
+      return { success: true };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`chat task ${ctx.task.id} failed: ${msg}`);
+      return { success: false, errorCode: 'SEND_FAILED', errorMessage: msg };
+    }
   }
 }

@@ -18,13 +18,93 @@ import { SendTextMessageDto } from './dto/send-message.dto';
 import { SendMediaMessageDto } from './dto/send-media.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
 import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
+import {
+  SimInfoService,
+  type UpdateSimInfoDto,
+  type BulkUpdateItemDto,
+} from './sim-info.service';
+import { HandoverService } from './handover.service';
+import { Res } from '@nestjs/common';
+import type { Response } from 'express';
 
 @Controller({ path: 'slots', version: '1' })
 export class SlotsController {
   constructor(
     private readonly slots: SlotsService,
     private readonly baileys: BaileysService,
+    private readonly simInfo: SimInfoService,
+    private readonly handover: HandoverService,
   ) {}
+
+  // ── 转出手机 · 导出备份 (2026-04-22) ──────────────────────
+  @Get(':id/export/contacts.csv')
+  async exportContacts(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Res() res: Response,
+  ) {
+    const csv = await this.handover.exportContactsCsv(id, cur.tenantId);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="slot-${id}-contacts.csv"`);
+    res.send(csv);
+  }
+
+  @Get(':id/export/channels-groups.txt')
+  async exportChannelsGroups(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Res() res: Response,
+  ) {
+    const txt = await this.handover.exportChannelsAndGroupsTxt(id, cur.tenantId);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="slot-${id}-channels-groups.txt"`);
+    res.send(txt);
+  }
+
+  @Get(':id/export/chats.txt')
+  async exportChats(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Res() res: Response,
+  ) {
+    const txt = await this.handover.exportChatsTxt(id, cur.tenantId);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="slot-${id}-chats.txt"`);
+    res.send(txt);
+  }
+
+  // ── SIM 信息 (2026-04-22) ─────────────────────────────────
+  // GET /slots/sim-info/telco-registry · 前端初始化下拉
+  // 注: 路径故意加 "sim-info/" 前缀避免和 @Get(':id') 冲突
+  @Get('sim-info/telco-registry')
+  getTelcoRegistry() {
+    return this.simInfo.getTelcoRegistry();
+  }
+
+  // PATCH /slots/:id/sim-info · 单槽位更新
+  @Patch(':id/sim-info')
+  @HttpCode(HttpStatus.OK)
+  async updateSimInfo(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: UpdateSimInfoDto,
+  ): Promise<SlotResponseDto> {
+    await this.simInfo.updateForSlot(id, cur.tenantId, body);
+    return this.slots.findOne(id, cur.tenantId);
+  }
+
+  // POST /slots/sim-info/bulk · 批量 · body 是 item 数组
+  @Post('sim-info/bulk')
+  @HttpCode(HttpStatus.OK)
+  async bulkSimInfo(
+    @CurrentUser() cur: RequestUser,
+    @Body() body: { items: BulkUpdateItemDto[] },
+  ) {
+    if (!Array.isArray(body?.items) || body.items.length === 0) {
+      throw new BadRequestException('items 必须是非空数组');
+    }
+    return this.simInfo.bulkUpdate(body.items, cur.tenantId);
+  }
 
   @Get()
   async list(@CurrentUser() cur: RequestUser): Promise<SlotResponseDto[]> {
@@ -168,5 +248,47 @@ export class SlotsController {
   ): Promise<{ online: boolean }> {
     await this.slots.findOne(id, cur.tenantId);
     return { online: this.baileys.isInPool(id) };
+  }
+
+  // 2026-04-22 · 被封槽位手动重连 · 租户 UI 点按钮调
+  // 1. 校验槽位属于租户 + 状态是 suspended
+  // 2. 重置 DB status 到 active
+  // 3. rehydrate pool (触发新一轮 Baileys 连接)
+  @Post(':id/reconnect')
+  @HttpCode(HttpStatus.OK)
+  async reconnect(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<{ ok: boolean; message: string }> {
+    const slot = await this.slots.findOne(id, cur.tenantId);
+    if (!slot.accountId) {
+      throw new BadRequestException('槽位未绑号 · 无法重连');
+    }
+    // DB 置 active · 让后续 rehydrate 能跑 (markSlotSuspended 的逆操作)
+    try {
+      await this.baileys.evictFromPool(id); // 先踢 · 清残留
+      await this.slots.findOne(id, cur.tenantId); // 确认还在
+      // 直接 update (通过内部方法暴露)
+      await this.baileys.reactivateAndRespawn(id);
+      return {
+        ok: true,
+        message: '已触发重连 · 请等 30 秒查看状态. 若仍封禁 · 点"诊断"看原因.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // 2026-04-22 · 连接诊断 · 给租户看为什么封 · 给建议
+  @Get(':id/connection-diagnosis')
+  async diagnosis(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    const slot = await this.slots.findOne(id, cur.tenantId);
+    return this.baileys.getConnectionDiagnosis(id, slot);
   }
 }

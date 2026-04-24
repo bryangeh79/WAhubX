@@ -75,6 +75,82 @@ export class AiTextService {
   }
 
   // ── helpers ─────────────────────────────────────────────
+  /**
+   * 2026-04-24 · 运行时对话生成 · 用租户配置的 active provider
+   * 智能客服自动回复跑这个 · 不走平台兜底 key (成本由租户承担)
+   */
+  async chatWithTenant(options: {
+    systemPrompt: string;
+    userPrompt: string;
+    maxTokens?: number;
+    timeoutMs?: number;
+  }): Promise<{
+    ok: boolean;
+    text: string;
+    model: string;
+    providerType: string;
+    errorCode?: string;
+    errorMessage?: string;
+  }> {
+    const provider = await this.pickActiveProvider();
+    if (!provider) {
+      return {
+        ok: false,
+        text: '',
+        model: '',
+        providerType: '',
+        errorCode: 'NO_PROVIDER',
+        errorMessage: '租户未配置 AI provider',
+      };
+    }
+    const adapter = this.adapterFor(provider.providerType);
+    let apiKey: string;
+    try {
+      apiKey = this.decryptKey(provider);
+    } catch (err) {
+      return {
+        ok: false,
+        text: '',
+        model: provider.model,
+        providerType: provider.providerType,
+        errorCode: 'DECRYPT_FAIL',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      };
+    }
+    const result = await adapter.rewrite(
+      { baseUrl: provider.baseUrl, apiKey, model: provider.model },
+      {
+        originalText: '',
+        systemPromptOverride: options.systemPrompt,
+        userPromptOverride: options.userPrompt,
+        maxTokens: options.maxTokens ?? 512,
+        timeoutMs: options.timeoutMs ?? 30_000,
+      },
+    );
+    if (result.ok) {
+      this.logger.log(
+        `chatWithTenant · ${provider.providerType} · ${provider.model} · ${result.latencyMs}ms`,
+      );
+      return {
+        ok: true,
+        text: result.text,
+        model: result.modelUsed,
+        providerType: provider.providerType,
+      };
+    }
+    this.logger.warn(
+      `chatWithTenant fail · ${provider.providerType} · ${result.error} · ${result.message}`,
+    );
+    return {
+      ok: false,
+      text: '',
+      model: provider.model,
+      providerType: provider.providerType,
+      errorCode: result.error,
+      errorMessage: result.message,
+    };
+  }
+
   private async pickActiveProvider(): Promise<AiProviderEntity | null> {
     // 取第一条 enabled 的 provider. 多条候选时 id 最小的胜出.
     // 未来扩: 按 persona.language / cost 策略选 (V1.1+).

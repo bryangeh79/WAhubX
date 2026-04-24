@@ -42,6 +42,7 @@ import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import { WaContactEntity } from './wa-contact.entity';
 import { ChatMessageEntity, MessageDirection, MessageType } from './chat-message.entity';
+import { StatusCacheService } from './status-cache.service';
 import { getMediaDir, getWaSessionDir } from '../../common/storage';
 import { ensureFingerprint, type SlotFingerprint } from '../../common/fingerprint';
 import { buildProxyAgent, type ProxyDescriptor } from '../../common/proxy-config';
@@ -93,10 +94,13 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private waVersion: number[] | null = null;
   // 自动重连状态: key=slotId, value={attempts, nextRetryTimer}
   // 策略: 指数退避 5s → 10s → 20s → 40s → 80s (cap), 累计 5 次还连不上则 suspend
-  private readonly reconnectState = new Map<number, { attempts: number; timer: NodeJS.Timeout | null }>();
+  private readonly reconnectState = new Map<
+    number,
+    { attempts: number; timer: NodeJS.Timeout | null; stableTimer?: NodeJS.Timeout | null; last440?: boolean }
+  >();
   private static readonly MAX_RECONNECT_ATTEMPTS = 5;
-  private static readonly RECONNECT_BASE_MS = 5000;
-  private static readonly RECONNECT_CAP_MS = 80_000;
+  // 2026-04-22 · 线性间隔 · 30/60/90/120/150s (用户要求 · 比指数更温和 · 避免瞬发多次触发 WA 风控)
+  private static readonly RECONNECT_STEP_MS = 30_000;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -104,10 +108,19 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(ChatMessageEntity) private readonly messageRepo: Repository<ChatMessageEntity>,
     // M9 · Optional for back-compat · app 真正启动总会注入 (EventEmitterModule.forRoot 全局)
     @Optional() private readonly eventBus?: EventEmitter2,
+    // 2026-04-22 · Status feed 缓存 · 给 status_browse/bulk/react executor 共用
+    @Optional() private readonly statusCache?: StatusCacheService,
   ) {}
 
   // ── 生命周期 ────────────────────────────────────────────
   async onModuleInit(): Promise<void> {
+    // 2026-04-24 · dev freeze gate · 设 WA_FREEZE_ALL=true 跳过 rehydrate + 定时恢复
+    // 用于开发期不惊动现有在线号 · 完成后 unset env 并重启
+    if (process.env.WA_FREEZE_ALL === 'true' || process.env.WA_FREEZE_ALL === '1') {
+      this.logger.warn('⚠ WA_FREEZE_ALL=true · 跳过所有 slot rehydrate 和 periodic recovery');
+      return;
+    }
+
     try {
       const { version, isLatest } = await fetchLatestBaileysVersion();
       this.waVersion = version;
@@ -123,11 +136,19 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       .andWhere('s.account_id IS NOT NULL')
       .getMany();
 
-    for (const slot of slots) {
+    // 2026-04-22 · 错开启动 · 避免同 IP 同秒批量新连接触发 WA 风控
+    // 观察到 · backend 重启时 4 号同时 spawn · WA 返 408 init-queries + 440 replaced 循环
+    const STAGGER_MS = 10_000;
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
       const sessionDir = getWaSessionDir(slot.slotIndex);
       if (!fs.existsSync(sessionDir) || fs.readdirSync(sessionDir).length === 0) {
         this.logger.warn(`slot ${slot.id}: 状态=${slot.status} 但 session 文件缺失, 跳过 rehydrate`);
         continue;
+      }
+      if (i > 0) {
+        this.logger.log(`rehydrate · 等 ${STAGGER_MS / 1000}s 再起下一 slot (防 WA 风控)`);
+        await new Promise((r) => setTimeout(r, STAGGER_MS));
       }
       try {
         await this.spawnPooledSocket(slot.id, slot.slotIndex);
@@ -136,9 +157,67 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`rehydrate slot ${slot.id} failed: ${err}`);
       }
     }
+
+    // 2026-04-22 · Gap 3 · 定时静默重试 suspended 槽位 · 每 20 min 扫一次
+    // 给"手机暂时开 WA"场景自动恢复 · 不用租户手点
+    this.recoveryInterval = setInterval(() => {
+      void this.periodicRecoveryTick().catch((err) =>
+        this.logger.warn(`periodicRecoveryTick error: ${err}`),
+      );
+    }, 20 * 60 * 1000);
+    this.logger.log('periodic suspended-slot recovery enabled · every 20 min');
+  }
+
+  private recoveryInterval: NodeJS.Timeout | null = null;
+
+  private async periodicRecoveryTick(): Promise<void> {
+    const suspended = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .createQueryBuilder('s')
+      .where('s.status = :st', { st: AccountSlotStatus.Suspended })
+      .andWhere('s.account_id IS NOT NULL')
+      .getMany();
+    if (suspended.length === 0) return;
+    this.logger.log(`periodic recovery · 尝试 ${suspended.length} 个 suspended 槽位`);
+    for (const slot of suspended) {
+      // 距离最近断连 < 15 min 的不试 · 让风控冷却
+      const close = this.lastCloseInfo.get(slot.id);
+      if (close && Date.now() - new Date(close.at).getTime() < 15 * 60 * 1000) {
+        continue;
+      }
+      try {
+        await this.reactivateAndRespawn(slot.id);
+      } catch (err) {
+        this.logger.warn(`periodic recovery · slot ${slot.id} 失败: ${err}`);
+      }
+      // 分散 · 每个 slot 间隔 10s 避免同时冲风控
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+  }
+
+  // 2026-04-21 · executor 需要直接调 Baileys 高级 API (加群/关频道/读消息)
+  // 暴露 getSocket 让 JoinGroupExecutor / FollowChannelExecutor / StatusReactExecutor 等使用
+  getSocket(slotId: number): WASocket | null {
+    return this.pool.get(slotId) ?? null;
+  }
+
+  /**
+   * 2026-04-22 · 注册流程完成后 · 把新 session 拉起来进 pool
+   * 前提: session dir 已被 RegistrationService 写入 creds.json
+   */
+  async rehydrateSlot(slotId: number): Promise<void> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot) throw new Error(`slot ${slotId} not found`);
+    await this.spawnPooledSocket(slot.id, slot.slotIndex);
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.recoveryInterval) {
+      clearInterval(this.recoveryInterval);
+      this.recoveryInterval = null;
+    }
     for (const ctx of this.bindContexts.values()) {
       await this.teardownBind(ctx, 'cancelled', 'shutdown');
     }
@@ -191,6 +270,18 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }
     if (existing) await this.teardownBind(existing, 'cancelled', 'restarted');
 
+    // 2026-04-22 · 空槽重新绑定前 · 强制清残留 session 文件
+    // 避免上次失败留下的 stale creds 被加载 · WA 返 badSession
+    const sessionDir = getWaSessionDir(slot.slotIndex);
+    if (fs.existsSync(sessionDir)) {
+      try {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+        this.logger.log(`slot ${slotId} · 清理残留 session (${sessionDir}) · 防 badSession`);
+      } catch (err) {
+        this.logger.warn(`slot ${slotId} · 清理 session 失败: ${err}`);
+      }
+    }
+
     // pairingPhoneNumber 给定 → 走 pairing code 模式; 否则 QR
     const mode: 'qr' | 'pairing-code' = pairingPhoneNumber ? 'pairing-code' : 'qr';
 
@@ -238,18 +329,19 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   async sendMedia(
     slotId: number,
     to: string,
-    type: 'image' | 'voice' | 'file',
+    type: 'image' | 'video' | 'voice' | 'file',
     contentBase64: string,
     options: { mimeType?: string; filename?: string; caption?: string } = {},
   ): Promise<{ waMessageId: string | null; mediaPath: string | null }> {
     const sock = this.pool.get(slotId);
     if (!sock) {
-      throw new BadRequestException(`槽位 ${slotId} 未在线 (pool 无 socket)`);
+      const friendly = await this.friendlySlotName(slotId);
+      throw new BadRequestException(`${friendly} 未在线 (pool 无 socket)`);
     }
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
 
     const buffer = Buffer.from(contentBase64, 'base64');
     if (buffer.length === 0) throw new BadRequestException('contentBase64 解码后为空');
@@ -264,6 +356,14 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       case 'image':
         sendPayload = { image: buffer, caption: options.caption };
         msgTypeEnum = MessageType.Image;
+        break;
+      case 'video':
+        sendPayload = {
+          video: buffer,
+          caption: options.caption,
+          mimetype: options.mimeType ?? 'video/mp4',
+        };
+        msgTypeEnum = MessageType.Video;
         break;
       case 'voice':
         sendPayload = {
@@ -283,6 +383,11 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         msgTypeEnum = MessageType.File;
         break;
     }
+
+    // 2026-04-24 · 媒体也模拟在线状态 · 语音用 recording, 其他用 composing (按 caption 长度计时)
+    const presenceType: 'recording' | 'composing' = type === 'voice' ? 'recording' : 'composing';
+    const fakeTextForTiming = options.caption ?? (type === 'voice' ? ' '.repeat(30) : ' '.repeat(12));
+    await this.simulateTyping(sock, jid, fakeTextForTiming, presenceType);
 
     const sendResult = await sock.sendMessage(jid, sendPayload);
     const waMessageId = sendResult?.key?.id ?? null;
@@ -313,13 +418,45 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return { waMessageId, mediaPath };
   }
 
-  private guessExtFromType(type: 'image' | 'voice' | 'file', mime?: string, filename?: string): string {
+  /**
+   * 真人打字/录音模拟 · 发消息前 subscribe + composing/recording + sleep + paused
+   * 硬编码规则 (不走 app_setting):
+   *   - 每字 80-150ms 随机
+   *   - 下限 1500ms · 上限 8000ms
+   *   - presence 失败 (对方屏蔽 / socket 抖动) → 忽略, 不阻断 sendMessage
+   */
+  private async simulateTyping(
+    sock: WASocket,
+    jid: string,
+    text: string,
+    presenceType: 'composing' | 'recording' = 'composing',
+  ): Promise<void> {
+    const len = (text ?? '').length;
+    // 每字 80-150ms 随机
+    const perChar = 80 + Math.random() * 70;
+    const rawMs = Math.round(len * perChar);
+    const typingMs = Math.min(8000, Math.max(1500, rawMs));
+    try {
+      await sock.presenceSubscribe(jid);
+      await sock.sendPresenceUpdate(presenceType, jid);
+      await new Promise((r) => setTimeout(r, typingMs));
+      await sock.sendPresenceUpdate('paused', jid);
+    } catch (err) {
+      // presence 任何失败不影响真正发送
+      this.logger.debug(
+        `simulateTyping(${presenceType}) ignored error on ${jid}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private guessExtFromType(type: 'image' | 'video' | 'voice' | 'file', mime?: string, filename?: string): string {
     if (filename && filename.includes('.')) return `.${filename.split('.').pop()}`;
     if (mime) {
       const sub = mime.split('/')[1]?.split(';')[0];
       if (sub) return `.${sub}`;
     }
     if (type === 'image') return '.jpg';
+    if (type === 'video') return '.mp4';
     if (type === 'voice') return '.ogg';
     return '.bin';
   }
@@ -328,14 +465,18 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const sock = this.pool.get(slotId);
     if (!sock) {
       throw new BadRequestException(
-        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+        `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
       );
     }
     const jid = this.normalizeJid(to);
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
+
+    // 2026-04-24 · 真人打字模拟 · 默认开 · 对方看到 "正在输入..." 几秒再收到消息
+    // 硬编码: 每字 80-150ms 随机 · 下限 1.5s · 上限 8s · 失败不阻断发送
+    await this.simulateTyping(sock, jid, text, 'composing');
 
     const sendResult = await sock.sendMessage(jid, { text });
     const waMessageId = sendResult?.key?.id ?? null;
@@ -362,13 +503,13 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const sock = this.pool.get(slotId);
     if (!sock) {
       throw new BadRequestException(
-        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+        `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
       );
     }
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
 
     // 'status@broadcast' 是 WA 协议约定 jid · Baileys 透传
     const sendResult = await sock.sendMessage('status@broadcast', { text });
@@ -395,20 +536,20 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
    */
   async sendStatusMedia(
     slotId: number,
-    type: 'image' | 'voice' | 'file',
+    type: 'image' | 'video' | 'voice' | 'file',
     contentBase64: string,
     options: { mimeType?: string; filename?: string; caption?: string } = {},
   ): Promise<{ waMessageId: string | null }> {
     const sock = this.pool.get(slotId);
     if (!sock) {
       throw new BadRequestException(
-        `槽位 ${slotId} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+        `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
       );
     }
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
 
     const buffer = Buffer.from(contentBase64, 'base64');
     if (buffer.length === 0) throw new BadRequestException('contentBase64 解码后为空');
@@ -422,6 +563,14 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       case 'image':
         sendPayload = { image: buffer, caption: options.caption };
         msgTypeEnum = MessageType.Image;
+        break;
+      case 'video':
+        sendPayload = {
+          video: buffer,
+          caption: options.caption,
+          mimetype: options.mimeType ?? 'video/mp4',
+        };
+        msgTypeEnum = MessageType.Video;
         break;
       case 'voice':
         sendPayload = {
@@ -566,7 +715,22 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     });
     ctx.sock = sock;
 
-    sock.ev.on('creds.update', saveCreds);
+    // 2026-04-21: 包一层 try/catch · session 目录被外部删 (rm -rf data/slots) 会 ENOENT
+    // 不让这种磁盘异常拖死整个 process (配合 main.ts 的 unhandledRejection 全局 handler 双保险)
+    sock.ev.on('creds.update', async () => {
+      try {
+        await saveCreds();
+      } catch (err: unknown) {
+        const e = err as { code?: string; message?: string };
+        if (e.code === 'ENOENT') {
+          this.logger.warn(
+            `slot saveCreds ENOENT · session dir missing · slot needs rebind. err=${e.message}`,
+          );
+        } else {
+          this.logger.error(`saveCreds failed: ${e.message ?? String(err)}`);
+        }
+      }
+    });
 
     // Pairing code 要等 socket 完成 noise handshake (WA 开始请求 auth → qr 事件触发) 才能调,
     // 早调会 "Connection Closed". 用 flag 保证只调一次.
@@ -673,7 +837,19 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
         const existing = await manager.findOne(WaAccountEntity, { where: { phoneNumber: phone } });
         if (existing) {
-          throw new Error(`手机号 ${phone} 已在其他槽位注册 (account_id=${existing.id})`);
+          // 2026-04-21 · 改友好 · 以前只暴露 account_id · 用户看不懂是谁占的
+          // 查占用该号的槽位 + 租户名, 告诉用户具体位置
+          const occupyingSlot = await manager
+            .createQueryBuilder(AccountSlotEntity, 'slot')
+            .leftJoinAndSelect('slot.tenant', 'tenant')
+            .where('slot.accountId = :accId', { accId: existing.id })
+            .getOne();
+          const tenantName = occupyingSlot?.tenant?.name ?? '(无租户绑定)';
+          const slotIndex = occupyingSlot?.slotIndex ?? '—';
+          throw new Error(
+            `手机号 ${phone} 已被租户「${tenantName}」的 #${slotIndex} 槽位占用。` +
+              `请先在该租户处原厂重置该槽位, 或换一个手机号。`,
+          );
         }
 
         const waAccount = manager.create(WaAccountEntity, {
@@ -713,6 +889,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
       this.attachPoolListeners(ctx.slotId, ctx.slotIndex, accountId, sock, saveCreds);
       this.pool.set(ctx.slotId, sock);
+      // 2026-04-22 · 初始化 lastOpenAt · 否则 backend 重启后 10 min smooth window 全部误判
+      this.lastOpenAt.set(ctx.slotId, Date.now());
 
       if (ctx.timeoutHandle) {
         clearTimeout(ctx.timeoutHandle);
@@ -734,6 +912,17 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
    * creds 已失效时 pool listener 会收到 close(loggedOut), 自动移出 pool.
    */
   private async spawnPooledSocket(slotId: number, slotIndex: number): Promise<void> {
+    // 2026-04-22 · 真正的根因 · 先踢旧 sock · 否则老新两个 sock 同时活 · 互相 440
+    const oldSock = this.pool.get(slotId);
+    if (oldSock) {
+      this.logger.warn(`slot ${slotId} · spawnPool 前 pool 里还有老 sock · 先 end 掉`);
+      try {
+        oldSock.end(undefined);
+      } catch {
+        /* ignore */
+      }
+      this.pool.delete(slotId);
+    }
     const sessionDir = getWaSessionDir(slotIndex);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const version = await this.ensureWaVersion();
@@ -768,6 +957,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
     this.attachPoolListeners(slotId, slotIndex, slot.accountId, sock, saveCreds);
     this.pool.set(slotId, sock);
+    // 2026-04-22 · 初始化 lastOpenAt (spawn 成功 · UI 10 min 宽容期)
+    this.lastOpenAt.set(slotId, Date.now());
   }
 
   private attachPoolListeners(
@@ -777,33 +968,85 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     sock: WASocket,
     saveCreds: () => Promise<void>,
   ): void {
-    sock.ev.on('creds.update', saveCreds);
+    // 2026-04-21: 包一层 try/catch · session 目录被外部删 (rm -rf data/slots) 会 ENOENT
+    // 不让这种磁盘异常拖死整个 process (配合 main.ts 的 unhandledRejection 全局 handler 双保险)
+    sock.ev.on('creds.update', async () => {
+      try {
+        await saveCreds();
+      } catch (err: unknown) {
+        const e = err as { code?: string; message?: string };
+        if (e.code === 'ENOENT') {
+          this.logger.warn(
+            `slot saveCreds ENOENT · session dir missing · slot needs rebind. err=${e.message}`,
+          );
+        } else {
+          this.logger.error(`saveCreds failed: ${e.message ?? String(err)}`);
+        }
+      }
+    });
 
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect } = update;
       if (connection === 'open') {
-        // 连上就重置重连计数
+        // 2026-04-22 · 记 open 时间 · UI 平滑
+        this.lastOpenAt.set(slotId, Date.now());
+        // 2026-04-22 · 10 秒稳定才算真 open · 避免 WA 瞬开秒断骗我们清零
+        // 否则 attempts 永远回 0 · MAX 永远不触发 · 死循环
         const rs = this.reconnectState.get(slotId);
         if (rs) {
-          rs.attempts = 0;
-          if (rs.timer) {
-            clearTimeout(rs.timer);
-            rs.timer = null;
-          }
+          if (rs.stableTimer) clearTimeout(rs.stableTimer);
+          rs.stableTimer = setTimeout(() => {
+            const cur = this.reconnectState.get(slotId);
+            if (cur) {
+              cur.attempts = 0;
+              if (cur.timer) {
+                clearTimeout(cur.timer);
+                cur.timer = null;
+              }
+              cur.stableTimer = null;
+            }
+          }, 10_000);
         }
+        // 连上就把 DB suspended → active (若需要)
+        void (async () => {
+          try {
+            const slot = await this.dataSource
+              .getRepository(AccountSlotEntity)
+              .findOne({ where: { id: slotId } });
+            if (slot && slot.status === AccountSlotStatus.Suspended) {
+              this.logger.log(`slot ${slotId} · 连接恢复 · suspended → active`);
+              await this.dataSource
+                .getRepository(AccountSlotEntity)
+                .update(slotId, { status: AccountSlotStatus.Active });
+            }
+          } catch {
+            /* ignore */
+          }
+        })();
       }
       if (connection === 'close') {
         const code =
           lastDisconnect?.error instanceof Boom
             ? (lastDisconnect.error as Boom).output.statusCode
             : 0;
+        this.recordCloseCode(slotId, code);
+        // 取消稳定计时器 (还没到 30s 就断了 · 计数不重置)
+        const rs = this.reconnectState.get(slotId);
+        if (rs?.stableTimer) {
+          clearTimeout(rs.stableTimer);
+          rs.stableTimer = null;
+        }
         if (code === DisconnectReason.loggedOut) {
           this.logger.warn(`slot ${slotId} logged out remotely — removing from pool + marking suspended`);
           this.pool.delete(slotId);
           this.clearReconnect(slotId);
           void this.markSlotSuspended(slotId);
+        } else if (code === DisconnectReason.connectionReplaced) {
+          // 2026-04-22 · 440 · 偶发 open→close 瞬断 · 走正常 MAX=5 · 老代码证明可自愈
+          if (rs) rs.last440 = true;
+          this.pool.delete(slotId);
+          this.scheduleReconnect(slotId, accountId, code);
         } else {
-          // M2 W3: 短暂断线 → 指数退避重连; 超出 MAX 才降级 suspended
           this.pool.delete(slotId);
           this.scheduleReconnect(slotId, accountId, code);
         }
@@ -817,33 +1060,50 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         });
       }
     });
+
+    // 2026-04-22 · Status feed 缓存监听 · 给 status executor 用
+    if (this.statusCache) {
+      this.statusCache.registerStatusListener(
+        accountId,
+        sock.ev as unknown as { on: (evt: string, fn: (msg: unknown) => void) => void },
+      );
+    }
   }
 
   private async markSlotSuspended(slotId: number): Promise<void> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
     await this.dataSource
       .getRepository(AccountSlotEntity)
       .update(slotId, { status: AccountSlotStatus.Suspended });
+    // 2026-04-22 · Gap 2 · 广播事件 · Dispatcher 监听并中断跑中的任务
+    if (this.eventBus && slot?.accountId) {
+      try {
+        this.eventBus.emit('slot.suspended', { slotId, accountId: slot.accountId });
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   // ── 自动重连 (W3.1) ────────────────────────────────────
-  private scheduleReconnect(slotId: number, accountId: number, closeCode: number): void {
+  private scheduleReconnect(slotId: number, accountId: number, closeCode: number, maxOverride?: number): void {
     const rs = this.reconnectState.get(slotId) ?? { attempts: 0, timer: null };
     if (rs.timer) clearTimeout(rs.timer);
 
-    if (rs.attempts >= BaileysService.MAX_RECONNECT_ATTEMPTS) {
+    const maxAttempts = maxOverride ?? BaileysService.MAX_RECONNECT_ATTEMPTS;
+    if (rs.attempts >= maxAttempts) {
       this.logger.error(
-        `slot ${slotId} reached MAX reconnect attempts (${rs.attempts}), suspending. Last close code=${closeCode}`,
+        `slot ${slotId} reached max reconnect (${rs.attempts}/${maxAttempts}), suspending. Last code=${closeCode}${closeCode === 440 ? ' · 号在另一设备登录 · 请检查手机 WA' : ''}`,
       );
       this.reconnectState.delete(slotId);
       void this.markSlotSuspended(slotId);
       return;
     }
 
-    // 5s * 2^attempts, cap 80s: 5, 10, 20, 40, 80
-    const delayMs = Math.min(
-      BaileysService.RECONNECT_BASE_MS * Math.pow(2, rs.attempts),
-      BaileysService.RECONNECT_CAP_MS,
-    );
+    // 2026-04-22 · 线性 30s 递增: 30/60/90/120/150s · 总约 7.5 min 才放弃
+    const delayMs = BaileysService.RECONNECT_STEP_MS * (rs.attempts + 1);
     rs.attempts += 1;
     this.logger.warn(
       `slot ${slotId} scheduling reconnect #${rs.attempts}/${BaileysService.MAX_RECONNECT_ATTEMPTS} in ${Math.round(delayMs / 1000)}s (close code=${closeCode})`,
@@ -1073,7 +1333,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     if (!m) return MessageType.Other;
     if (m.conversation || m.extendedTextMessage) return MessageType.Text;
     if (m.imageMessage) return MessageType.Image;
-    if (m.videoMessage) return MessageType.Image; // 先归到 image 大类; MessageType 枚举暂无 video
+    if (m.videoMessage) return MessageType.Video; // 2026-04-21 · enum 已加 Video
     if (m.audioMessage) return MessageType.Voice;
     if (m.documentMessage) return MessageType.File;
     return MessageType.Other;
@@ -1130,5 +1390,165 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
   isInPool(slotId: number): boolean {
     return this.pool.has(slotId);
+  }
+
+  /**
+   * 2026-04-22 · 把内部 slotId (DB id) 转成租户友好的"槽位 #N · 手机号" 字符串
+   * 用于错误信息 · 不要让租户看到 id=62 这种困惑数字
+   */
+  private async friendlySlotName(slotId: number): Promise<string> {
+    try {
+      const slot = await this.dataSource
+        .getRepository(AccountSlotEntity)
+        .findOne({ where: { id: slotId }, relations: ['account'] });
+      if (!slot) return `槽位 (未知)`;
+      const phone = slot.account?.phoneNumber ? ` · ${slot.account.phoneNumber}` : '';
+      return `槽位 #${slot.slotIndex}${phone}`;
+    } catch {
+      return `槽位 (未知)`;
+    }
+  }
+
+  /**
+   * 2026-04-22 · UI 显示用的"平滑 online" 状态
+   * - 当下在 pool · 立刻 true
+   * - 或最近 10 分钟内有过 open 事件 · 也 true
+   * 哲学: 440 断开/重连是 WA 协议正常行为 · 不该吓唬租户
+   * 只有连 10 分钟都没 open 过 · 才算真"掉了"
+   */
+  isOnlineSmooth(slotId: number): boolean {
+    if (this.pool.has(slotId)) return true;
+    const lastOpen = this.lastOpenAt.get(slotId);
+    if (!lastOpen) return false;
+    return Date.now() - lastOpen < 600_000; // 10 min
+  }
+
+  /** 2026-04-22 · executor 拿 status 缓存 */
+  getStatusCache(): StatusCacheService | null {
+    return this.statusCache ?? null;
+  }
+
+  // 2026-04-22 · 记录每个 slot 最近一次 close code (供诊断用)
+  private lastCloseInfo = new Map<number, { code: number; at: string; count440: number; countTimeout: number }>();
+  // 2026-04-22 · 最近一次 connection=open 的时间 · 用于 UI 平滑 online 状态 (避免重连循环中 UI 跳)
+  private lastOpenAt = new Map<number, number>();
+
+  recordCloseCode(slotId: number, code: number): void {
+    const prev = this.lastCloseInfo.get(slotId) ?? { code: 0, at: '', count440: 0, countTimeout: 0 };
+    this.lastCloseInfo.set(slotId, {
+      code,
+      at: new Date().toISOString(),
+      count440: prev.count440 + (code === 440 ? 1 : 0),
+      countTimeout: prev.countTimeout + (code === 408 ? 1 : 0),
+    });
+  }
+
+  /** 2026-04-22 · 手动重连 · 把 suspended 槽重新拉起来 */
+  async reactivateAndRespawn(slotId: number): Promise<void> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot) throw new Error(`slot ${slotId} 不存在`);
+    if (!slot.accountId) throw new Error(`slot ${slotId} 未绑号`);
+    // 先踢掉 pool 里挂掉的旧 sock · 避免新旧 sock 冲突 (互相踢)
+    await this.evictFromPool(slotId);
+    // 状态回 active
+    await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .update(slotId, { status: AccountSlotStatus.Active });
+    // 清 reconnect 状态 · 给新一轮机会
+    this.clearReconnect(slotId);
+    // 清 close 历史
+    this.lastCloseInfo.delete(slotId);
+    // spawn 新 socket
+    await this.spawnPooledSocket(slotId, slot.slotIndex);
+    this.logger.log(`slot ${slotId} · 手动重连触发 · evict 旧 sock → spawn 新 sock`);
+  }
+
+  /** 2026-04-22 · 给前端诊断信息 · 说明为什么被封 + 怎么办 */
+  getConnectionDiagnosis(
+    slotId: number,
+    slot: { status: string; phoneNumber: string | null; proxyId: number | null; simInfo?: { countryCode?: string | null } | null },
+  ): {
+    online: boolean;
+    status: string;
+    lastCloseCode: number | null;
+    lastCloseAt: string | null;
+    count440: number;
+    countTimeout: number;
+    issues: string[];
+    suggestions: string[];
+  } {
+    const online = this.isInPool(slotId);
+    const close = this.lastCloseInfo.get(slotId);
+    const issues: string[] = [];
+    const suggestions: string[] = [];
+
+    // 1. 440 · 号在其他设备登录
+    if (close && close.code === 440) {
+      issues.push('🔴 号在其他设备活跃登录 · WA 把我们的连接踢掉 (close code 440)');
+      suggestions.push('检查手机 WA 是否在用 · 或从手机 WA 主动"删除链接的设备"');
+      suggestions.push('若 SIM 插在别的手机 · 关闭那部手机的 WA app');
+    }
+
+    // 2. 515 · restartRequired 很多次
+    if (close && close.code === 515) {
+      issues.push('🟡 连接反复要求重启 · 可能是代理/IP 频繁变化触发风控');
+      suggestions.push('换个稳定的住宅 IP 代理');
+    }
+
+    // 3. 408 timeout · 网络问题
+    if (close && close.countTimeout >= 2) {
+      issues.push('🟡 连接反复超时 · 网络不稳 (close code 408)');
+      suggestions.push('代理延迟过高 / 丢包 · 换更快的代理');
+      suggestions.push('或改成直连测试 (临时)');
+    }
+
+    // 4. 国家不匹配 (号 vs 代理 vs SIM)
+    const phoneCountry = this.guessCountryFromPhone(slot.phoneNumber);
+    const simCountry = slot.simInfo?.countryCode?.toUpperCase();
+    if (phoneCountry && simCountry && phoneCountry !== simCountry) {
+      issues.push(`🟡 号码国家 (${phoneCountry}) 和 SIM 录入国家 (${simCountry}) 不一致`);
+      suggestions.push('检查 SIM 信息录入是否正确');
+    }
+
+    if (issues.length === 0 && slot.status === 'suspended') {
+      issues.push('⚠ 槽位被标记为 suspended · 但没有最近的断连记录');
+      suggestions.push('可能是历史状态残留 · 点 "🔄 重连" 试一次');
+    }
+
+    if (issues.length === 0 && !online) {
+      issues.push('⚪ 槽位未在线 · Baileys 连接池里没有对应 socket');
+      suggestions.push('点 "🔄 重连" 触发新连接');
+    }
+
+    return {
+      online,
+      status: slot.status,
+      lastCloseCode: close?.code ?? null,
+      lastCloseAt: close?.at ?? null,
+      count440: close?.count440 ?? 0,
+      countTimeout: close?.countTimeout ?? 0,
+      issues,
+      suggestions,
+    };
+  }
+
+  private guessCountryFromPhone(phone: string | null): string | null {
+    if (!phone) return null;
+    const digits = phone.replace(/\D+/g, '');
+    if (digits.startsWith('60')) return 'MY';
+    if (digits.startsWith('65')) return 'SG';
+    if (digits.startsWith('62')) return 'ID';
+    if (digits.startsWith('66')) return 'TH';
+    if (digits.startsWith('84')) return 'VN';
+    if (digits.startsWith('63')) return 'PH';
+    if (digits.startsWith('44')) return 'GB';
+    if (digits.startsWith('1')) return 'US';
+    if (digits.startsWith('86')) return 'CN';
+    if (digits.startsWith('91')) return 'IN';
+    if (digits.startsWith('880')) return 'BD';
+    if (digits.startsWith('971')) return 'AE';
+    return null;
   }
 }

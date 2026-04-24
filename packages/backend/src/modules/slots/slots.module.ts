@@ -6,6 +6,8 @@ import { SimInfoEntity } from './sim-info.entity';
 import { AccountHealthEntity } from './account-health.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import { SlotsService } from './slots.service';
+import { SimInfoService } from './sim-info.service';
+import { HandoverService } from './handover.service';
 import { SlotsController } from './slots.controller';
 import { BaileysModule } from '../baileys/baileys.module';
 
@@ -21,7 +23,7 @@ import { BaileysModule } from '../baileys/baileys.module';
     forwardRef(() => BaileysModule),
   ],
   controllers: [SlotsController],
-  providers: [SlotsService],
-  exports: [SlotsService, TypeOrmModule],
+  providers: [SlotsService, SimInfoService, HandoverService],
+  exports: [SlotsService, SimInfoService, HandoverService, TypeOrmModule],
 })
 export class SlotsModule {}

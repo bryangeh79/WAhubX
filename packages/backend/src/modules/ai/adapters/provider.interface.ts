@@ -5,6 +5,10 @@ export interface RewriteInput {
   personaHint?: string;   // 已压成一行的 persona 简要 (性别/年龄/职业/语言口味), 为空时 prompt 不带
   maxTokens?: number;
   timeoutMs?: number;
+  // 2026-04-24 · 整个替换默认 system prompt (用于营销场景 · 长文案 + 保留联系方式规则)
+  systemPromptOverride?: string;
+  // 2026-04-24 · 整个替换 user prompt (不再是 "改写这句: xxx") · 用于不同场景的提示词
+  userPromptOverride?: string;
 }
 
 export interface RewriteSuccess {

@@ -1,0 +1,17 @@
+name = "wahubx-license"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# 2026-04-21 · 用户确认走 wahubx-license.starbright-solutions.com · 避开 FAhubX 已占的 license.*
+routes = [
+  { pattern = "wahubx-license.starbright-solutions.com/*", zone_name = "starbright-solutions.com" }
+]
+
+# D1 Database binding · 部署前先跑 `wrangler d1 create wahubx-license-db` 拿真实 id 填入
+[[d1_databases]]
+binding = "DB"
+database_name = "wahubx-license-db"
+database_id = "777a5f69-dbb2-490f-a121-a10fa4b42a1f"
+
+# Environment variables (set via `wrangler secret put ADMIN_API_KEY`)
+# ADMIN_API_KEY = "your-secret-admin-key" — DO NOT put here, use wrangler secret

@@ -15,10 +15,11 @@ export enum MessageDirection {
   Out = 'out',
 }
 
-// M2 只做 text; image/voice/file 在 M2 W3 + M9 扩展
+// M2 只做 text; image/voice/file 在 M2 W3 + M9 扩展. Video 加于 2026-04-21.
 export enum MessageType {
   Text = 'text',
   Image = 'image',
+  Video = 'video',
   Voice = 'voice',
   File = 'file',
   Other = 'other',

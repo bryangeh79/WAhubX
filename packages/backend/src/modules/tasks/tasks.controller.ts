@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -62,5 +63,27 @@ export class TasksController {
   @HttpCode(HttpStatus.OK)
   async cancel(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
     return this.tasks.cancel(id, cur.tenantId);
+  }
+
+  @Get(':id/chat')
+  async chatMessages(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.tasks.getChatMessages(id, cur.tenantId);
+  }
+
+  @Get(':id/logs')
+  async getLogs(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.tasks.getLogs(id, cur.tenantId);
+  }
+
+  @Post(':id/rerun')
+  @HttpCode(HttpStatus.CREATED)
+  async rerun(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.tasks.rerun(id, cur.tenantId);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    await this.tasks.remove(id, cur.tenantId);
   }
 }

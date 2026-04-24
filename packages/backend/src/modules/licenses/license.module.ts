@@ -7,11 +7,12 @@ import { AdminLicensesController } from './admin-licenses.controller';
 import { TenantEntity } from '../tenants/tenant.entity';
 import { User } from '../users/user.entity';
 import { SlotsModule } from '../slots/slots.module';
+import { LicenseServerClient } from './license-server-client.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([LicenseEntity, TenantEntity, User]), SlotsModule],
   controllers: [LicenseController, AdminLicensesController],
-  providers: [LicenseService],
-  exports: [LicenseService],
+  providers: [LicenseService, LicenseServerClient],
+  exports: [LicenseService, LicenseServerClient],
 })
 export class LicenseModule {}
