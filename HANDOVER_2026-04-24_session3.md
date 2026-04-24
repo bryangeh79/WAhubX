@@ -338,7 +338,299 @@ C:\Users\MSI\.claude\projects\C--AI-WORKSPACE-Whatsapp-Auto-Bot\memory\project_w
 
 ---
 
-> **生成时间**: 2026-04-24 23:05
-> **上次 commit**: 7b4fa3b (已 push)
-> **Backend 状态**: 干净 · 已重置 · 监听 9700 · 无 freeze
-> **Todo 剩余**: 恢复 4 号 + T12 真机 (改为: 新 SIM 跑 T12)
+# 附录 A · 10 个深度盲点 (新 agent 必读)
+
+用户在 session 3 结束时主动点名 10 个盲点. 下面是查代码后的真相 · 没有瞎答.
+
+## A.1 代码层未提交状态
+
+**Git 完全干净**:
+```
+git status: nothing to commit, working tree clean
+```
+本次所有改动已在 `ddd8898` + push.
+
+**代码里有 2 处 TODO 未实现 (非阻塞 V1)**:
+`packages/backend/src/modules/intelligent-reply/services/knowledge-base.service.ts`:
+- **L339**: `// TODO: 实现真正的月度配额 · V1 先不限`
+- **L426**: `void quota;` 语句引用 quota 避免 lint warn
+
+**含义**: `PLATFORM_FAQ_QUOTA=20` env 变量读了**但没强制执行**. 当前租户可无限次调 DeepSeek 生 FAQ. 超限不报错.
+
+其他 `console.log / debugger / FIXME` 0 个.
+
+## A.2 Migration 陷阱 · 1789-1795
+
+### FK CASCADE 关系 (DROP 顺序敏感)
+```
+1789 Campaigns:
+  advertisement.tenant_id → tenant (CASCADE)
+  opening_line.tenant_id → tenant (CASCADE)
+  customer_group.tenant_id → tenant (CASCADE)
+  customer_group_member.group_id → customer_group (CASCADE)
+  campaign.tenant_id → tenant (CASCADE)
+  campaign_run.campaign_id → campaign (CASCADE)
+  campaign_target.run_id → campaign_run (CASCADE)
+  campaign_target.campaign_id → campaign (CASCADE)
+
+1794 IntelligentReply:
+  kb_source/chunk/faq/protected.kb_id → knowledge_base (CASCADE)
+  campaign.knowledge_base_id → knowledge_base (SET NULL, 依赖 1789 的 campaign 表)
+  pending_inbound.conversation_id → customer_conversation (CASCADE)
+```
+
+### down() 正确性
+- **1789 down**: DROP 顺序 target→run→campaign→group_member→group→opening→advertisement ✓
+- **1794 down**: 先 ALTER campaign DROP kb_id, 再 DROP tables ✓
+- **1795 down**: **不可逆**. 空函数. 原 `draft` 数据已 update 成 `off`, 恢复不了. 但 data migration 重跑无害.
+
+### `docker compose down -v` 后一把梭能过
+所有 CREATE TABLE 无守护, 全新建. FK 目标都在同 migration 或更早 migration. **顺序天然满足**.
+
+## A.3 平台 AI 成本 · 现状 (未跟踪)
+
+**Claude 无法追踪实际 token 消耗** · 只能告诉你架构.
+
+本 session 我**触发过的调用**:
+- DeepSeek: 1 次 FAQ 生成 (5 条 · ~$0.002)
+- OpenAI embedding: 1 次 (1 向量 · ~$0.0001)
+- 用户真实试用次数不明
+
+### 要精确看账
+- DeepSeek dashboard: https://platform.deepseek.com
+- OpenAI usage: https://platform.openai.com/usage
+
+### `PLATFORM_FAQ_QUOTA=20` 的真相
+**是占位符 · 没生效**. 参见 A.1 那个 TODO. 当前租户可无限次调 DeepSeek 生 FAQ.
+
+### 实装配额 (V1.1 要做)
+按月计数存 `ai_reply_audit` (已有 table) · 超限抛 BadRequestException · 工作量 ~30 min.
+
+## A.4 11 闸门决策的暗坑
+
+### A.4.1 最痛的闸门: **闸门 4 · 消息聚合**
+
+```typescript
+const timer = setTimeout(() => flushConversation(conv.id), AGGREGATION_WINDOW_MS);
+this.aggTimers.set(conv.id, timer);
+```
+
+**坑**:
+- `aggTimers` 是**内存 Map** · backend 重启丢失
+- 重启时有挂起的 buffer 就永远 flush 不了
+- **没做启动时扫 `pending_inbound_buffer WHERE flushed=false` 的恢复逻辑**
+
+**现状**: `pending_inbound_buffer` 表建了 · 但启动时不扫. 要靠手动 SQL 清或重处理.
+
+**修复方向**: ReplyExecutorService onModuleInit 扫未 flush · 按 received_at 分组 · 按 conversation 重跑 flush.
+
+### A.4.2 实战测试情况
+- 8s 聚合 / 30min 去重 / 24h 3 次上限 **全部只过逻辑审阅 · 没真实消息流量测试**
+- 具体边界 case (24h 刚满重置 / 夜间切日 / 节流叠加 handoff 关键词 / 短时连发) **没跑过**
+- T12 优先测这条链路
+
+### A.4.3 Guardrail 硬编码位置
+`reply-executor.service.ts` L298-309:
+```typescript
+private applyGuardrail(text, _q, _kbId): string {
+  // 长度 MAX_REPLY_LENGTH=200
+  // 过度承诺: /100%|百分百|绝对|保证你|一定|绝不/g → ''
+  // 价格: /(RM|MYR|\$|USD|¥|CNY|RMB)\s?\d+[\d,]*/gi → '具体价格请联系顾问'
+}
+```
+
+**租户不能覆盖硬规则**. 租户可**附加**:
+- `blacklistKeywords` (prompt 里禁止话题提示)
+- `customHandoffKeywords` (立即转人工)
+
+要改硬规则 → 改代码. V1 不可配置.
+
+## A.5 真人打字模拟的精确参数
+
+`baileys.service.ts` L428-450:
+
+```typescript
+const len = (text ?? '').length;
+const perChar = 80 + Math.random() * 70;  // 每字 80-150ms
+const rawMs = Math.round(len * perChar);
+const typingMs = Math.min(8000, Math.max(1500, rawMs));
+```
+
+- **每字 80-150ms 随机**
+- **下限 1500ms · 上限 8000ms**
+- **每字 jitter 是独立 random**
+
+**举例**:
+- 10 字 → 10 × 115 ≈ 1150ms → 触发下限 **1500ms**
+- 60 字 → 60 × 115 ≈ 6900ms → 实际 6.9s
+- 100+ 字 → 触发上限 **8000ms**
+
+相同字数每次 ms 不一样 · 因为每字独立 roll.
+
+## A.6 Baileys WA_FREEZE_ALL 的真实范围
+
+`baileys.service.ts` L117-121:
+
+```typescript
+if (process.env.WA_FREEZE_ALL === 'true' || process.env.WA_FREEZE_ALL === '1') {
+  this.logger.warn('⚠ WA_FREEZE_ALL=true · 跳过所有 slot rehydrate 和 periodic recovery');
+  return;
+}
+```
+
+### **跳过**
+- `onModuleInit` 里的批量 rehydrate (遍历 active/warmup slots 连 baileys)
+- `periodicRecoveryTick` (每 20 min 扫 suspended 重试)
+- `fetchLatestBaileysVersion` (WA 协议版本 upstream)
+
+### **不影响**
+- 所有 API 路由 (bind / send / clear / reconnect)
+- 已经在 pool 里的 socket 的 `connection.update` listener (包括 `scheduleReconnect`)
+- Takeover / Dispatcher / Campaign scheduler 正常跑
+- 这导致 **freeze + campaign scheduler 跑** 会让 task 生成但发不出 · 每条标 Failed
+
+### 恢复 4 号 440 · 我试过的手段 (全部失败)
+
+| # | 尝试 | 结果 |
+|---|---|---|
+| 1 | 重启 backend 无 freeze | 立刻 440 replaced · 烧风控 · 赶紧回 freeze |
+| 2 | 清空 slot + 重新扫 QR | 扫成功 · 3-5min 后 socket 消失 · 无日志事件 |
+| 3 | SQL 改 task scheduled_at=NOW | 提前跑 · 但 pool 已空 · 仍失败 |
+| 4 | 切代理 / 直连 | 直连能扫 · 但稳定性不变 · 仍失联 |
+
+### 没试过的 (新 agent 可尝试)
+- `POST /api/v1/slots/:id/reconnect` 手动触发 (controller 存在, UI 可能没暴露)
+- 手机主动清所有 linked devices 再扫 (彻底重来)
+- **换从未用过 WA 的手机**作为 host (排除手机端 MDM 干扰)
+
+## A.7 前端 UI 共享组件 · **各页 copy 一份**
+
+```
+StatBox     · pages/ads/resources/CustomerGroupImportModal.tsx:614
+StatCard    · pages/reply/components/ReplyOverviewPanel.tsx:113
+GroupCard   · pages/ads/resources/CustomerGroupDrawer.tsx:745
+EmptyState  · pages/ads/resources/CustomerGroupDrawer.tsx:1062
+StatCard    · pages/ads/resources/CustomerGroupDrawer.tsx:1112 (同文件 2 个 StatCard!)
+```
+
+**没抽共享组件**. 每页自己写一份. 风格一致但代码重复.
+
+### 技术债
+- 要调设计规范 (如 StatCard padding) 得**全局搜索替换**
+- V1.1 建议抽到 `packages/frontend/src/components/common/`:
+  - `StatCard.tsx`, `GroupCardLayout.tsx`, `EmptyStateCard.tsx`, `StatBox.tsx`
+- 不是 blocker · V1 可跑
+
+## A.8 客户回复归因 · phone 匹配精度
+
+### 匹配方式: **SQL 精确字符串 `=`**
+
+`reply-attribution.service.ts` L64-70:
+```sql
+WHERE c.tenant_id = $1 AND t.phone_e164 = $2 AND t.status = 2 ...
+```
+
+### 归一化在**入库时**完成 · 不在匹配时
+
+`campaigns/utils/phone.ts` `normalizePhone()`:
+- `+60123456789` → `60123456789`
+- `60123456789` → `60123456789`
+- `0123456789` (9-11 位 0 开头) → `60123456789` (加 60 前缀 · 马来本地规则)
+- `0086xxx` / `+86xxx` / `00xxx` → 去掉 `00/+`
+- 长度 <8 或 >15 → null (拒绝)
+
+### 入库都走 normalizePhone · DB 只存 E.164 裸号码 (无 + 无 0)
+
+### 入站消息: `jidToPhone('60186888168@s.whatsapp.net')` → `60186888168`
+直接取 jid 前缀数字 · **不 re-normalize**. WA 来的号天然就是 E.164 裸.
+
+### 潜在坑
+- `"0138xxxxxxxx"` (中国本地 · 0 开头 11 位) 会被误判成马来 → 加 60 前缀 → `60138xxxxxxxx` **错号**
+- V1 只硬编码马来处理 · 不支持"多国规则"
+- 客户群导入时若原始数据带了奇怪字符 (空格 / 中文破折号) · regex `\D` 会清掉但可能连累有效数字
+
+## A.9 Campaign Clone 边界
+
+`campaigns.service.ts` `clone()` L389-420:
+
+### **会复制**
+- `name + (副本)` 自动递增
+- `targets` (groupIds + extraPhones) — shallow copy
+- `adStrategy` + `adIds[...]`
+- `openingStrategy` + `openingIds[...]`
+- `executionMode` + `customSlotIds[...]`
+- `throttleProfile`
+
+### **不复制**
+- `schedule` — **硬改为 `immediate`** · 原排期丢失
+- `safetyStatus` — 重置 Green
+- `safetySnapshot` — null
+- `status` — 重置 Draft (需用户手动启动)
+- `knowledge_base_id` — **没复制! 遗漏 bug · V1.1 要补**
+
+### 不复制 runs / targets / tasks
+clone 只是新 Draft · 启动才生成 run.
+
+## A.10 T12 真机避坑地图 · 本 session 踩过的其他坑
+
+### A.10.1 代理
+- **proxy id 5** (178.94.148.61:45652) 带 auth · 但**疑似 block WA WebSocket**
+- 测试: direct HTTPS 经代理 → 200 OK · 但绑号 60s+ 不出 QR
+- 建议: 测试用直连 · 生产/养号再按号分配代理
+
+### A.10.2 Bind 流程 515 restart 隐患
+`baileys.service.ts` L773-788:
+- 扫码成功 WA 发 515 "restart required"
+- `spawnBindSocket(ctx, undefined)` 重建 socket
+- 重建的新 socket 进 pool
+- **隐患**: bind 原始 socket 的 listener 没 detach · 理论上可能 dangling (实测没炸)
+
+### A.10.3 Task 延后到下一窗口
+- 保守档 windows: **10-12 / 14-17 / 19-22**
+- 过 22:00 建 campaign → 自动推到**次日 10:00**
+- 立即测试 → SQL:
+  ```sql
+  UPDATE task SET scheduled_at = NOW() WHERE id = <id>;
+  ```
+
+### A.10.4 号码跨租户冲突
+`startBind` 里 race check:
+```typescript
+if (existing) throw new Error(`手机号 ${phone} 已被租户...占用`);
+```
+同一 WA 号被其他 tenant slot 绑了 · 本 tenant 不能再绑. 多租户共用 SIM 会卡.
+
+### A.10.5 代理明文存储 (V2 加密)
+`proxy` 表 `username / password` 是 plaintext · 备份 DB 会带出 · 责任在租户.
+
+### A.10.6 Session 文件路径
+```
+packages/backend/data/slots/<slot_index_2位>/wa-session/
+```
+重置时删这目录 · 不要删 `data/` 根 (含 assets · backups · config).
+
+### A.10.7 Campaign scheduler 即使冻结也会展开 run
+`CampaignSchedulerService.onModuleInit` 延 30s 启动 setInterval · **freeze env 不影响这个 cron**. 冻结期间 run 照常展开 · task 照常生成 · 只是 dispatcher 发不出.
+影响: 冻结期 UI 列表看到大量 Failed task. 不是 bug.
+
+### A.10.8 Intelligent reply 的 chat_message 不被监听过滤
+`takeover.message.in` 事件对**所有 inbound message** 都触发. AutoReplyDecider 自己闸门 1 过滤群/状态. 但接管 UI 里 admin 自己发的 out 消息不走 inbound · 不会触发闸门.
+
+---
+
+# 附录 B · 新 agent 读完补充后应执行的检查清单
+
+- [ ] 读 CLAUDE.md
+- [ ] 读记忆文件
+- [ ] `cd C:\AI_WORKSPACE\Whatsapp Auto Bot && git log --oneline -3` 看 commit 链
+- [ ] `docker ps` 确认 postgres 5434 + redis 6381 在跑
+- [ ] `netstat -ano | grep :9700` 看 backend 是否活着 (应该是)
+- [ ] `cat packages/backend/.env | grep PLATFORM` 确认 AI keys 在
+- [ ] 浏览器打开 `http://localhost:5173` 看前端
+- [ ] 登录 `admin@waautobot.com` (密码向用户问)
+
+---
+
+> **补充生成时间**: 2026-04-24 23:20
+> **最后 commit**: ddd8898 (docs) · 推进补充后会变
+> **最后推荐动作**: 新 agent 读完全文 · 进入 Pending todo (T12 新 SIM 真机)
