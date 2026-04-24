@@ -386,7 +386,11 @@ export class CampaignsService {
   /**
    * 复制为新投放 · 保留文案/开场白/客户群/执行模式/节流档 · schedule 改 immediate · 新 Draft 状态
    */
-  async clone(tenantId: number, sourceId: number): Promise<CampaignEntity> {
+  async clone(
+    tenantId: number,
+    sourceId: number,
+    createdBy: string | null,
+  ): Promise<CampaignEntity> {
     const src = await this.findById(tenantId, sourceId);
     // 生成新名
     const baseName = `${src.name} (副本)`;
@@ -400,7 +404,10 @@ export class CampaignsService {
       tenantId,
       name: newName,
       schedule: { mode: 'immediate' } as CampaignEntity['schedule'],
-      targets: src.targets,
+      targets: {
+        groupIds: [...(src.targets.groupIds ?? [])],
+        extraPhones: [...(src.targets.extraPhones ?? [])],
+      },
       adStrategy: src.adStrategy,
       adIds: [...src.adIds],
       openingStrategy: src.openingStrategy,
@@ -411,6 +418,7 @@ export class CampaignsService {
       safetyStatus: SafetyStatus.Green,
       safetySnapshot: null,
       status: CampaignStatus.Draft,
+      createdBy,
     });
     return this.campaignRepo.save(cloned);
   }

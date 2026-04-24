@@ -81,7 +81,7 @@ export class CampaignsController {
 
   @Post(':id/clone')
   cloneCampaign(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
-    return this.service.clone(this.tenantOf(cur), id);
+    return this.service.clone(this.tenantOf(cur), id, cur.id);
   }
 
   @Post()
