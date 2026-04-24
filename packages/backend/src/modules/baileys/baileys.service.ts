@@ -37,6 +37,7 @@ import pino from 'pino';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { AccountSlotEntity, AccountSlotStatus } from '../slots/account-slot.entity';
+import { TenantEntity } from '../tenants/tenant.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
@@ -92,15 +93,33 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private readonly baileysLogger = pino({ level: 'warn' });
   // 动态拉来的 WA 版本, 进程生命周期复用避免反复请求
   private waVersion: number[] | null = null;
-  // 自动重连状态: key=slotId, value={attempts, nextRetryTimer}
-  // 策略: 指数退避 5s → 10s → 20s → 40s → 80s (cap), 累计 5 次还连不上则 suspend
+  // 自动重连状态: key=slotId, value={attempts, nextRetryTimer, consecutive440Count}
+  // 2026-04-25 稳定性重构: 指数退避 + jitter · 连续 2 次 440 直接 quarantine (不再烧号)
   private readonly reconnectState = new Map<
     number,
-    { attempts: number; timer: NodeJS.Timeout | null; stableTimer?: NodeJS.Timeout | null; last440?: boolean }
+    {
+      attempts: number;
+      timer: NodeJS.Timeout | null;
+      stableTimer?: NodeJS.Timeout | null;
+      last440?: boolean;
+      consecutive440?: number;
+    }
   >();
+  // 总重试上限 (非 440) · 440 上限单独走 QUARANTINE_440_THRESHOLD
   private static readonly MAX_RECONNECT_ATTEMPTS = 5;
-  // 2026-04-22 · 线性间隔 · 30/60/90/120/150s (用户要求 · 比指数更温和 · 避免瞬发多次触发 WA 风控)
-  private static readonly RECONNECT_STEP_MS = 30_000;
+  // 2026-04-25 · 指数退避基数 · 实际: 60s × 2^attempt × jitter(0.7-1.3)
+  //   attempt=0 → ~60s · =1 → ~120s · =2 → ~240s · =3 → ~480s · =4 → ~960s
+  // 比旧线性 30/60/90/120/150s 更温和 · 连 WA 次数少 · WA 侧信号少
+  private static readonly RECONNECT_BASE_MS = 60_000;
+  // 连续 2 次 440 (connectionReplaced) 就进 Quarantine · 不再自动重试
+  // 因为每次重连都是一次 "尝试在别处登录" 信号 · 越试 WA 越踢
+  private static readonly QUARANTINE_440_THRESHOLD = 2;
+  // suspended 冷却期 · 30 min 内其他路径不允许翻回 active
+  private static readonly SUSPEND_COOLDOWN_MS = 30 * 60 * 1000;
+  // 心跳写 DB 频率
+  private static readonly HEARTBEAT_INTERVAL_MS = 60 * 1000;
+  // 心跳监控定时器
+  private heartbeatInterval: NodeJS.Timeout | null = null;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -166,11 +185,43 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       );
     }, 20 * 60 * 1000);
     this.logger.log('periodic suspended-slot recovery enabled · every 20 min');
+
+    // 2026-04-25 · 心跳监控 · 每 60s 扫 pool · 活 socket 写 socket_last_heartbeat_at
+    // UI 可据此判真存活 (DB status 只代表意图 · 心跳代表真实)
+    this.heartbeatInterval = setInterval(() => {
+      void this.heartbeatTick().catch((err) =>
+        this.logger.warn(`heartbeatTick error: ${err}`),
+      );
+    }, BaileysService.HEARTBEAT_INTERVAL_MS);
+  }
+
+  // 2026-04-25 · pool 中有活 socket 的 slot 写入心跳戳
+  // 判活标准: this.pool.has(slotId) && sock.ws?.readyState === OPEN
+  private async heartbeatTick(): Promise<void> {
+    if (this.pool.size === 0) return;
+    const aliveSlotIds: number[] = [];
+    for (const [slotId, sock] of this.pool.entries()) {
+      try {
+        // baileys WASocket 底层暴露 ws (WebSocket) · readyState 1=OPEN
+        const ws = (sock as unknown as { ws?: { readyState?: number } }).ws;
+        if (ws?.readyState === 1) aliveSlotIds.push(slotId);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (aliveSlotIds.length === 0) return;
+    await this.dataSource
+      .createQueryBuilder()
+      .update(AccountSlotEntity)
+      .set({ socketLastHeartbeatAt: () => 'NOW()' })
+      .whereInIds(aliveSlotIds)
+      .execute();
   }
 
   private recoveryInterval: NodeJS.Timeout | null = null;
 
   private async periodicRecoveryTick(): Promise<void> {
+    // 只捞 suspended · 不捞 quarantine (明确判死 · 不再自动碰)
     const suspended = await this.dataSource
       .getRepository(AccountSlotEntity)
       .createQueryBuilder('s')
@@ -178,13 +229,21 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       .andWhere('s.account_id IS NOT NULL')
       .getMany();
     if (suspended.length === 0) return;
-    this.logger.log(`periodic recovery · 尝试 ${suspended.length} 个 suspended 槽位`);
-    for (const slot of suspended) {
-      // 距离最近断连 < 15 min 的不试 · 让风控冷却
+    const now = Date.now();
+    const candidates = suspended.filter((slot) => {
+      // 2026-04-25 · 冷却期内 (suspended_until 未到) · 不碰
+      if (slot.suspendedUntil && new Date(slot.suspendedUntil).getTime() > now) return false;
+      // 距离最近断连 < 15 min 也不试 · 让风控冷却 (旧逻辑保留作为双保险)
       const close = this.lastCloseInfo.get(slot.id);
-      if (close && Date.now() - new Date(close.at).getTime() < 15 * 60 * 1000) {
-        continue;
-      }
+      if (close && now - new Date(close.at).getTime() < 15 * 60 * 1000) return false;
+      return true;
+    });
+    if (candidates.length === 0) {
+      this.logger.log(`periodic recovery · 有 ${suspended.length} 个 suspended 槽位 · 全部仍在冷却期 · 跳过`);
+      return;
+    }
+    this.logger.log(`periodic recovery · 尝试 ${candidates.length} 个 suspended 槽位 (过滤后)`);
+    for (const slot of candidates) {
       try {
         await this.reactivateAndRespawn(slot.id);
       } catch (err) {
@@ -217,6 +276,10 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     if (this.recoveryInterval) {
       clearInterval(this.recoveryInterval);
       this.recoveryInterval = null;
+    }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
     for (const ctx of this.bindContexts.values()) {
       await this.teardownBind(ctx, 'cancelled', 'shutdown');
@@ -263,6 +326,25 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         `槽位 ${slotId} 当前状态 ${slot.status}, 只有 empty 槽位可绑定新号`,
       );
     }
+
+    // 2026-04-25 · 绑号冷却 · 防同租户短时间绑多号触发 WA 关联检测
+    const cooldownSec = Number(process.env.TENANT_BIND_COOLDOWN_SEC ?? 600);
+    const tenant = await this.dataSource
+      .getRepository(TenantEntity)
+      .findOne({ where: { id: slot.tenantId } });
+    if (tenant?.lastBindAt) {
+      const elapsed = (Date.now() - new Date(tenant.lastBindAt).getTime()) / 1000;
+      if (elapsed < cooldownSec) {
+        const remaining = Math.ceil(cooldownSec - elapsed);
+        throw new BadRequestException(
+          `租户刚绑过号 · 请等待 ${Math.ceil(remaining / 60)} 分钟 (${remaining}s) 再绑下一个 · 防 WA 关联检测`,
+        );
+      }
+    }
+    // 先打戳 · 防并发两个 bind 同时过检查
+    await this.dataSource
+      .getRepository(TenantEntity)
+      .update(slot.tenantId, { lastBindAt: new Date() });
 
     const existing = this.bindContexts.get(slotId);
     if (existing && ['qr', 'connecting', 'starting'].includes(existing.status.state)) {
@@ -699,6 +781,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       proxyId: slot?.proxyId ?? null,
     });
 
+    // 2026-04-25 · baileys options 每 slot 独立随机化 (种子派生 · 重连不变)
+    const opts = isolation.fingerprint.baileysOpts;
     const sock = makeWASocket({
       version: version as [number, number, number],
       auth: state,
@@ -706,12 +790,15 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       logger: this.baileysLogger,
       // fingerprint.baileysBrowser = [model, 'Desktop', chromeMajor] — 每槽独立, 跨会话稳定
       browser: isolation.fingerprint.baileysBrowser,
-      // HttpsProxyAgent / SocksProxyAgent 运行时兼容 http.Agent 接口, TS 类型对不上 https.Agent 但
-      // 功能等价 — 用 as never 绕开严格匹配
       agent: (isolation.agent ?? undefined) as never,
       fetchAgent: (isolation.agent ?? undefined) as never,
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      // 以下 5 项从 fingerprint.baileysOpts 派生 · 每 slot 不同
+      connectTimeoutMs: opts.connectTimeoutMs,
+      keepAliveIntervalMs: opts.keepAliveIntervalMs,
+      defaultQueryTimeoutMs: opts.defaultQueryTimeoutMs,
+      emitOwnEvents: opts.emitOwnEvents,
+      markOnlineOnConnect: opts.markOnlineOnConnect,
     });
     ctx.sock = sock;
 
@@ -941,18 +1028,22 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       throw new Error(`slot ${slotId} missing accountId during rehydrate`);
     }
 
+    // 2026-04-25 · baileys options 每 slot 随机化 (rehydrate 路径)
+    const opts = isolation.fingerprint.baileysOpts;
     const sock = makeWASocket({
       version: version as [number, number, number],
       auth: state,
       printQRInTerminal: false,
       logger: this.baileysLogger,
       browser: isolation.fingerprint.baileysBrowser,
-      // HttpsProxyAgent / SocksProxyAgent 运行时实现了 http.Agent 的接口但 TS 类型是 http.Agent;
-      // Baileys 声明需要 https.Agent — 用 any 断言绕开 TS 严格匹配
       agent: (isolation.agent ?? undefined) as never,
       fetchAgent: (isolation.agent ?? undefined) as never,
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      connectTimeoutMs: opts.connectTimeoutMs,
+      keepAliveIntervalMs: opts.keepAliveIntervalMs,
+      defaultQueryTimeoutMs: opts.defaultQueryTimeoutMs,
+      emitOwnEvents: opts.emitOwnEvents,
+      markOnlineOnConnect: opts.markOnlineOnConnect,
     });
 
     this.attachPoolListeners(slotId, slotIndex, slot.accountId, sock, saveCreds);
@@ -999,6 +1090,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
             const cur = this.reconnectState.get(slotId);
             if (cur) {
               cur.attempts = 0;
+              // 2026-04-25 · 10s 稳定 = 440 计数也归零 · 证明当前环境 OK
+              cur.consecutive440 = 0;
               if (cur.timer) {
                 clearTimeout(cur.timer);
                 cur.timer = null;
@@ -1008,16 +1101,38 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           }, 10_000);
         }
         // 连上就把 DB suspended → active (若需要)
+        // 2026-04-25 · 稳定性: 只有在 suspended_until 已过期时才翻回 · 冷却期内不动
         void (async () => {
           try {
             const slot = await this.dataSource
               .getRepository(AccountSlotEntity)
               .findOne({ where: { id: slotId } });
-            if (slot && slot.status === AccountSlotStatus.Suspended) {
-              this.logger.log(`slot ${slotId} · 连接恢复 · suspended → active`);
+            if (!slot) return;
+            if (slot.status === AccountSlotStatus.Quarantine) {
+              // quarantine 不自动恢复 · 除非人工 reactivate 清了
+              return;
+            }
+            if (slot.status === AccountSlotStatus.Suspended) {
+              const now = Date.now();
+              if (slot.suspendedUntil && new Date(slot.suspendedUntil).getTime() > now) {
+                this.logger.warn(
+                  `slot ${slotId} · suspended 冷却未过 (until ${slot.suspendedUntil.toISOString()}) · 不翻回 active`,
+                );
+                return;
+              }
+              this.logger.log(`slot ${slotId} · 连接恢复 · suspended → active · 心跳即写`);
               await this.dataSource
                 .getRepository(AccountSlotEntity)
-                .update(slotId, { status: AccountSlotStatus.Active });
+                .update(slotId, {
+                  status: AccountSlotStatus.Active,
+                  suspendedUntil: null,
+                  socketLastHeartbeatAt: new Date(),
+                });
+            } else {
+              // 正常 open · 即写心跳
+              await this.dataSource
+                .getRepository(AccountSlotEntity)
+                .update(slotId, { socketLastHeartbeatAt: new Date() });
             }
           } catch {
             /* ignore */
@@ -1042,9 +1157,23 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           this.clearReconnect(slotId);
           void this.markSlotSuspended(slotId);
         } else if (code === DisconnectReason.connectionReplaced) {
-          // 2026-04-22 · 440 · 偶发 open→close 瞬断 · 走正常 MAX=5 · 老代码证明可自愈
-          if (rs) rs.last440 = true;
+          // 2026-04-25 · 440 · 累计 2 次直接 quarantine · 不再烧号
           this.pool.delete(slotId);
+          const cur = this.reconnectState.get(slotId) ?? { attempts: 0, timer: null };
+          cur.last440 = true;
+          cur.consecutive440 = (cur.consecutive440 ?? 0) + 1;
+          this.reconnectState.set(slotId, cur);
+          if (cur.consecutive440 >= BaileysService.QUARANTINE_440_THRESHOLD) {
+            this.logger.error(
+              `slot ${slotId} · 连续 ${cur.consecutive440} 次 440 · 判死 quarantine · 需人工换号`,
+            );
+            this.clearReconnect(slotId);
+            void this.markSlotQuarantined(slotId);
+            return;
+          }
+          this.logger.warn(
+            `slot ${slotId} · 440 第 ${cur.consecutive440} 次 · ≥ ${BaileysService.QUARANTINE_440_THRESHOLD} 将 quarantine`,
+          );
           this.scheduleReconnect(slotId, accountId, code);
         } else {
           this.pool.delete(slotId);
@@ -1074,9 +1203,17 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
+    // 2026-04-25 · 稳定性: 设 suspended_until 冷却期 · 其他路径这期间不翻回 active
+    const cooldownUntil = new Date(Date.now() + BaileysService.SUSPEND_COOLDOWN_MS);
     await this.dataSource
       .getRepository(AccountSlotEntity)
-      .update(slotId, { status: AccountSlotStatus.Suspended });
+      .update(slotId, {
+        status: AccountSlotStatus.Suspended,
+        suspendedUntil: cooldownUntil,
+      });
+    this.logger.warn(
+      `slot ${slotId} · suspended · 冷却至 ${cooldownUntil.toISOString()}`,
+    );
     // 2026-04-22 · Gap 2 · 广播事件 · Dispatcher 监听并中断跑中的任务
     if (this.eventBus && slot?.accountId) {
       try {
@@ -1087,7 +1224,35 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // 2026-04-25 · 明确判死 · 连续 2 次 440 后调用
+  // 与 suspended 的区别: quarantine 不会 periodic recovery · 不会自动重连 · 只能人工原厂重置
+  private async markSlotQuarantined(slotId: number): Promise<void> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .update(slotId, {
+        status: AccountSlotStatus.Quarantine,
+        suspendedUntil: null, // quarantine 不需要 cooldown 因为不会自动恢复
+      });
+    this.logger.error(
+      `slot ${slotId} · QUARANTINE · 号疑似被 WA 限制 · 请租户原厂重置换新号`,
+    );
+    if (this.eventBus && slot?.accountId) {
+      try {
+        this.eventBus.emit('slot.suspended', { slotId, accountId: slot.accountId });
+        this.eventBus.emit('slot.quarantined', { slotId, accountId: slot.accountId });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   // ── 自动重连 (W3.1) ────────────────────────────────────
+  // 2026-04-25 · 稳定性: 指数退避 60 × 2^n × jitter(0.7-1.3) · 比线性更温和
+  //   attempt=0 → ~60s · =1 → ~120s · =2 → ~240s · =3 → ~480s · =4 → ~960s
+  // 5 次还连不上 → suspended (非 440) 或 quarantine (已在 close handler 处理)
   private scheduleReconnect(slotId: number, accountId: number, closeCode: number, maxOverride?: number): void {
     const rs = this.reconnectState.get(slotId) ?? { attempts: 0, timer: null };
     if (rs.timer) clearTimeout(rs.timer);
@@ -1095,18 +1260,20 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     const maxAttempts = maxOverride ?? BaileysService.MAX_RECONNECT_ATTEMPTS;
     if (rs.attempts >= maxAttempts) {
       this.logger.error(
-        `slot ${slotId} reached max reconnect (${rs.attempts}/${maxAttempts}), suspending. Last code=${closeCode}${closeCode === 440 ? ' · 号在另一设备登录 · 请检查手机 WA' : ''}`,
+        `slot ${slotId} reached max reconnect (${rs.attempts}/${maxAttempts}), suspending. Last code=${closeCode}`,
       );
       this.reconnectState.delete(slotId);
       void this.markSlotSuspended(slotId);
       return;
     }
 
-    // 2026-04-22 · 线性 30s 递增: 30/60/90/120/150s · 总约 7.5 min 才放弃
-    const delayMs = BaileysService.RECONNECT_STEP_MS * (rs.attempts + 1);
+    // 指数退避 + ±30% jitter · 防多 slot 同时断开时同步 retry 形成 pattern
+    const baseMs = BaileysService.RECONNECT_BASE_MS * Math.pow(2, rs.attempts);
+    const jitter = 0.7 + Math.random() * 0.6;
+    const delayMs = Math.round(baseMs * jitter);
     rs.attempts += 1;
     this.logger.warn(
-      `slot ${slotId} scheduling reconnect #${rs.attempts}/${BaileysService.MAX_RECONNECT_ATTEMPTS} in ${Math.round(delayMs / 1000)}s (close code=${closeCode})`,
+      `slot ${slotId} reconnect #${rs.attempts}/${maxAttempts} in ${Math.round(delayMs / 1000)}s (code=${closeCode}, 440 count=${rs.consecutive440 ?? 0})`,
     );
 
     rs.timer = setTimeout(() => {
@@ -1128,8 +1295,20 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         this.clearReconnect(slotId);
         return;
       }
-      if (slot.status === AccountSlotStatus.Suspended || slot.status === AccountSlotStatus.Empty) {
+      if (
+        slot.status === AccountSlotStatus.Suspended ||
+        slot.status === AccountSlotStatus.Empty ||
+        slot.status === AccountSlotStatus.Quarantine
+      ) {
         this.logger.log(`slot ${slotId} status=${slot.status}, abort reconnect`);
+        this.clearReconnect(slotId);
+        return;
+      }
+      // 2026-04-25 · suspended_until 冷却期内 · 也不重连
+      if (slot.suspendedUntil && new Date(slot.suspendedUntil).getTime() > Date.now()) {
+        this.logger.log(
+          `slot ${slotId} 冷却中 (until ${slot.suspendedUntil.toISOString()}), abort reconnect`,
+        );
         this.clearReconnect(slotId);
         return;
       }
@@ -1450,13 +1629,22 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       .findOne({ where: { id: slotId } });
     if (!slot) throw new Error(`slot ${slotId} 不存在`);
     if (!slot.accountId) throw new Error(`slot ${slotId} 未绑号`);
+    // 2026-04-25 · quarantine 不允许自动 reactivate · 必须人工原厂重置换号
+    if (slot.status === AccountSlotStatus.Quarantine) {
+      throw new Error(
+        `slot ${slotId} 已被 quarantine (疑似 WA 限制该号) · 请原厂重置后换新号重新绑定`,
+      );
+    }
     // 先踢掉 pool 里挂掉的旧 sock · 避免新旧 sock 冲突 (互相踢)
     await this.evictFromPool(slotId);
-    // 状态回 active
+    // 状态回 active · 清冷却时间戳
     await this.dataSource
       .getRepository(AccountSlotEntity)
-      .update(slotId, { status: AccountSlotStatus.Active });
-    // 清 reconnect 状态 · 给新一轮机会
+      .update(slotId, {
+        status: AccountSlotStatus.Active,
+        suspendedUntil: null,
+      });
+    // 清 reconnect 状态 · 给新一轮机会 (包括 440 计数)
     this.clearReconnect(slotId);
     // 清 close 历史
     this.lastCloseInfo.delete(slotId);

@@ -35,7 +35,8 @@ import { SimInfoBulkModal } from './sim/SimInfoBulkModal';
 
 const { Title, Text, Paragraph } = Typography;
 
-type SlotStatus = 'empty' | 'active' | 'suspended' | 'warmup';
+// 2026-04-25 · 加 quarantine · 440 明确判死 · UI 要显"号疑似被 WA 限制"
+type SlotStatus = 'empty' | 'active' | 'suspended' | 'warmup' | 'quarantine';
 
 interface SlotItem {
   id: number;
@@ -43,6 +44,9 @@ interface SlotItem {
   slotIndex: number;
   status: SlotStatus;
   online?: boolean;
+  // 2026-04-25 · 稳定性 · 真实状态三指标
+  suspendedUntil?: string | null;
+  socketLastHeartbeatAt?: string | null;
   accountId: number | null;
   phoneNumber: string | null;
   waNickname: string | null;
@@ -96,7 +100,37 @@ const STATUS_META: Record<
   active: { label: '运营中', color: 'success', pct: 'active', bar: '#25d366' },
   // 2026-04-22 · "封禁" 太吓人 · 改 "未连接" · 不等于 WA 真封号
   suspended: { label: '未连接', color: 'warning', pct: 'suspended', bar: '#faad14' },
+  // 2026-04-25 · 连续 440 判死 · 不可自动恢复 · 必须换号
+  quarantine: { label: '号疑似被限', color: 'error', pct: 'quarantine', bar: '#f5222d' },
   empty: { label: '空置', color: 'default', pct: 'empty', bar: '#d9d9d9' },
+};
+
+// 2026-04-25 · 健康度三色灯 · 根据心跳 + status 计算
+// 🟢 healthy (心跳 < 90s · status=active/warmup)
+// 🟡 degraded (心跳 90s-3min · 或 status=suspended 冷却中)
+// 🔴 dead (心跳 > 3min · 或 status=quarantine/suspended 超冷却)
+function computeHealth(slot: SlotItem): { level: 'healthy' | 'degraded' | 'dead' | 'idle'; hint: string } {
+  if (slot.status === 'empty') return { level: 'idle', hint: '空槽' };
+  if (slot.status === 'quarantine') return { level: 'dead', hint: '号疑似被 WA 限制 · 需换号' };
+  const hb = slot.socketLastHeartbeatAt ? new Date(slot.socketLastHeartbeatAt).getTime() : 0;
+  const now = Date.now();
+  const age = hb > 0 ? now - hb : Infinity;
+  if (slot.status === 'suspended') {
+    const until = slot.suspendedUntil ? new Date(slot.suspendedUntil).getTime() : 0;
+    if (until > now) return { level: 'degraded', hint: `掉线冷却中 · ${Math.round((until - now) / 60000)} 分钟后可恢复` };
+    return { level: 'dead', hint: '已挂线 · 等待系统重连' };
+  }
+  // active / warmup
+  if (age < 90_000) return { level: 'healthy', hint: `心跳正常 (${Math.round(age / 1000)}s 前)` };
+  if (age < 3 * 60_000) return { level: 'degraded', hint: `心跳延迟 ${Math.round(age / 1000)}s · 请关注` };
+  return { level: 'dead', hint: `心跳已 ${Math.round(age / 60000)} 分钟无响应 · socket 可能已挂` };
+}
+
+const HEALTH_COLOR = {
+  healthy: '#25d366',
+  degraded: '#faad14',
+  dead: '#f5222d',
+  idle: '#d9d9d9',
 };
 
 // 2026-04-21 · 用户提供的 WhatsApp 官方 logo 图 · 加右下数字角标
@@ -663,6 +697,8 @@ function ActiveSlotCard({
     slot.status === 'warmup' && !hasWarmupPlan
       ? { label: '待养号', color: 'default', bar: '#d9d9d9', pct: 'warmup' }
       : STATUS_META[slot.status];
+  // 2026-04-25 · 稳定性 · 健康度 · 显示三色灯
+  const health = computeHealth(slot);
   const memberGroups = groups.filter((g) => g.slotIds.includes(slot.id));
   const [warmupWizardOpen, setWarmupWizardOpen] = useState(false);
   const [groupMembershipOpen, setGroupMembershipOpen] = useState(false);
@@ -752,6 +788,21 @@ function ActiveSlotCard({
         <Space size={4} wrap>
           <WaLogo n={slot.slotIndex} size={36} />
           <Tag color={meta.color} style={{ marginLeft: 4 }}>{meta.label}</Tag>
+          {slot.accountId && (
+            <Tooltip title={health.hint}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: 10,
+                  height: 10,
+                  borderRadius: '50%',
+                  background: HEALTH_COLOR[health.level],
+                  boxShadow: `0 0 4px ${HEALTH_COLOR[health.level]}`,
+                  marginLeft: 2,
+                }}
+              />
+            </Tooltip>
+          )}
           {memberGroups.map((g) => (
             <Tag
               key={g.id}

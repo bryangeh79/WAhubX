@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Radio, Space, Spin, Tag, Typography } from 'antd';
+import { Alert, Button, Checkbox, Input, Modal, Radio, Space, Spin, Tag, Typography } from 'antd';
 import QRCode from 'qrcode';
 import { api, extractErrorMessage } from '@/lib/api';
 
@@ -48,6 +48,9 @@ export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess,
   const [status, setStatus] = useState<BindStatus | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  // 2026-04-25 · 绑号前强警告 · 必须勾"已阅"才进绑号流程
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [ackChecks, setAckChecks] = useState({ newSim: false, noTouch: false, quiet24h: false });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -105,6 +108,8 @@ export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess,
       setBootError(null);
       setMode('qr');
       setPhoneInput('');
+      setAcknowledged(false);
+      setAckChecks({ newSim: false, noTouch: false, quiet24h: false });
     }
     return stopPolling;
   }, [open, stopPolling]);
@@ -133,7 +138,14 @@ export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess,
     >
       {bootError && <Alert type="error" message={bootError} showIcon style={{ marginBottom: 12 }} />}
 
-      {!started ? (
+      {!acknowledged ? (
+        <SafetyAckStage
+          checks={ackChecks}
+          onChange={setAckChecks}
+          onContinue={() => setAcknowledged(true)}
+          onCancel={onClose}
+        />
+      ) : !started ? (
         <ModePicker
           mode={mode}
           onModeChange={setMode}
@@ -330,6 +342,81 @@ function TerminalStage({
       <Space style={{ marginTop: 16 }}>
         <Button onClick={onClose}>关闭</Button>
         <Button type="primary" onClick={onRetry}>重试</Button>
+      </Space>
+    </div>
+  );
+}
+
+// 2026-04-25 · 绑号前安全告知 · 必须三项都勾才能继续
+// 目的: 教育租户用新 SIM + 扫完别碰手机 + 24h 静默期
+function SafetyAckStage({
+  checks,
+  onChange,
+  onContinue,
+  onCancel,
+}: {
+  checks: { newSim: boolean; noTouch: boolean; quiet24h: boolean };
+  onChange: (v: { newSim: boolean; noTouch: boolean; quiet24h: boolean }) => void;
+  onContinue: () => void;
+  onCancel: () => void;
+}) {
+  const allChecked = checks.newSim && checks.noTouch && checks.quiet24h;
+  return (
+    <div>
+      <Alert
+        type="warning"
+        showIcon
+        message="绑号前请务必阅读 · WhatsApp 对新设备登录非常敏感"
+        description="老号(已上过 WA 的手机号)绑后易被 WA 风控判死, 几乎无法救回. 系统会强制执行以下规则:"
+        style={{ marginBottom: 16 }}
+      />
+
+      <Space direction="vertical" size={12} style={{ width: '100%', marginBottom: 20 }}>
+        <div style={{ background: '#fafafa', padding: 12, borderRadius: 6 }}>
+          <Checkbox
+            checked={checks.newSim}
+            onChange={(e) => onChange({ ...checks, newSim: e.target.checked })}
+          >
+            <Text strong>我会使用新 SIM 卡</Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              强烈建议: 从未注册过 WhatsApp 的新 SIM. 已上过 WA 的老号风险自担.
+            </Text>
+          </Checkbox>
+        </div>
+
+        <div style={{ background: '#fafafa', padding: 12, borderRadius: 6 }}>
+          <Checkbox
+            checked={checks.noTouch}
+            onChange={(e) => onChange({ ...checks, noTouch: e.target.checked })}
+          >
+            <Text strong>扫码后 30 分钟内不碰手机 WhatsApp</Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              不打开 WA · 不链接其他设备 · 不切换账号 · 否则会触发 440 "在别处登录" 踢号.
+            </Text>
+          </Checkbox>
+        </div>
+
+        <div style={{ background: '#fafafa', padding: 12, borderRadius: 6 }}>
+          <Checkbox
+            checked={checks.quiet24h}
+            onChange={(e) => onChange({ ...checks, quiet24h: e.target.checked })}
+          >
+            <Text strong>绑后 24 小时系统自动静默</Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              新绑号 24h 内只跑养号/维持任务 · 不发广告不自动回复 · 让 WA 建立信任.
+            </Text>
+          </Checkbox>
+        </div>
+      </Space>
+
+      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+        <Button onClick={onCancel}>取消</Button>
+        <Button type="primary" disabled={!allChecked} onClick={onContinue}>
+          已阅读并同意 · 继续绑号 →
+        </Button>
       </Space>
     </div>
   );

@@ -357,6 +357,11 @@ export class SlotsService {
       proxyId: slot.proxyId,
       profilePath: slot.profilePath,
       createdAt: slot.createdAt,
+      // 2026-04-25 · 稳定性 · 真实状态三指标
+      suspendedUntil: slot.suspendedUntil ? slot.suspendedUntil.toISOString() : null,
+      socketLastHeartbeatAt: slot.socketLastHeartbeatAt
+        ? slot.socketLastHeartbeatAt.toISOString()
+        : null,
       // 2026-04-21 · 卡片信息增强
       warmupStartedAt: stats?.warmupStartedAt ?? null,
       warmupTotalDays: WARMUP_TOTAL_DAYS,

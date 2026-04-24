@@ -6,6 +6,9 @@ export class SlotResponseDto {
   slotIndex!: number;
   status!: AccountSlotStatus;
   online!: boolean; // 2026-04-22 · 实际 pool 是否有 socket (与 status 独立 · status=active 也可能 online=false)
+  // 2026-04-25 · 稳定性: 真实状态三指标
+  suspendedUntil!: string | null;         // suspended 冷却到何时 · 期间不动
+  socketLastHeartbeatAt!: string | null;  // 最后心跳时间 · UI 判 healthy/degraded/dead
   accountId!: number | null;
   phoneNumber!: string | null;
   waNickname!: string | null;

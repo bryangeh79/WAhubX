@@ -20,11 +20,15 @@ import { WaAccountEntity } from './wa-account.entity';
 //   id         SERIAL PK (DB 内部用)
 //   slotIndex  INT      (1..slot_limit, 租户视角的槽位号, 每租户内 unique)
 // 生产单租户部署时, slotIndex == slot_id 的语义不变.
+// 2026-04-25 · 加 Quarantine · 区别于 suspended
+//   suspended  · 临时掉线 · 可人工 reactivate · periodic recovery 也会试
+//   quarantine · 连续 2 次 440 明确判死 · 只能原厂重置换号 · 系统不再自动碰
 export enum AccountSlotStatus {
   Empty = 'empty',
   Active = 'active',
   Suspended = 'suspended',
   Warmup = 'warmup',
+  Quarantine = 'quarantine',
 }
 
 @Entity('account_slot')
@@ -75,6 +79,14 @@ export class AccountSlotEntity {
   // M9 接管 UI 会通过 /takeover/:accountId/acquire 置 true, /release 置 false
   @Column({ type: 'boolean', name: 'takeover_active', default: false })
   takeoverActive!: boolean;
+
+  // 2026-04-25 · 稳定性 · suspended 冷却时间戳 · 其他路径这时间前不允许翻回 active
+  @Column({ type: 'timestamptz', name: 'suspended_until', nullable: true })
+  suspendedUntil!: Date | null;
+
+  // 2026-04-25 · 稳定性 · socket 最后心跳时间 · UI 判真实存活
+  @Column({ type: 'timestamptz', name: 'socket_last_heartbeat_at', nullable: true })
+  socketLastHeartbeatAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;

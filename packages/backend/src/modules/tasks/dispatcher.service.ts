@@ -38,6 +38,7 @@ export type DispatchDecision =
   | { action: 'skip-night-window' }         // 夜间只放行 warmup/maintenance
   | { action: 'skip-health-high' }          // #6 M8 · 健康分 high 暂停主动任务
   | { action: 'skip-slot-offline' }         // 2026-04-22 · 槽位 suspended/empty · 留 pending 等 recover
+  | { action: 'skip-fresh-bind-quiet' }     // 2026-04-25 · 新绑号 24h 静默期 · 只允 warmup/maintenance
   | { action: 'soft-warn-warmup-stage' }    // #5 soft: warmup_stage 不够, 允许执行 + 记警告
   | { action: 'leave-pending-unknown-type' }; // executor 未注册 → 不 reject 不 run, 保 pending
 
@@ -58,6 +59,14 @@ export const MIN_WARMUP_STAGE_BY_TASK_TYPE: Record<string, WarmupStage> = {
   auto_accept: WarmupStage.Prewarm,
   status: WarmupStage.Active,
 };
+
+// 2026-04-25 · 新绑号 24h 静默期 · 下列任务类型可以跑 · 其他类型全部拒
+export const QUIET_PERIOD_ALLOWED_TASK_TYPES = new Set<string>([
+  'warmup',
+  'maintenance',
+  'profile_refresh',
+]);
+export const FRESH_BIND_QUIET_PERIOD_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class DispatcherService implements OnModuleInit, OnModuleDestroy {
@@ -177,8 +186,9 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       return { action: 'leave-pending-unknown-type' }; // 账号不存在或未挂槽, 保 pending 让人工排查
     }
 
-    // 2026-04-22 · Gap 1 · 槽位 suspended/empty 不分发 · 保 pending · 等 recover
-    if (slot.status === 'suspended' || slot.status === 'empty') {
+    // 2026-04-22 · Gap 1 · 槽位 suspended/empty/quarantine 不分发 · 保 pending
+    // 2026-04-25 · quarantine 加入 (440 明确判死)
+    if (slot.status === 'suspended' || slot.status === 'empty' || slot.status === 'quarantine') {
       return { action: 'skip-slot-offline' };
     }
 
@@ -217,6 +227,19 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       // 落 soft-warn 后仍 run, 不 reject
     }
 
+    // 2026-04-25 · 新绑号 24h 静默期 · 防刚绑就烧号
+    // 只允许 warmup / maintenance / profile_refresh 这类低强度任务
+    if (wa?.registeredAt) {
+      const boundAt = new Date(wa.registeredAt).getTime();
+      const ageMs = now.getTime() - boundAt;
+      if (ageMs < FRESH_BIND_QUIET_PERIOD_MS && !QUIET_PERIOD_ALLOWED_TASK_TYPES.has(task.taskType)) {
+        this.logger.log(
+          `task ${task.id} (${task.taskType}) acc ${accountId} · 新绑 ${Math.round(ageMs / 3600_000)}h < 24h 静默期 · 拒`,
+        );
+        return { action: 'skip-fresh-bind-quiet' };
+      }
+    }
+
     // #6 M8 · 健康分 gate. dry_run 不拦截, 只标记 meta
     const health = await this.dataSource
       .getRepository(AccountHealthEntity)
@@ -251,6 +274,7 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       case 'skip-takeover-active':
       case 'skip-night-window':
       case 'skip-slot-offline':
+      case 'skip-fresh-bind-quiet':
         // 保 pending 让下一轮 tick 重新评估
         return;
       case 'skip-health-high':

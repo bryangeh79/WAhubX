@@ -43,6 +43,17 @@ export interface SlotFingerprint {
   seed: string;
   // Baileys browser 参数形式 — 直接可用
   baileysBrowser: [string, string, string]; // [deviceLabel, platform, appVersion]
+
+  // 2026-04-25 · 稳定性 · baileys socket options per-slot 随机化
+  // 防 WA 通过 "多 slot 同一 keepalive / timeout 模式" 关联识别
+  // 种子稳定 · 同槽位同参数 (重连时指纹一致)
+  baileysOpts: {
+    connectTimeoutMs: number;       // 45-55 s
+    keepAliveIntervalMs: number;    // 15-25 s
+    defaultQueryTimeoutMs: number;  // 55-65 s
+    emitOwnEvents: boolean;
+    markOnlineOnConnect: boolean;
+  };
 }
 
 function buildUserAgent(d: DeviceTemplate): string {
@@ -54,6 +65,22 @@ function pickDeviceForSeed(seed: string): DeviceTemplate {
   const hash = crypto.createHash('sha256').update(seed).digest();
   const idx = hash[0] % DEVICE_POOL.length;
   return DEVICE_POOL[idx];
+}
+
+// 2026-04-25 · 从 seed 稳定派生 baileys options · 每 slot 独立参数 · 但重连不变
+// 用 sha256(seed + 'baileys-opts') 的不同 byte 作为不同参数
+function deriveBaileysOpts(seed: string): SlotFingerprint['baileysOpts'] {
+  const h = crypto.createHash('sha256').update(`${seed}|baileys-opts`).digest();
+  // 0-255 映射到 [min, max]
+  const map = (byte: number, min: number, max: number) =>
+    min + Math.round((byte / 255) * (max - min));
+  return {
+    connectTimeoutMs: map(h[0], 45_000, 55_000),       // 45-55s
+    keepAliveIntervalMs: map(h[1], 15_000, 25_000),    // 15-25s
+    defaultQueryTimeoutMs: map(h[2], 55_000, 65_000),  // 55-65s
+    emitOwnEvents: (h[3] & 1) === 1,                   // 50/50
+    markOnlineOnConnect: (h[4] & 1) === 1,             // 50/50
+  };
 }
 
 /**
@@ -87,6 +114,7 @@ export function generateFingerprint(params: {
     timezone: params.timezone ?? 'Asia/Kuala_Lumpur',
     seed,
     baileysBrowser: [deviceLabel, 'Desktop', dev.chromeVersion.split('.')[0]],
+    baileysOpts: deriveBaileysOpts(seed),
   };
 }
 
@@ -102,7 +130,13 @@ export function readFingerprint(slotIndex: number): SlotFingerprint | null {
   const p = fingerprintFilePath(slotIndex);
   if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf-8')) as SlotFingerprint;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as SlotFingerprint;
+    // 2026-04-25 · 向后兼容 · 老指纹没有 baileysOpts · 从 seed 派生补齐
+    if (!parsed.baileysOpts && parsed.seed) {
+      parsed.baileysOpts = deriveBaileysOpts(parsed.seed);
+      writeFingerprint(slotIndex, parsed);
+    }
+    return parsed;
   } catch {
     return null;
   }
