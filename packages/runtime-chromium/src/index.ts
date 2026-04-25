@@ -18,6 +18,8 @@ import * as path from 'node:path';
 
 import { runStartupChecks, IntegrityCheckFailedError } from './integrity-checks/startup-checks';
 import { loadWaWebAndDetect } from './wa-web/wa-web-loader';
+import { waitForLogin } from './wa-web/wait-for-login';
+import { startQrLiveServer } from './qr-live-server';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -59,8 +61,11 @@ async function main() {
   fs.mkdirSync(diagnosticsDir, { recursive: true });
 
   // ─── Chromium launch args ────────────────────────────────────
+  // 注意: 不在这里加 --user-data-dir · puppeteer 会忽略 args 里的此 flag
+  // 并强行追加自己的 /tmp/puppeteer_dev_profile-XXX · 导致最终 chromium 用的是 temp 目录
+  // 必须用 launch({ userDataDir }) 顶层选项 · 才能让我们的 profileDir 生效
+  // (D6 实测踩坑: ps -ef 看到两个 --user-data-dir · 后者 win)
   const launchArgs: string[] = [
-    `--user-data-dir=${profileDir}`,
     '--no-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu',
@@ -72,6 +77,16 @@ async function main() {
     `--user-agent=${USER_AGENT}`,
   ];
 
+  // D6 · 远程调试 · 让 host 浏览器访问容器 chromium 实时屏幕 · 扫活 QR
+  // (WA Web QR 跟当下 WS session 强绑 · 截图 PNG 扫不上 · 必须看活 canvas)
+  const REMOTE_DEBUGGING = process.env.REMOTE_DEBUGGING === 'true';
+  if (REMOTE_DEBUGGING) {
+    launchArgs.push('--remote-debugging-port=9222');
+    launchArgs.push('--remote-debugging-address=0.0.0.0');
+    // Chromium 111+ 要求显式 allow origin · 否则 /json/* 返 empty
+    launchArgs.push('--remote-allow-origins=*');
+  }
+
   if (PROXY_URL) {
     launchArgs.push(`--proxy-server=${PROXY_URL}`);
     const proxyHost = extractProxyHost(PROXY_URL);
@@ -80,12 +95,13 @@ async function main() {
     }
   }
 
-  log.info({ launchArgs }, 'launching chromium');
+  log.info({ launchArgs, userDataDir: profileDir }, 'launching chromium');
 
   const browser = await puppeteer.launch({
     executablePath: PUPPETEER_EXECUTABLE_PATH,
     headless: true,
     args: launchArgs,
+    userDataDir: profileDir, // ← 必须顶层传 · args 里加 --user-data-dir 会被 puppeteer 忽略
     defaultViewport: { width: 1280, height: 800 },
     timeout: 30_000,
   });
@@ -188,6 +204,49 @@ async function main() {
     const qrPath = path.join(diagnosticsDir, 'last-qr.dataurl.txt');
     fs.writeFileSync(qrPath, result.qrCanvasDataUrl, 'utf-8');
     log.info({ path: qrPath, bytes: result.qrCanvasDataUrl.length }, 'QR data URL persisted');
+  }
+
+  // ─── D6 · QR live server (host 浏览器看活 QR · 用手机扫真画布) ─
+  if (result.state === 'qr' && process.env.QR_LIVE_SERVER !== 'false') {
+    const port = Number(process.env.QR_LIVE_PORT ?? 9701);
+    startQrLiveServer({ page, port, log });
+  }
+
+  // ─── D6 · 命中 qr 后长 poll 等 chat-list (等用户真扫码) ───────
+  // C5/C6 验: 命中 chat-list 后 graceful shutdown · creds 落盘 · 二次 launch 期望
+  // 直接进 chat-list (因为 user-data-dir 含 IndexedDB session)
+  if (result.state === 'qr') {
+    log.info('D6 · entering wait-for-login (long poll up to 10 min)');
+    const loginResult = await waitForLogin({ page, diagnosticsDir, log });
+    log.info(loginResult, 'D6 wait-for-login result');
+    if (loginResult.outcome === 'chat-list') {
+      log.info('D6 · LOGIN SUCCESS · waiting 15s for Chromium to flush IndexedDB/Cookies before close');
+      // Chromium IndexedDB / Cookies 异步 flush · 太快 close 会丢 session
+      // 实测: 不等的话 wa-data-test/profile 目录都不会创建 (D6 实测踩坑)
+      await new Promise((r) => setTimeout(r, 15_000));
+
+      // 主动触发 page.evaluate · 强制 IndexedDB tx 完成
+      try {
+        await page.evaluate(() => {
+          // WA Web 把 session 存 'wawc_db' / 'model-storage' 等 IndexedDB
+          // 等所有 transaction 完成 · 没直接 API · 用 storage estimate 触发 flush
+          return navigator.storage?.estimate?.();
+        });
+      } catch {
+        /* ignore */
+      }
+
+      log.info('D6 · graceful shutdown to persist session for C5/C6 verify');
+      try {
+        await browser.close();
+      } catch (err) {
+        log.warn({ err: err instanceof Error ? err.message : err }, 'browser.close after login failed');
+      }
+      log.info('D6 · runtime exit code=0 · 重启同 user-data-dir 应免扫码');
+      process.exit(0);
+    }
+  } else if (result.state === 'chat-list') {
+    log.info('D6 · launched directly into chat-list · session restored from user-data-dir (C6 PASS)');
   }
 
   // ─── 占位心跳 (D4-5 替换为 WS) ────────────────────────────────
