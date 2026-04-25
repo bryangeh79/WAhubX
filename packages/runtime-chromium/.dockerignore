@@ -3,3 +3,5 @@ dist
 *.log
 .env
 .git
+wa-data-test
+wa-data-*

@@ -1,0 +1,6 @@
+# 本地测试输出 (docker volume mount 目标 · 含截图证据等)
+wa-data-test/
+wa-data-*/
+dist/
+*.log
+.env

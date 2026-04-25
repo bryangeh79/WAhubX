@@ -25,11 +25,12 @@ else
   echo "[init] WARNING: 在 SaaS 部署必须开 cap_add: [NET_ADMIN] · 否则 C7.3 不通过"
 fi
 
-# 必传环境变量检查
+# 必传环境变量检查 (D2 阶段 · WS bridge D4-5 才接 · 当前可选)
 : "${SLOT_ID:?SLOT_ID required}"
 : "${TENANT_ID:?TENANT_ID required}"
 : "${SESSION_DIR:=/app/wa-data}"
-: "${CONTROL_PLANE_WS_URL:?CONTROL_PLANE_WS_URL required}"
+# CONTROL_PLANE_WS_URL D4-5 才用 · 当前可选
+: "${CONTROL_PLANE_WS_URL:=}"
 
 # 用 user-data-dir 持久化 (cookies / IndexedDB / cache)
 mkdir -p "$SESSION_DIR"
