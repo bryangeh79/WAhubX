@@ -1,0 +1,418 @@
+// 2026-04-25 · D12-2 · per-slot Runtime 进程管理 (Codex 锁定 6 边界)
+//
+// 范围:
+//   ✓ start(slotId) · stop(slotId) · getProcessState(slotId) · listAll
+//   ✓ 单实例约束 (Codex 边界 2): 已存在 handle 直接返回当前状态 · 不替换
+//   ✓ stdout/stderr/exit 转 backend pino · 带 slotId/pid tag (边界 3)
+//   ✓ 退出分类 normal-stop / spawn-failed / unexpected-exit (边界 4)
+//   ✓ 启动目标先支持 dev 形态 (node + dist entry · 边界 5)
+//
+// 不在范围:
+//   ✗ bind/send/inbound 业务语义 (走 RuntimeBridgeService · 不揉一起 · 边界 1)
+//   ✗ auto-respawn / quarantine / 状态机自愈 (D12-3+)
+//   ✗ active slot 自动启动 (D12-3)
+//
+// Windows spawn 注意 (Codex 实现建议):
+//   ✓ executable + args 数组分开传 · 不自己拼整条 command string
+//   ✓ windowsHide: true · 不弹 console window
+
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleDestroy,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { ChildProcess, spawn } from 'node:child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { DataSource } from 'typeorm';
+import { resolveRuntimeLaunchConfig, type RuntimeLaunchConfig } from '@wahubx/shared';
+import { AccountSlotEntity } from '../slots/account-slot.entity';
+import { ProxyEntity } from '../proxies/proxy.entity';
+import {
+  type ProcessState,
+  type ProcessExitClass,
+  initialProcessState,
+} from './process-state';
+
+interface ProcessHandle {
+  state: ProcessState;
+  child: ChildProcess | null;
+  /** stop() 已发 · 用于 close 事件分类 */
+  stopRequested: boolean;
+}
+
+@Injectable()
+export class RuntimeProcessManagerService implements OnModuleDestroy {
+  private readonly logger = new Logger(RuntimeProcessManagerService.name);
+  private readonly handles = new Map<number, ProcessHandle>();
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly config: ConfigService,
+  ) {}
+
+  async onModuleDestroy(): Promise<void> {
+    // 进程退出时把所有子进程也收掉 · 不留孤儿
+    const slots = Array.from(this.handles.keys());
+    this.logger.log(`onModuleDestroy · stopping ${slots.length} runtime processes`);
+    await Promise.all(slots.map((s) => this.stop(s, { graceful: true, timeoutMs: 5_000 }).catch(() => {})));
+  }
+
+  // ═══ 公共 API ════════════════════════════════════════════════════
+
+  /**
+   * 启动 runtime 进程 (per-slot · Codex 边界 2 单实例约束)
+   * @returns 当前 ProcessState · running / starting / failed
+   */
+  async start(slotId: number): Promise<ProcessState> {
+    // 单实例: 已存在 handle 且仍 running/starting → 直接返
+    const existing = this.handles.get(slotId);
+    if (existing && (existing.state.status === 'running' || existing.state.status === 'starting')) {
+      this.logger.log(
+        `slot ${slotId} runtime already ${existing.state.status} · pid=${existing.state.pid} · 返当前 state`,
+      );
+      return { ...existing.state };
+    }
+
+    // 拉 slot + 关联 proxy
+    const slotRepo = this.dataSource.getRepository(AccountSlotEntity);
+    const slot = await slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) {
+      throw new NotFoundException(`slot ${slotId} 不存在`);
+    }
+
+    let proxy: ProxyEntity | null = null;
+    if (slot.proxyId) {
+      proxy = await this.dataSource
+        .getRepository(ProxyEntity)
+        .findOne({ where: { id: slot.proxyId } });
+    }
+
+    // 解析 RuntimeLaunchConfig
+    const cfg = resolveRuntimeLaunchConfig({
+      slotId: slot.id,
+      slotIndex: slot.slotIndex,
+      tenantId: slot.tenantId,
+      proxyUrl: proxy ? this.buildProxyUrl(proxy) : undefined,
+      proxyUser: proxy?.username ?? undefined,
+      proxyPass: proxy?.password ?? undefined,
+      proxyCountry: proxy?.country ?? undefined,
+      controlPlaneWsUrl: this.config.get<string>('CONTROL_PLANE_WS_URL_FOR_RUNTIME')
+        ?? this.buildDefaultBridgeUrl(),
+      runtimeAuthToken: this.config.get<string>('RUNTIME_AUTH_TOKEN', 'dev-runtime-token'),
+      // soakMode/humanBehavior 暂不在 ProcessManager 控 · runtime 自己 env 读
+    });
+
+    if (!cfg.chromiumExecutableExists) {
+      this.logger.error(
+        `slot ${slotId} · Chromium 可执行路径不存在 (${cfg.chromiumExecutablePath}) · spawn-failed`,
+      );
+      const failedHandle = this.upsertHandle(slotId);
+      failedHandle.state.status = 'failed';
+      failedHandle.state.exitClass = 'spawn-failed';
+      failedHandle.state.lastError = `Chromium not found: ${cfg.chromiumExecutablePath}`;
+      return { ...failedHandle.state };
+    }
+
+    // 解析 runtime entry 路径
+    const entryPath = this.resolveRuntimeEntry();
+    if (!fs.existsSync(entryPath)) {
+      this.logger.error(`runtime entry 不存在 · ${entryPath} · spawn-failed`);
+      const failedHandle = this.upsertHandle(slotId);
+      failedHandle.state.status = 'failed';
+      failedHandle.state.exitClass = 'spawn-failed';
+      failedHandle.state.lastError = `runtime entry missing: ${entryPath}`;
+      return { ...failedHandle.state };
+    }
+
+    // 构造 env (Codex 实现建议: executable + args 分开 · 不拼 command string)
+    const childEnv = this.buildChildEnv(cfg);
+
+    const handle = this.upsertHandle(slotId);
+    handle.state.status = 'starting';
+    handle.state.startAttempts += 1;
+    handle.state.lastError = null;
+    // D12-2 · 重置上轮 exit 信息 (防上次 'spawn-failed' 被 classifyExit 保留)
+    handle.state.exitClass = 'never-started';
+    handle.state.exitCode = null;
+    handle.state.exitSignal = null;
+    handle.state.stoppedAt = null;
+    handle.state.pid = null;
+    handle.state.startedAt = null;
+    handle.stopRequested = false;
+
+    this.logger.log(
+      `slot ${slotId} · spawn runtime · entry=${entryPath} · exe=${cfg.chromiumExecutablePath} · attempt=${handle.state.startAttempts}`,
+    );
+
+    let child: ChildProcess;
+    try {
+      child = spawn(process.execPath, [entryPath], {
+        env: childEnv,
+        cwd: path.dirname(entryPath),
+        // pipe stdio · 我们要转发日志
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Windows 不弹 console window
+        windowsHide: true,
+        // 不 detached · 父进程退就把子进程也带走
+        detached: false,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error({ err: msg }, `slot ${slotId} · spawn 调用失败`);
+      handle.state.status = 'failed';
+      handle.state.exitClass = 'spawn-failed';
+      handle.state.lastError = msg;
+      handle.child = null;
+      return { ...handle.state };
+    }
+
+    handle.child = child;
+    this.wireChildEvents(handle);
+    return { ...handle.state };
+  }
+
+  /**
+   * 停止 runtime 进程 (graceful 默认)
+   * graceful=true → SIGTERM 等 timeoutMs 没退就 SIGKILL
+   * graceful=false → 直接 SIGKILL
+   */
+  async stop(
+    slotId: number,
+    opts: { graceful?: boolean; timeoutMs?: number } = {},
+  ): Promise<ProcessState> {
+    const handle = this.handles.get(slotId);
+    if (!handle) {
+      return initialProcessState(slotId);
+    }
+    if (handle.state.status === 'stopped' || handle.state.status === 'failed') {
+      return { ...handle.state };
+    }
+    const graceful = opts.graceful ?? true;
+    const timeoutMs = opts.timeoutMs ?? 10_000;
+    const child = handle.child;
+    if (!child || child.killed || child.exitCode !== null) {
+      handle.state.status = 'stopped';
+      return { ...handle.state };
+    }
+
+    handle.stopRequested = true;
+    handle.state.status = 'stopping';
+    this.logger.log(
+      `slot ${slotId} · stop · pid=${child.pid} · graceful=${graceful} · timeoutMs=${timeoutMs}`,
+    );
+
+    if (!graceful) {
+      child.kill('SIGKILL');
+    } else {
+      child.kill('SIGTERM');
+      // 超时后 SIGKILL
+      const force = setTimeout(() => {
+        if (handle.child && !handle.child.killed) {
+          this.logger.warn(`slot ${slotId} · graceful 超时 ${timeoutMs}ms · SIGKILL`);
+          handle.child.kill('SIGKILL');
+        }
+      }, timeoutMs);
+      // 等 close
+      await new Promise<void>((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (handle.state.status === 'stopped' || handle.state.status === 'failed') {
+            clearInterval(checkInterval);
+            clearTimeout(force);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+    return { ...handle.state };
+  }
+
+  /**
+   * 拉某 slot 当前状态 · 不存在则返 initial
+   */
+  getProcessState(slotId: number): ProcessState {
+    const handle = this.handles.get(slotId);
+    return handle ? { ...handle.state } : initialProcessState(slotId);
+  }
+
+  /**
+   * 列出所有 slot 当前进程状态 · 用于 admin 诊断
+   */
+  listAll(): ProcessState[] {
+    return Array.from(this.handles.values()).map((h) => ({ ...h.state }));
+  }
+
+  // ═══ private ═════════════════════════════════════════════════════
+
+  private upsertHandle(slotId: number): ProcessHandle {
+    let handle = this.handles.get(slotId);
+    if (!handle) {
+      handle = {
+        state: initialProcessState(slotId),
+        child: null,
+        stopRequested: false,
+      };
+      this.handles.set(slotId, handle);
+    }
+    return handle;
+  }
+
+  private wireChildEvents(handle: ProcessHandle): void {
+    const child = handle.child;
+    if (!child) return;
+    const slotId = handle.state.slotId;
+
+    child.on('spawn', () => {
+      handle.state.status = 'running';
+      handle.state.pid = child.pid ?? null;
+      handle.state.startedAt = Date.now();
+      this.logger.log(`slot ${slotId} · runtime spawned · pid=${child.pid}`);
+    });
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      this.forwardLog('stdout', slotId, child.pid ?? null, chunk);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      this.forwardLog('stderr', slotId, child.pid ?? null, chunk);
+    });
+
+    child.on('error', (err) => {
+      // spawn 之前的失败 (e.g. ENOENT)
+      this.logger.error({ err: err.message }, `slot ${slotId} · child error`);
+      if (handle.state.status === 'starting') {
+        handle.state.status = 'failed';
+        handle.state.exitClass = 'spawn-failed';
+        handle.state.lastError = err.message;
+      } else {
+        handle.state.lastError = err.message;
+      }
+    });
+
+    child.on('close', (code, signal) => {
+      handle.state.exitCode = code;
+      handle.state.exitSignal = signal;
+      handle.state.stoppedAt = Date.now();
+      handle.child = null;
+
+      const exitClass = this.classifyExit(handle, code, signal);
+      handle.state.exitClass = exitClass;
+      handle.state.status = exitClass === 'normal-stop' ? 'stopped' : 'failed';
+      this.logger.log(
+        `slot ${slotId} · runtime closed · pid=${handle.state.pid} · code=${code} signal=${signal} · class=${exitClass}`,
+      );
+    });
+  }
+
+  private classifyExit(
+    handle: ProcessHandle,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): ProcessExitClass {
+    // 'spawn-failed' 已在 'error' handler 里设过的不要被覆盖
+    if (handle.state.exitClass === 'spawn-failed') return 'spawn-failed';
+    // 用户调过 stop · 不论 code 都算 normal-stop
+    if (handle.stopRequested) return 'normal-stop';
+    // 进程自己 exit 0 · 也算 normal-stop (graceful self-shutdown)
+    if (code === 0) return 'normal-stop';
+    // 其他: 没人 stop · 但进程死了 = unexpected
+    return 'unexpected-exit';
+  }
+
+  /**
+   * 转发子进程 stdout/stderr · 加 tag · pino 统一打 (Codex 边界 3)
+   */
+  private forwardLog(
+    stream: 'stdout' | 'stderr',
+    slotId: number,
+    pid: number | null,
+    chunk: Buffer,
+  ): void {
+    const text = chunk.toString('utf-8').trim();
+    if (!text) return;
+    // 多行 split · 每行一条 log
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // runtime 自己已用 pino · stdout 是 JSON 行 · 我们原样 forward (Codex 边界 3 · 不重组)
+      if (stream === 'stderr') {
+        this.logger.warn(`[runtime slot=${slotId} pid=${pid ?? '?'}] ${trimmed}`);
+      } else {
+        this.logger.log(`[runtime slot=${slotId} pid=${pid ?? '?'}] ${trimmed}`);
+      }
+    }
+  }
+
+  private buildChildEnv(cfg: RuntimeLaunchConfig): NodeJS.ProcessEnv {
+    // 把 cfg 投影到 env vars · runtime 启动会再调 resolveRuntimeLaunchConfigFromEnv
+    // 这样保 backend / runtime 用同一份 resolver
+    const env: NodeJS.ProcessEnv = {
+      ...process.env, // 继承 PATH 等
+      // D12-2 · 强制 production · 让 runtime 跳过 pino-pretty transport (devDep 在 spawn 子进程里 resolve 失败)
+      // 跟 D6 Dockerfile 同款 (ENV NODE_ENV=production)
+      NODE_ENV: 'production',
+      SLOT_ID: String(cfg.slotId),
+      SLOT_INDEX: String(cfg.slotIndex),
+      TENANT_ID: String(cfg.tenantId),
+      SESSION_DIR: cfg.dataDir,
+      PUPPETEER_EXECUTABLE_PATH: cfg.chromiumExecutablePath,
+      USER_AGENT: cfg.userAgent,
+      RUNTIME_AUTH_TOKEN: cfg.runtimeAuthToken,
+    };
+    // D12-2 · Windows 跳 integrity-checks (iptables 不存在) · D12-3+ 改为按 cfg.dnsStrategy 动态跳
+    // Linux Docker 仍跑全套检查 (iptables-hard 路径)
+    if (cfg.os === 'win32') env.SKIP_INTEGRITY_CHECKS = 'true';
+    if (cfg.proxyUrl) env.PROXY_URL = cfg.proxyUrl;
+    if (cfg.proxyAuth) {
+      env.PROXY_USER = cfg.proxyAuth.user;
+      env.PROXY_PASS = cfg.proxyAuth.pass;
+    }
+    if (cfg.proxyCountry) env.PROXY_COUNTRY = cfg.proxyCountry;
+    if (cfg.controlPlaneWsUrl) env.CONTROL_PLANE_WS_URL = cfg.controlPlaneWsUrl;
+    if (cfg.soakMode) env.SOAK_MODE = 'true';
+    if (!cfg.humanBehaviorEnabled) env.HUMAN_BEHAVIOR_ENABLED = 'false';
+    if (!cfg.qrLiveServerEnabled) env.QR_LIVE_SERVER = 'false';
+    env.QR_LIVE_PORT = String(cfg.qrLiveServerPort);
+    return env;
+  }
+
+  /**
+   * 拉 runtime entry 路径 (Codex 边界 5: 先 dev 形态 · D13 加 bundle 路径)
+   * 优先级:
+   *   1. env RUNTIME_ENTRY_PATH
+   *   2. workspace 同级 · 相对 backend dist/main.js 推算
+   *   3. 兜底警告
+   */
+  private resolveRuntimeEntry(): string {
+    const envOverride = this.config.get<string>('RUNTIME_ENTRY_PATH');
+    if (envOverride) return path.resolve(envOverride);
+    // backend dist/main.js · runtime 在同 monorepo · 相对位置:
+    //   <root>/packages/backend/dist/main.js
+    //   <root>/packages/runtime-chromium/dist/index.js
+    const backendDist = path.dirname(require.main?.filename ?? '');
+    const candidate = path.resolve(backendDist, '..', '..', 'runtime-chromium', 'dist', 'index.js');
+    return candidate;
+  }
+
+  /**
+   * 把 ProxyEntity 投到 URL · 复用现 proxy-config 风格
+   */
+  private buildProxyUrl(proxy: ProxyEntity): string {
+    // proxy_type: http | socks5 | socks4 | https
+    const scheme = proxy.proxyType === 'socks5' || proxy.proxyType === 'socks4' ? proxy.proxyType : 'http';
+    return `${scheme}://${proxy.host}:${proxy.port}`;
+  }
+
+  /**
+   * 没显式 CONTROL_PLANE_WS_URL_FOR_RUNTIME 时 · 拼默认值
+   * Linux Docker: 走 host.docker.internal (要 --add-host)
+   * Windows native: 走 127.0.0.1 (D12-3 后两边都走 native · 这里默认 localhost)
+   */
+  private buildDefaultBridgeUrl(): string {
+    const port = this.config.get<string>('RUNTIME_BRIDGE_PORT', '9711');
+    const host = process.platform === 'linux' ? 'host.docker.internal' : '127.0.0.1';
+    return `ws://${host}:${port}/runtime`;
+  }
+}

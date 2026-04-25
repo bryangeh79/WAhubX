@@ -29,6 +29,7 @@ import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { IntelligentReplyModule } from './modules/intelligent-reply/intelligent-reply.module';
 import { RuntimeBridgeModule } from './modules/runtime-bridge/runtime-bridge.module';
 import { SlotRuntimeModule } from './modules/slot-runtime/slot-runtime.module';
+import { RuntimeProcessModule } from './modules/runtime-process/runtime-process.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { SlotRuntimeModule } from './modules/slot-runtime/slot-runtime.module';
     IntelligentReplyModule,
     RuntimeBridgeModule,
     SlotRuntimeModule,
+    RuntimeProcessModule,
     HealthModule,
   ],
   providers: [
