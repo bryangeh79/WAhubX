@@ -34,6 +34,8 @@ interface InboundEvent {
   content?: string | null;
   messageId?: string;
   sentAt?: string;
+  // 2026-04-25 · D11-3 · slot 角色 · broadcast 号 inbound 不进 auto-reply
+  slotRole?: 'broadcast' | 'customer_service';
 }
 
 @Injectable()
@@ -60,6 +62,17 @@ export class AutoReplyDeciderService {
       if (!evt?.remoteJid || !evt.accountId) return;
       if (evt.remoteJid.includes('@g.us')) return; // 群消息
       if (evt.msgType && evt.msgType !== 'text') return; // 先只处理 text
+
+      // 2026-04-25 · D11-3 · 角色路由门禁 (Codex 边界 ②④)
+      // 仅 customer_service 槽位的账号触发 auto-reply · broadcast 号 log skip
+      // role=undefined (老数据未补) 兜底跳 · 防误触发
+      if (evt.slotRole !== 'customer_service') {
+        this.logger.log(
+          `auto-reply gate · skip-role-mismatch · acc=${evt.accountId} · slotRole="${evt.slotRole ?? 'unset'}" · ` +
+            `仅 customer_service 槽位接 auto-reply`,
+        );
+        return;
+      }
       const phone = this.jidToPhone(evt.remoteJid);
       if (!phone) return;
       const content = (evt.content ?? '').trim();

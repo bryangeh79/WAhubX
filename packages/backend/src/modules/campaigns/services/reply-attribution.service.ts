@@ -22,6 +22,8 @@ interface InboundEvent {
   waMessageId?: string | null;
   sentAt?: string;
   manual?: boolean;
+  // 2026-04-25 · D11-3 · slot 角色 · 仅 customer_service 号的 inbound 才算回复归因
+  slotRole?: 'broadcast' | 'customer_service';
 }
 
 const ATTRIBUTION_WINDOW_DAYS = 7;
@@ -38,6 +40,19 @@ export class ReplyAttributionService {
       if (!evt?.remoteJid || !evt.accountId) return;
       // 忽略群消息
       if (evt.remoteJid.includes('@g.us')) return;
+
+      // 2026-04-25 · D11-3 · 角色路由门禁 (Codex 边界 ②)
+      // 仅 customer_service 槽位的 inbound 才做回复归因
+      // 业务逻辑: 客户回的是客服号 (广告里直接告知 contact 客服) · 不是回广告号
+      // broadcast 号收到的 inbound 视为异常 / 误回 · log skip
+      if (evt.slotRole !== 'customer_service') {
+        this.logger.log(
+          `reply-attribution gate · skip-role-mismatch · acc=${evt.accountId} · slotRole="${evt.slotRole ?? 'unset'}" · ` +
+            `仅 customer_service 槽位做回复归因`,
+        );
+        return;
+      }
+
       const phone = jidToPhone(evt.remoteJid);
       if (!phone) return;
 

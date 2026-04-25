@@ -2015,6 +2015,16 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     // 走这条路径, 接管 UI 不应在非接管期间收到它们).
     if (this.eventBus && params.direction === MessageDirection.In) {
       try {
+        // 2026-04-25 · D11-3 · 查 slot.role 注入 payload · 业务订阅者按 role gate
+        let slotRole: 'broadcast' | 'customer_service' | undefined;
+        try {
+          const slot = await this.dataSource
+            .getRepository(AccountSlotEntity)
+            .findOne({ where: { accountId: params.accountId } });
+          slotRole = (slot?.role as 'broadcast' | 'customer_service' | undefined) ?? undefined;
+        } catch {
+          /* 查不到 role 不阻塞 emit · 订阅者会兜底 */
+        }
         this.eventBus.emit('takeover.message.in', {
           accountId: params.accountId,
           contactId,
@@ -2027,6 +2037,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           waMessageId: params.waMessageId,
           sentAt: params.sentAt.toISOString(),
           manual: false,
+          slotRole,
         });
       } catch (err) {
         this.logger.debug(`emit takeover.message.in failed: ${err instanceof Error ? err.message : err}`);
