@@ -37,6 +37,13 @@ const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH ?? '/usr
 
 const HOST_PUBLIC_IP = process.env.HOST_PUBLIC_IP ?? '';
 
+// 2026-04-25 · D5 · UA 强制覆盖 · 已实锤破绽: 默认 UA 含 "HeadlessChrome" → WA 拒
+// 默认: Linux x86_64 + Chrome 147 (匹配容器实际 chromium 版本)
+// 生产应由 fingerprint.ts 派生 · 但 D5 范围只修这一条破绽 · 先用静态默认值
+const USER_AGENT =
+  process.env.USER_AGENT ??
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
+
 // ═══ 主流程 ════════════════════════════════════════════════════════
 
 async function main() {
@@ -61,6 +68,8 @@ async function main() {
     // C7.3.2 · DNS leak 工程封死
     '--disable-features=AsyncDns,DnsOverHttps',
     '--enable-features=NetworkServiceInProcess',
+    // D5 · Layer 1 · UA 覆盖 (已实锤破绽: 默认 UA 含 HeadlessChrome → WA 拒)
+    `--user-agent=${USER_AGENT}`,
   ];
 
   if (PROXY_URL) {
@@ -84,6 +93,43 @@ async function main() {
   log.info({ pid: browser.process()?.pid }, 'chromium launched');
 
   const page = (await browser.pages())[0] ?? (await browser.newPage());
+
+  // D5 · Layer 2 · page.setUserAgent (覆盖 navigator.userAgent + 出站请求 header)
+  await page.setUserAgent(USER_AGENT);
+  log.info({ ua: USER_AGENT }, 'D5 page.setUserAgent applied');
+
+  // D5 · Layer 3 · CDP Network.setUserAgentOverride (彻底覆盖 · 含子 frame 和 service worker)
+  // userAgentMetadata 必须跟 UA 一致 · 否则 Client Hints 揭穿
+  try {
+    const cdp = await page.createCDPSession();
+    await cdp.send('Network.setUserAgentOverride', {
+      userAgent: USER_AGENT,
+      acceptLanguage: 'en-US,en;q=0.9',
+      platform: 'Linux x86_64',
+      userAgentMetadata: {
+        brands: [
+          { brand: 'Not_A Brand', version: '8' },
+          { brand: 'Chromium', version: '147' },
+          { brand: 'Google Chrome', version: '147' },
+        ],
+        fullVersionList: [
+          { brand: 'Not_A Brand', version: '8.0.0.0' },
+          { brand: 'Chromium', version: '147.0.0.0' },
+          { brand: 'Google Chrome', version: '147.0.0.0' },
+        ],
+        platform: 'Linux',
+        platformVersion: '6.1.0',
+        architecture: 'x86',
+        bitness: '64',
+        wow64: false,
+        model: '',
+        mobile: false,
+      },
+    } as Parameters<typeof cdp.send>[1]);
+    log.info('D5 CDP Network.setUserAgentOverride applied (incl. userAgentMetadata)');
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, 'CDP UA override failed · falling back to layer 1+2');
+  }
 
   // proxy auth (HTTP 代理才需 · SOCKS auth 走 URL)
   if (PROXY_USER && PROXY_URL.startsWith('http')) {
