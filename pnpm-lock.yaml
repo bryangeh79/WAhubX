@@ -133,6 +133,9 @@ importers:
       uuid:
         specifier: ^13.0.0
         version: 13.0.0
+      ws:
+        specifier: ^8.18.0
+        version: 8.20.0
       yauzl:
         specifier: ^3.3.0
         version: 3.3.0
@@ -182,6 +185,9 @@ importers:
       '@types/uuid':
         specifier: ^11.0.0
         version: 11.0.0
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.18.1
       '@types/yauzl':
         specifier: ^2.10.3
         version: 2.10.3

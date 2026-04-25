@@ -23,6 +23,7 @@ import { startQrLiveServer } from './qr-live-server';
 import { detectCountry } from './wa-web/detect-country';
 import { injectStealthOverrides } from './wa-web/stealth-inject';
 import { IdleActivityScheduler } from './idle-activity';
+import { RuntimeWsClient } from './runtime-ws-client';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -61,6 +62,12 @@ const HUMAN_BEHAVIOR_ENABLED = process.env.HUMAN_BEHAVIOR_ENABLED !== 'false';
 // 默认 false (D6 测模式 · 登录后 close)
 // 设 'true' = 登录后不 close · 启 idle 调度器 · 24h 长跑
 const SOAK_MODE = process.env.SOAK_MODE === 'true';
+
+// 2026-04-25 · D8-1 · 控制面 WS 桥
+// 不设 = standalone 跑 (D6 测) · 设了 = 连 backend 控制面
+// 例: ws://host.docker.internal:9711/runtime
+const CONTROL_PLANE_WS_URL = process.env.CONTROL_PLANE_WS_URL ?? '';
+const RUNTIME_AUTH_TOKEN = process.env.RUNTIME_AUTH_TOKEN ?? 'dev-runtime-token';
 
 // ═══ 主流程 ════════════════════════════════════════════════════════
 
@@ -228,6 +235,29 @@ async function main() {
     log.warn({ err: err instanceof Error ? err.message : err }, 'D7-2 stealth inject failed · 继续走但反检测可能减弱');
   }
 
+  // ─── D8-1 · 启 WS client (尽早 · 不阻塞主流程) ─────────────────
+  // 必须在 wait-for-login 之前启 · 否则 QR 阶段 main 阻塞 · WS 永远不连
+  // pageState 用 mutable g_state 异步同步 · 主流程更新值即可
+  let g_state: 'qr' | 'chat-list' | 'splash' | 'splash-stuck' | 'unknown' | 'connecting' | 'closed' = 'connecting';
+  let wsClient: RuntimeWsClient | null = null;
+  if (CONTROL_PLANE_WS_URL) {
+    wsClient = new RuntimeWsClient({
+      controlPlaneUrl: CONTROL_PLANE_WS_URL,
+      authToken: RUNTIME_AUTH_TOKEN,
+      slotId: parseInt(SLOT_ID, 10) || 0,
+      tenantId: parseInt(TENANT_ID, 10) || 0,
+      log,
+      getPageState: () => g_state,
+    });
+    wsClient.start();
+    log.info(
+      { url: CONTROL_PLANE_WS_URL.replace(/token=[^&]+/, 'token=***') },
+      'D8-1 · WS bridge to backend started (early init · before integrity-checks)',
+    );
+  } else {
+    log.info('D8-1 · CONTROL_PLANE_WS_URL not set · running standalone (D6 test mode)');
+  }
+
   // ─── D3 · integrity-checks · fail-fast 不进 WA Web ────────────
   try {
     const checkReport = await runStartupChecks({
@@ -263,6 +293,13 @@ async function main() {
 
   // ─── D2 Step 1-4 · 加载 WA Web + 状态识别 + 截图证据 ────────────
   const result = await loadWaWebAndDetect(page, diagnosticsDir, log);
+
+  // D8-1 · 状态同步给 WS client (心跳里 backend 看的 pageState 实时反映)
+  if (result.state === 'qr' || result.state === 'chat-list' || result.state === 'splash' || result.state === 'splash-stuck') {
+    g_state = result.state;
+  } else {
+    g_state = 'unknown';
+  }
 
   log.info(
     {
@@ -311,6 +348,8 @@ async function main() {
     const loginResult = await waitForLogin({ page, diagnosticsDir, log });
     log.info(loginResult, 'D6 wait-for-login result');
     if (loginResult.outcome === 'chat-list') {
+      // D8-1 · 状态同步: qr → chat-list
+      g_state = 'chat-list';
       log.info(
         { soakMode: SOAK_MODE },
         'LOGIN SUCCESS · waiting 15s for Chromium to flush IndexedDB/Cookies',
@@ -363,6 +402,9 @@ async function main() {
     if (idleScheduler) {
       idleScheduler.stop();
     }
+    if (wsClient) {
+      await wsClient.stop();
+    }
     try {
       await browser.close();
     } catch (err) {
@@ -374,8 +416,12 @@ async function main() {
   process.on('SIGINT', () => void shutdown('SIGINT'));
 
   log.info(
-    { soakMode: SOAK_MODE, humanBehavior: HUMAN_BEHAVIOR_ENABLED },
-    'runtime ready · D7-1 idle scheduler controlled by SOAK_MODE',
+    {
+      soakMode: SOAK_MODE,
+      humanBehavior: HUMAN_BEHAVIOR_ENABLED,
+      wsBridge: !!wsClient,
+    },
+    'runtime ready · D8-1 WS bridge active when configured',
   );
 }
 
