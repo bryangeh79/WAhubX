@@ -82,12 +82,13 @@ export interface SendTextCommand extends WorkerCommandBase {
 export interface SendMediaCommand extends WorkerCommandBase {
   type: 'send-media';
   to: string;
-  mediaType: 'image' | 'video' | 'voice' | 'audio';
+  mediaType: 'image' | 'video' | 'voice' | 'audio' | 'file';
   // 父进程把文件读成 base64 · worker 解码后发 (避免 worker 访问父进程磁盘路径可能不一致)
   mediaBase64: string;
   mimetype?: string;
   caption?: string;
-  ptt?: boolean; // 仅 voice 用 · true = 语音消息
+  ptt?: boolean;       // 仅 voice 用 · true = 语音消息
+  fileName?: string;   // 仅 file 用 · WA document 必需文件名
 }
 
 export interface SendPresenceCommand extends WorkerCommandBase {

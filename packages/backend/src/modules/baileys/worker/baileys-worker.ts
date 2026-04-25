@@ -448,6 +448,14 @@ async function handleSendMedia(cmd: SendMediaCommand): Promise<void> {
       case 'audio':
         content = { audio: buf, mimetype: cmd.mimetype ?? 'audio/ogg; codecs=opus', ptt: cmd.ptt ?? cmd.mediaType === 'voice' };
         break;
+      case 'file':
+        content = {
+          document: buf,
+          fileName: cmd.fileName ?? 'file.bin',
+          mimetype: cmd.mimetype ?? 'application/octet-stream',
+          caption: cmd.caption,
+        };
+        break;
       default:
         ack(cmd.requestId, false, undefined, `unsupported media type: ${String(cmd.mediaType)}`);
         return;

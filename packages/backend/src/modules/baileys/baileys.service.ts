@@ -278,6 +278,15 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return this.pool.get(slotId) ?? null;
   }
 
+  // 2026-04-25 · Phase 2 · 通用 health check · executor 用作 "在线吗"
+  // worker 模式下走 workerManager · 老路径走 pool
+  isSlotOnline(slotId: number): boolean {
+    if (WORKER_MODE_ENABLED() && this.workerManager) {
+      return this.workerManager.hasWorker(slotId);
+    }
+    return this.pool.has(slotId);
+  }
+
   // 2026-04-25 · Phase 2 · 频道 metadata · worker 模式走 IPC · 否则走老 sock
   async newsletterMetadata(
     slotId: number,
@@ -553,15 +562,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }
     const jid = this.normalizeJid(to);
 
-    // 2026-04-25 · Phase 2 · worker 模式走子进程 (file 型在 WA 协议里是 document · worker 用 audio 接收 voice+audio)
+    // 2026-04-25 · Phase 2 · worker 模式走子进程 · 全类型支持 (image/video/voice/file)
     if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
-      // Worker 的 send-media 支持 image/video/voice/audio · 'file' 映射到 audio 不合适 · 特殊处理
-      if (type === 'file') {
-        throw new BadRequestException(
-          'Phase 2 worker 模式下文件类型尚未支持 · 请先用其他类型或临时关 WA_WORKER_MODE',
-        );
-      }
-      // 打字/录音模拟
+      // 打字/录音模拟 · file 跟 image/video 一样用 composing
       const presenceType: 'recording' | 'composing' = type === 'voice' ? 'recording' : 'composing';
       const len = options.caption?.length ?? (type === 'voice' ? 30 : 12);
       const perChar = 80 + Math.random() * 70;
@@ -577,6 +580,7 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         mimetype: options.mimeType,
         caption: options.caption,
         ptt: type === 'voice',
+        fileName: options.filename,
       });
       const waMessageId = ret.waMessageId;
       // 落盘备份
@@ -593,7 +597,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       const msgTypeEnum =
         type === 'image' ? MessageType.Image :
         type === 'video' ? MessageType.Video :
-        MessageType.Voice;
+        type === 'voice' ? MessageType.Voice :
+        MessageType.File;
       await this.persistMessage({
         accountId: slot.accountId,
         remoteJid: jid,
@@ -862,11 +867,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(`媒体大小超过 WA 16MB 上限 (${buffer.length} bytes)`);
     }
 
-    // 2026-04-25 · Phase 2 · worker 模式
+    // 2026-04-25 · Phase 2 · worker 模式 · 支持全类型 (image/video/voice/file)
     if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
-      if (type === 'file') {
-        throw new BadRequestException('Phase 2 worker 模式下 status file 类型尚未支持');
-      }
       const ret = await this.workerManager.sendMedia(
         slotId,
         'status@broadcast',
@@ -876,13 +878,15 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
           mimetype: options.mimeType,
           caption: options.caption,
           ptt: type === 'voice',
+          fileName: options.filename,
         },
       );
       const waMessageId = ret.waMessageId;
       const msgTypeEnum =
         type === 'image' ? MessageType.Image :
         type === 'video' ? MessageType.Video :
-        MessageType.Voice;
+        type === 'voice' ? MessageType.Voice :
+        MessageType.File;
       await this.persistMessage({
         accountId: slot.accountId,
         remoteJid: 'status@broadcast',
@@ -1572,6 +1576,11 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: evt.slotId } });
     if (!slot?.accountId) return;
+    // 2026-04-25 · Phase 2 · 喂 statusCache (status@broadcast 消息) ·
+    // 让 status_browse / status_react executor 在 worker 模式下也能拿到 feed
+    if (this.statusCache) {
+      this.statusCache.feedFromWorker(slot.accountId, evt.messages);
+    }
     for (const rawMsg of evt.messages) {
       try {
         await this.persistIncomingMessage(

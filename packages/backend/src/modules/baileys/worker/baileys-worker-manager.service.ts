@@ -114,14 +114,14 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
   }
 
   /**
-   * 发送媒体 (image/video/voice/audio)
+   * 发送媒体 (image/video/voice/audio/file)
    */
   async sendMedia(
     slotId: number,
     to: string,
-    mediaType: 'image' | 'video' | 'voice' | 'audio',
+    mediaType: 'image' | 'video' | 'voice' | 'audio' | 'file',
     mediaBase64: string,
-    options?: { mimetype?: string; caption?: string; ptt?: boolean },
+    options?: { mimetype?: string; caption?: string; ptt?: boolean; fileName?: string },
   ): Promise<{ waMessageId: string | null; to: string }> {
     return this.sendCommand(slotId, {
       type: 'send-media',
@@ -132,6 +132,7 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
       mimetype: options?.mimetype,
       caption: options?.caption,
       ptt: options?.ptt,
+      fileName: options?.fileName,
     });
   }
 

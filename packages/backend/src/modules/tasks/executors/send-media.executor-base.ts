@@ -57,19 +57,18 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    // 2026-04-22 · sock 不在 pool 时尝试 respawn 一次 (DB=active 但 pool 空)
-    let sock = this.baileys.getSocket(slot.id);
-    if (!sock) {
+    // 2026-04-22 · 在线时直接走 baileys.sendMedia facade · 否则尝试 respawn 一次
+    // 2026-04-25 · Phase 2 · isSlotOnline 兼容 worker mode
+    if (!this.baileys.isSlotOnline(slot.id)) {
       ctx.log('sock-missing-respawn', true, {});
       try {
         await this.baileys.reactivateAndRespawn(slot.id);
         await new Promise((r) => setTimeout(r, 3000));
-        sock = this.baileys.getSocket(slot.id);
       } catch (err) {
         ctx.log('respawn-failed', false, { err: err instanceof Error ? err.message : String(err) });
       }
     }
-    if (!sock) {
+    if (!this.baileys.isSlotOnline(slot.id)) {
       return {
         success: false,
         errorCode: 'NOT_ONLINE',

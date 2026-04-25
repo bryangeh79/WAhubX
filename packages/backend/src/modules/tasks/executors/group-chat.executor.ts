@@ -44,8 +44,7 @@ export class GroupChatExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
 
     const groups = await this.contactRepo
       .createQueryBuilder('c')
@@ -65,7 +64,8 @@ export class GroupChatExecutor implements TaskExecutor {
       ctx.throwIfPaused?.();
       const text = texts[Math.floor(Math.random() * texts.length)];
       try {
-        await sock.sendMessage(g.remoteJid, { text });
+        // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker
+        await this.baileys.sendText(slot.id, g.remoteJid, text);
         sent++;
         ctx.log('group-chat', true, { jid: g.remoteJid, text });
       } catch (err) {

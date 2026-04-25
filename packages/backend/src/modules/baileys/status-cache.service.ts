@@ -25,7 +25,7 @@ export class StatusCacheService {
   private readonly MAX_PER_ACCOUNT = 200;
   private readonly TTL_MS = 24 * 60 * 60 * 1000; // 24h · WA status 存活期
 
-  /** BaileysService 在 spawn sock 时调 · 挂 messages.upsert 监听 */
+  /** BaileysService 在 spawn sock 时调 · 挂 messages.upsert 监听 (老路径 · pool sock) */
   registerStatusListener(accountId: number, ev: { on: (evt: string, fn: (msg: unknown) => void) => void }): void {
     ev.on('messages.upsert', (payload: unknown) => {
       try {
@@ -39,6 +39,22 @@ export class StatusCacheService {
         this.logger.warn(`status cache listener error · acc=${accountId}: ${err}`);
       }
     });
+  }
+
+  /**
+   * 2026-04-25 · Phase 2 · worker 模式入口 · BaileysService.onWorkerMessageUpsert 调用
+   * 把 worker 转发的消息中属于 status@broadcast 的塞入缓存
+   */
+  feedFromWorker(accountId: number, messages: unknown[]): void {
+    try {
+      const arr = messages as Array<{ key?: WAMessageKey; messageTimestamp?: number | Long }>;
+      for (const m of arr) {
+        if (!m.key || m.key.remoteJid !== 'status@broadcast') continue;
+        this.add(accountId, m as { key: WAMessageKey; messageTimestamp?: number | Long });
+      }
+    } catch (err) {
+      this.logger.warn(`feedFromWorker error · acc=${accountId}: ${err}`);
+    }
   }
 
   /** 在缓存里加一条 status · 去重 · 按大小限流 */
