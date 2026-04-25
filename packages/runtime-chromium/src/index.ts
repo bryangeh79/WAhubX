@@ -21,6 +21,7 @@ import { loadWaWebAndDetect } from './wa-web/wa-web-loader';
 import { waitForLogin } from './wa-web/wait-for-login';
 import { startQrLiveServer } from './qr-live-server';
 import { detectCountry } from './wa-web/detect-country';
+import { injectStealthOverrides } from './wa-web/stealth-inject';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -206,6 +207,15 @@ async function main() {
   // proxy auth (HTTP 代理才需 · SOCKS auth 走 URL)
   if (PROXY_USER && PROXY_URL.startsWith('http')) {
     await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
+  }
+
+  // ─── D7-2 · 深度 stealth 注入 ────────────────────────────────
+  // 必须在 page.goto WA Web 之前 · 这样 evaluateOnNewDocument 在 WA JS 之前跑
+  // 4 项: navigator.languages clean / Intl.resolvedOptions / permissions.query / chrome.runtime
+  try {
+    await injectStealthOverrides(page, localeParams, log);
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, 'D7-2 stealth inject failed · 继续走但反检测可能减弱');
   }
 
   // ─── D3 · integrity-checks · fail-fast 不进 WA Web ────────────
