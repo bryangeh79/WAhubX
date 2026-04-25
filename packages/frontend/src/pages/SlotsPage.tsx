@@ -38,11 +38,15 @@ const { Title, Text, Paragraph } = Typography;
 // 2026-04-25 · 加 quarantine · 440 明确判死 · UI 要显"号疑似被 WA 限制"
 type SlotStatus = 'empty' | 'active' | 'suspended' | 'warmup' | 'quarantine';
 
+// 2026-04-25 · D11-2 · slot 角色 (后端 backend 硬约束 · 每 tenant 至多 1 个 customer_service)
+type SlotRole = 'broadcast' | 'customer_service';
+
 interface SlotItem {
   id: number;
   tenantId: number;
   slotIndex: number;
   status: SlotStatus;
+  role?: SlotRole; // D11-1 加 · 老数据 fallback broadcast
   online?: boolean;
   // 2026-04-25 · 稳定性 · 真实状态三指标
   suspendedUntil?: string | null;
@@ -256,6 +260,56 @@ export function SlotsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 2026-04-25 · D11-2 · 切换 slot 角色
+  // backend 硬约束 · 后端拒第二个客服号 · 前端按 status 派发提示
+  const handleToggleRole = useCallback(
+    async (slot: SlotItem): Promise<void> => {
+      const currentRole = slot.role ?? 'broadcast';
+      const targetRole: SlotRole = currentRole === 'customer_service' ? 'broadcast' : 'customer_service';
+      // 切到 customer_service 前 · 用 confirm 提醒 (backend 也会拦 · 这里只是 UX 缓冲)
+      if (targetRole === 'customer_service') {
+        const existingCS = slots.find(
+          (s) => s.role === 'customer_service' && s.tenantId === slot.tenantId && s.id !== slot.id,
+        );
+        if (existingCS) {
+          Modal.warning({
+            title: '该租户已有客服号',
+            content: (
+              <Paragraph style={{ margin: 0 }}>
+                槽位 #{existingCS.slotIndex} 当前是客服号 · 每租户至多 1 个客服号 · 请先把那个槽位改回广告号 · 才能把槽位 #{slot.slotIndex} 设为客服号.
+              </Paragraph>
+            ),
+          });
+          return;
+        }
+      }
+      try {
+        await api.patch<SlotItem>(`/slots/${slot.id}/role`, { role: targetRole });
+        message.success(
+          targetRole === 'customer_service'
+            ? `槽位 #${slot.slotIndex} 已设为客服号 🛎️`
+            : `槽位 #${slot.slotIndex} 已设为广告号 📢`,
+        );
+        void load();
+      } catch (err) {
+        // 后端错误语义: code=CUSTOMER_SERVICE_EXISTS / INVALID_ROLE / 404 etc
+        const e = err as { response?: { status?: number; data?: { code?: string; message?: string } } };
+        const code = e.response?.data?.code;
+        const status = e.response?.status;
+        if (code === 'CUSTOMER_SERVICE_EXISTS') {
+          message.error(e.response?.data?.message ?? '该租户已有客服号');
+        } else if (code === 'INVALID_ROLE') {
+          message.error(e.response?.data?.message ?? '角色值不合法');
+        } else if (status === 404) {
+          message.error('槽位不存在');
+        } else {
+          message.error(extractErrorMessage(err, '切换角色失败'));
+        }
+      }
+    },
+    [slots, load],
+  );
 
   const stats = useMemo(() => {
     const byStatus = { empty: 0, warmup: 0, active: 0, suspended: 0, pending_warmup: 0 } as Record<SlotStatus | 'pending_warmup', number>;
@@ -931,6 +985,27 @@ function ActiveSlotCard({
           ) : (
             <span>代理 #{slot.proxyId}</span>
           )}
+        </div>
+
+        {/* 2026-04-25 · D11-2 · 角色 badge + 切换 (Codex 锁: 一 badge + 一 button · 不复杂) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+          {slot.role === 'customer_service' ? (
+            <Tag color="green" style={{ fontSize: 11, margin: 0 }}>
+              🛎️ 客服号 · always-on
+            </Tag>
+          ) : (
+            <Tag color="blue" style={{ fontSize: 11, margin: 0 }}>
+              📢 广告号
+            </Tag>
+          )}
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0, fontSize: 11 }}
+            onClick={() => void handleToggleRole(slot)}
+          >
+            切换
+          </Button>
         </div>
 
         {/* 养号进度 14 天 */}

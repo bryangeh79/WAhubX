@@ -13,6 +13,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { SlotsService } from './slots.service';
+import { AccountSlotRole } from './account-slot.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { SendTextMessageDto } from './dto/send-message.dto';
 import { SendMediaMessageDto } from './dto/send-media.dto';
@@ -141,6 +142,36 @@ export class SlotsController {
     @Body() body: { proxyId: number | null },
   ): Promise<SlotResponseDto> {
     return this.slots.assignProxy(id, cur.tenantId, body?.proxyId ?? null);
+  }
+
+  // 2026-04-25 · D11-2 · 切换 slot 角色 (broadcast | customer_service)
+  // 后端硬约束: 每 tenant 至多 1 个 customer_service (DB partial unique index)
+  // 错误语义 (Codex 锁 4 边界 ②):
+  //   - 404 SlotNotFound · slot 不存在
+  //   - 400 InvalidRole · role 值不合法
+  //   - 409 ConflictCustomerService · 该 tenant 已有客服号
+  // 前端按 status code + body.code 派发不同提示
+  @Patch(':id/role')
+  @HttpCode(HttpStatus.OK)
+  async setRole(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { role?: string },
+  ): Promise<SlotResponseDto> {
+    const roleStr = body?.role;
+    if (roleStr !== 'broadcast' && roleStr !== 'customer_service') {
+      throw new BadRequestException({
+        code: 'INVALID_ROLE',
+        message: `role 必须是 'broadcast' 或 'customer_service' · got: "${roleStr ?? 'undefined'}"`,
+      });
+    }
+    const targetRole =
+      roleStr === 'customer_service'
+        ? AccountSlotRole.CustomerService
+        : AccountSlotRole.Broadcast;
+    const slot = await this.slots.setRole(id, cur.tenantId, targetRole);
+    // 重投影 toResponse · 走 findOne 路径拿全量字段
+    return this.slots.findOne(slot.id, cur.tenantId);
   }
 
   // POST /slots/backfill-fingerprints — 一次性回填老数据的 fingerprint.json + DB

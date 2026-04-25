@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   forwardRef,
   Inject,
@@ -137,10 +138,15 @@ export class SlotsService {
       // 检查该 tenant 是否已有客服号
       const existing = await this.getCustomerServiceSlot(slot.tenantId);
       if (existing && existing.id !== slot.id) {
-        throw new ForbiddenException(
-          `租户 ${slot.tenantId} 已有客服号 (槽位 #${existing.slotIndex} · id=${existing.id}) · ` +
-            `每租户至多 1 个客服号 · 请先把那个槽位改回 broadcast`,
-        );
+        // D11-2 (Codex 边界 ②): 用 ConflictException + 明确 code · 前端按 code 派发
+        throw new ConflictException({
+          code: 'CUSTOMER_SERVICE_EXISTS',
+          message:
+            `租户已有客服号 (槽位 #${existing.slotIndex}) · 每租户至多 1 个客服号 · ` +
+            `请先把该槽位改回 broadcast`,
+          existingSlotIndex: existing.slotIndex,
+          existingSlotId: existing.id,
+        });
       }
     }
 
