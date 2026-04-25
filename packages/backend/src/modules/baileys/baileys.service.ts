@@ -36,8 +36,11 @@ import {
 import pino from 'pino';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { OnEvent } from '@nestjs/event-emitter';
 import { AccountSlotEntity, AccountSlotStatus } from '../slots/account-slot.entity';
 import { TenantEntity } from '../tenants/tenant.entity';
+import { BaileysWorkerManagerService, WORKER_MODE_ENABLED } from './worker/baileys-worker-manager.service';
+import type { MessageUpsertEvent, ConnectionOpenEvent, ConnectionCloseEvent } from './worker/worker-protocol';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AccountHealthEntity, RiskLevel } from '../slots/account-health.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
@@ -129,6 +132,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly eventBus?: EventEmitter2,
     // 2026-04-22 · Status feed 缓存 · 给 status_browse/bulk/react executor 共用
     @Optional() private readonly statusCache?: StatusCacheService,
+    // 2026-04-25 · Phase 2 · 子进程隔离 · WA_WORKER_MODE 开时 sendText/incoming msg 走 worker
+    @Optional() private readonly workerManager?: BaileysWorkerManagerService,
   ) {}
 
   // ── 生命周期 ────────────────────────────────────────────
@@ -544,17 +549,47 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendText(slotId: number, to: string, text: string): Promise<{ waMessageId: string | null }> {
+    const jid = this.normalizeJid(to);
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
+
+    // 2026-04-25 · Phase 2 · WA_WORKER_MODE=true 且 worker 已起 · 走子进程
+    // typing 模拟在 worker 内做 (通过 send-presence 命令) · 这里先发 presence 再 send-text
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      // 打字模拟: composing + 1.5-8s 延迟 + paused
+      try {
+        const len = (text ?? '').length;
+        const perChar = 80 + Math.random() * 70;
+        const typingMs = Math.min(8000, Math.max(1500, Math.round(len * perChar)));
+        await this.workerManager.sendPresence(slotId, jid, 'composing');
+        await new Promise((r) => setTimeout(r, typingMs));
+        await this.workerManager.sendPresence(slotId, jid, 'paused');
+      } catch {
+        /* 模拟失败不阻断 */
+      }
+      const ret = await this.workerManager.sendText(slotId, jid, text);
+      const waMessageId = ret.waMessageId;
+      await this.persistMessage({
+        accountId: slot.accountId,
+        remoteJid: jid,
+        direction: MessageDirection.Out,
+        msgType: MessageType.Text,
+        content: text,
+        sentAt: new Date(),
+        waMessageId,
+      });
+      return { waMessageId };
+    }
+
+    // 老路径 · Phase 1 行为
     const sock = this.pool.get(slotId);
     if (!sock) {
       throw new BadRequestException(
         `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
       );
     }
-    const jid = this.normalizeJid(to);
-    const slot = await this.dataSource
-      .getRepository(AccountSlotEntity)
-      .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
 
     // 2026-04-24 · 真人打字模拟 · 默认开 · 对方看到 "正在输入..." 几秒再收到消息
     // 硬编码: 每字 80-150ms 随机 · 下限 1.5s · 上限 8s · 失败不阻断发送
@@ -1246,6 +1281,73 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  // ═══ Phase 2 · Worker 事件桥 ═══════════════════════════════════════════
+  // Worker 发 baileys.worker.* 事件 · 这里订阅并复用 Phase 1 持久化逻辑
+  // 仅 WA_WORKER_MODE=true 时 worker 会发这些事件 · 关闭时 worker 也不存在 · 天然无竞态
+
+  @OnEvent('baileys.worker.message-upsert')
+  async onWorkerMessageUpsert(evt: MessageUpsertEvent): Promise<void> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: evt.slotId } });
+    if (!slot?.accountId) return;
+    for (const rawMsg of evt.messages) {
+      try {
+        await this.persistIncomingMessage(
+          slot.slotIndex,
+          slot.accountId,
+          rawMsg as WAMessage,
+          evt.upsertType === 'notify',
+        );
+      } catch (err) {
+        this.logger.error(`worker msg persist slot ${evt.slotId}: ${err}`);
+      }
+    }
+  }
+
+  @OnEvent('baileys.worker.connection-open')
+  async onWorkerConnectionOpen(evt: ConnectionOpenEvent): Promise<void> {
+    // 类似原 pool listener 的自愈逻辑 · 尊重 suspended_until 冷却
+    try {
+      const slot = await this.dataSource
+        .getRepository(AccountSlotEntity)
+        .findOne({ where: { id: evt.slotId } });
+      if (!slot) return;
+      if (slot.status === AccountSlotStatus.Quarantine) return;
+      if (slot.status === AccountSlotStatus.Suspended) {
+        const now = Date.now();
+        if (slot.suspendedUntil && new Date(slot.suspendedUntil).getTime() > now) {
+          this.logger.warn(
+            `worker slot ${evt.slotId} · suspended 冷却未过 · 不翻回 active`,
+          );
+          return;
+        }
+        this.logger.log(`worker slot ${evt.slotId} · 连接恢复 · suspended → active`);
+      }
+      await this.dataSource
+        .getRepository(AccountSlotEntity)
+        .update(evt.slotId, {
+          status: AccountSlotStatus.Active,
+          suspendedUntil: null,
+          socketLastHeartbeatAt: new Date(),
+        });
+    } catch (err) {
+      this.logger.warn(`onWorkerConnectionOpen slot ${evt.slotId}: ${err}`);
+    }
+  }
+
+  @OnEvent('baileys.worker.connection-close')
+  async onWorkerConnectionClose(evt: ConnectionCloseEvent): Promise<void> {
+    // 记 close code 到 lastCloseInfo · 给诊断/UI 用
+    this.recordCloseCode(evt.slotId, evt.code);
+    this.logger.warn(`worker slot ${evt.slotId} connection-close code=${evt.code} reason=${evt.reason}`);
+    // 重连策略在 worker 自身 · 父进程不再 scheduleReconnect (worker 未来会加 auto-reconnect 逻辑)
+    // 440 quarantine 也在 worker 侧决策 · 父通过 worker-error fatal=true 接到后做 markSlotQuarantined
+    if (evt.code === DisconnectReason.loggedOut) {
+      void this.markSlotSuspended(evt.slotId);
     }
   }
 
