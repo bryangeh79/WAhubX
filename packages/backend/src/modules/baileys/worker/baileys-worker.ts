@@ -27,7 +27,10 @@ import {
   default as makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
+  isJidBroadcast,
+  isJidNewsletter,
   type WASocket,
+  type GroupMetadata,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -137,6 +140,35 @@ async function handleInit(cmd: InitCommand): Promise<void> {
   ack(cmd.requestId, true);
 }
 
+// 2026-04-25 · Desktop 止血 · group metadata cache (Codex 拍板)
+// 避免每次拉群成员触发 WA rate limit + 封号 · 社区报告"没实现 = 必踩坑"
+// TTL 5 min · 简单 Map · 单 worker 进程内的 slot 用一份就行
+const g_groupMetaCache = new Map<string, { meta: GroupMetadata; at: number }>();
+const GROUP_META_TTL_MS = 5 * 60 * 1000;
+
+function getCachedGroupMeta(jid: string): GroupMetadata | undefined {
+  const e = g_groupMetaCache.get(jid);
+  if (!e) return undefined;
+  if (Date.now() - e.at > GROUP_META_TTL_MS) {
+    g_groupMetaCache.delete(jid);
+    return undefined;
+  }
+  return e.meta;
+}
+
+// 2026-04-25 · Desktop 止血 · shouldIgnoreJid (Codex 拍板)
+// 跳 newsletter (channel) + status broadcast · 我们不订阅这些 · 不解密 · 省流量 + 减异常
+function shouldIgnoreJid(jid: string): boolean {
+  if (!jid) return false;
+  if (isJidNewsletter(jid)) return true;
+  if (isJidBroadcast(jid) && jid !== 'status@broadcast') {
+    // status@broadcast 是 WA 状态频道 · 不忽略 (我们 sendReact 用得上)
+    // 普通 broadcast list (xxxxxx@broadcast) 才忽略
+    return true;
+  }
+  return false;
+}
+
 // 统一创建 socket · bind 和 rehydrate 都走这里
 // rebind=true 表示这是 QR 流中的 515 重启 spawn · 保持原 auth state
 async function spawnSocket(): Promise<WASocket> {
@@ -157,15 +189,48 @@ async function spawnSocket(): Promise<WASocket> {
     agent: (proxyAgent ?? undefined) as never,
     fetchAgent: (proxyAgent ?? undefined) as never,
     syncFullHistory: false,
+    // 2026-04-25 · Desktop 止血 · syncFullHistory 配套 callback (Codex 拍板)
+    // Baileys 7.x 不带这 callback 会断 LID 映射 · 6.7 无此坑但加了无害
+    // 我们一律拒绝 history 同步 · 客户消息只看实时 messages.upsert
+    shouldSyncHistoryMessage: () => false,
+    // 2026-04-25 · Desktop 止血 · group metadata cache (Codex 拍板)
+    cachedGroupMetadata: async (jid) => getCachedGroupMeta(jid),
+    // 2026-04-25 · Desktop 止血 · shouldIgnoreJid (Codex 拍板)
+    shouldIgnoreJid,
     connectTimeoutMs: opts.connectTimeoutMs,
     keepAliveIntervalMs: opts.keepAliveIntervalMs,
     defaultQueryTimeoutMs: opts.defaultQueryTimeoutMs,
     emitOwnEvents: opts.emitOwnEvents,
-    markOnlineOnConnect: opts.markOnlineOnConnect,
+    // 2026-04-25 · Desktop 止血 · markOnlineOnConnect 强制 false (Codex 拍板)
+    // 原 fingerprint 里 50/50 随机 · 但 markOnlineOnConnect=true 会让手机停推送 +
+    // 看上去像"机器人 24/7 在线" · 真人 WA Web 不是这模式. 强制 false.
+    markOnlineOnConnect: false,
   });
 
   attachSocketListeners(sock);
   g_sock = sock;
+
+  // 2026-04-25 · Desktop 止血 · 主动塞 groups.update 事件给 cache 保鲜
+  // baileys 拉过的 group metadata 自动写入 cache · 下次 cachedGroupMetadata 命中
+  sock.ev.on('groups.upsert', (groups) => {
+    for (const g of groups) {
+      g_groupMetaCache.set(g.id, { meta: g, at: Date.now() });
+    }
+  });
+  sock.ev.on('groups.update', (updates) => {
+    for (const u of updates) {
+      if (u.id) {
+        const existing = g_groupMetaCache.get(u.id);
+        if (existing) {
+          g_groupMetaCache.set(u.id, {
+            meta: { ...existing.meta, ...u } as GroupMetadata,
+            at: Date.now(),
+          });
+        }
+      }
+    }
+  });
+
   return sock;
 }
 

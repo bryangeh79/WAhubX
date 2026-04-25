@@ -590,8 +590,22 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
 
   private async ensureWaVersion(): Promise<[number, number, number]> {
     if (this.waVersion) return this.waVersion;
+    // 2026-04-25 · Desktop 止血 · WA_VERSION_PIN 支持 (Codex 拍板)
+    // 社区共识: 不要追最新 WA Web version · pin 一个稳定值减少协议层不兼容
+    // 格式: "2.3000.1029560485" · 不设 = fallback fetchLatestBaileysVersion
+    const pin = process.env.WA_VERSION_PIN?.trim();
+    if (pin) {
+      const parts = pin.split('.').map((s) => parseInt(s, 10));
+      if (parts.length === 3 && parts.every((n) => Number.isFinite(n))) {
+        this.waVersion = parts as [number, number, number];
+        this.logger.log(`WA version pinned via WA_VERSION_PIN=${pin}`);
+        return this.waVersion;
+      }
+      this.logger.warn(`WA_VERSION_PIN="${pin}" 格式不对 · fallback 自动获取`);
+    }
     const { version } = await fetchLatestBaileysVersion();
     this.waVersion = version as [number, number, number];
+    this.logger.log(`WA version auto-fetched: ${version.join('.')}`);
     return this.waVersion;
   }
 }
