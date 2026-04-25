@@ -1,10 +1,13 @@
-import { AccountSlotStatus } from '../account-slot.entity';
+import { AccountSlotStatus, AccountSlotRole } from '../account-slot.entity';
 
 export class SlotResponseDto {
   id!: number;
   tenantId!: number;
   slotIndex!: number;
   status!: AccountSlotStatus;
+  // 2026-04-25 · D11-1 · slot 角色 (broadcast | customer_service)
+  // 每 tenant 至多 1 个 customer_service · DB partial unique index 强制
+  role!: AccountSlotRole;
   online!: boolean; // 2026-04-22 · 实际 pool 是否有 socket (与 status 独立 · status=active 也可能 online=false)
   // 2026-04-25 · 稳定性: 真实状态三指标
   suspendedUntil!: string | null;         // suspended 冷却到何时 · 期间不动

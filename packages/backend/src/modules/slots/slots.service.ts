@@ -9,7 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import * as fs from 'node:fs';
-import { AccountSlotEntity, AccountSlotStatus } from './account-slot.entity';
+import { AccountSlotEntity, AccountSlotStatus, AccountSlotRole } from './account-slot.entity';
 import { WaAccountEntity } from './wa-account.entity';
 import { TenantEntity } from '../tenants/tenant.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
@@ -89,6 +89,68 @@ export class SlotsService {
       runtime: this.runtimes.getCurrentMode(),
       ...status,
     };
+  }
+
+  // ═══ 2026-04-25 · D11-1 · slot 角色管理 (Codex 锁定 5 边界) ═══════
+  // 边界 1: 唯一 customer_service 必须 backend 硬约束 · 不靠 UI
+
+  /**
+   * 拉某 tenant 的客服号槽位 · 没设过则 null
+   */
+  async getCustomerServiceSlot(tenantId: number): Promise<AccountSlotEntity | null> {
+    return this.slotRepo.findOne({
+      where: { tenantId, role: AccountSlotRole.CustomerService },
+    });
+  }
+
+  /**
+   * 切换 slot 的 role · backend 硬校验
+   *
+   * 规则:
+   *   broadcast → customer_service
+   *     · 必须先确认该 tenant 没有别的 customer_service · 否则拒
+   *     · partial unique index 也兜底 · 但 service 层先抛友好错
+   *   customer_service → broadcast
+   *     · 允许 · 但建议 UI 提示 "切完该 tenant 没客服号了"
+   *
+   * Codex 边界 1: backend 校验为主 · UI 校验为辅
+   */
+  async setRole(
+    slotId: number,
+    requesterTenantId: number | null,
+    targetRole: AccountSlotRole,
+  ): Promise<AccountSlotEntity> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+
+    // 租户隔离 (平台超管 tenantId=null 跳过)
+    if (requesterTenantId !== null && slot.tenantId !== requesterTenantId) {
+      throw new ForbiddenException(`槽位 ${slotId} 不属于当前租户`);
+    }
+
+    if (slot.role === targetRole) {
+      // 没变 · 幂等返
+      return slot;
+    }
+
+    if (targetRole === AccountSlotRole.CustomerService) {
+      // 检查该 tenant 是否已有客服号
+      const existing = await this.getCustomerServiceSlot(slot.tenantId);
+      if (existing && existing.id !== slot.id) {
+        throw new ForbiddenException(
+          `租户 ${slot.tenantId} 已有客服号 (槽位 #${existing.slotIndex} · id=${existing.id}) · ` +
+            `每租户至多 1 个客服号 · 请先把那个槽位改回 broadcast`,
+        );
+      }
+    }
+
+    // 切 role
+    slot.role = targetRole;
+    await this.slotRepo.save(slot);
+    this.logger.log(
+      `slot ${slotId} role · ${slot.role} → ${targetRole} (tenant ${slot.tenantId})`,
+    );
+    return slot;
   }
 
   /**
@@ -206,6 +268,7 @@ export class SlotsService {
     const tenant = await manager.findOne(TenantEntity, { where: { id: tenantId } });
     const tz = tenant?.timezone ?? 'Asia/Kuala_Lumpur';
 
+    // D11-1 · 首槽 (slotIndex=1) = customer_service · 其余 broadcast (Codex 边界 1)
     const rows = Array.from({ length: slotLimit }, (_, i) =>
       manager.create(AccountSlotEntity, {
         tenantId,
@@ -215,6 +278,7 @@ export class SlotsService {
         proxyId: null,
         persona: null,
         profilePath: null,
+        role: i === 0 ? AccountSlotRole.CustomerService : AccountSlotRole.Broadcast,
       }),
     );
     await manager.save(AccountSlotEntity, rows);
@@ -376,6 +440,8 @@ export class SlotsService {
       tenantId: slot.tenantId,
       slotIndex: slot.slotIndex,
       status: slot.status,
+      // 2026-04-25 · D11-1 · 角色字段返给前端 · 卡片画 role badge 用
+      role: slot.role ?? AccountSlotRole.Broadcast,
       online,
       accountId: slot.accountId,
       phoneNumber: slot.account?.phoneNumber ?? null,

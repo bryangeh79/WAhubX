@@ -31,6 +31,15 @@ export enum AccountSlotStatus {
   Quarantine = 'quarantine',
 }
 
+// 2026-04-25 · D11-1 · slot 角色 (Codex 锁定 5 边界)
+//   broadcast        广告号 · 跑 warmup / ads / broadcast 任务 · 寿命 2-8 周 · 死了换 SIM
+//   customer_service 客服号 · always-on · 跑 inbound / auto-reply / takeover · 长期养
+// 约束: 每 tenant 同时最多 1 个 customer_service (DB partial unique index 强制)
+export enum AccountSlotRole {
+  Broadcast = 'broadcast',
+  CustomerService = 'customer_service',
+}
+
 @Entity('account_slot')
 @Index('idx_account_slot_tenant', ['tenantId'])
 @Index('uq_account_slot_tenant_index', ['tenantId', 'slotIndex'], { unique: true })
@@ -58,6 +67,16 @@ export class AccountSlotEntity {
 
   @Column({ type: 'enum', enum: AccountSlotStatus, default: AccountSlotStatus.Empty })
   status!: AccountSlotStatus;
+
+  // 2026-04-25 · D11-1 · slot 角色 · per-tenant 至多 1 个 customer_service
+  // DB 约束: uq_account_slot_tenant_customer_service (partial unique index)
+  @Column({
+    type: 'enum',
+    enum: AccountSlotRole,
+    default: AccountSlotRole.Broadcast,
+    name: 'role',
+  })
+  role!: AccountSlotRole;
 
   @Column({ type: 'int', name: 'proxy_id', nullable: true })
   proxyId!: number | null;
