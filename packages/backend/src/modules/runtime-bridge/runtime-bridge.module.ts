@@ -6,9 +6,11 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { RuntimeBridgeService } from './runtime-bridge.service';
+import { RuntimeBridgeController } from './runtime-bridge.controller';
 
 @Module({
   imports: [ConfigModule],
+  controllers: [RuntimeBridgeController],
   providers: [RuntimeBridgeService],
   exports: [RuntimeBridgeService],
 })

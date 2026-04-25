@@ -42,6 +42,28 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+// 2026-04-25 · D8-2 · per-slot bind 状态缓存 (Codex 拍板)
+// UI 拉这个就能渲 · 不用每次去问 runtime
+export interface BindStateCache {
+  slotId: number;
+  tenantId: number;
+  /** runtime fsm 状态 (idle/starting/qr/connecting/connected/timeout/cancelled/failed) */
+  bindState: string;
+  /** 最后一张 QR · base64 data URL · qr 状态时有 */
+  qrDataUrl: string | null;
+  qrRefreshCount: number;
+  /** 命中 chat-list 时的 selector */
+  chatListSelector: string | null;
+  /** 任意失败的 error message */
+  error: string | null;
+  /** 任何事件最后到达时间 · UI 看 staleness */
+  lastEventAt: number;
+  /** start-bind 收到的时间 · idle 时为 0 */
+  sessionStartedAt: number;
+  /** connected 时间 · 未到为 0 */
+  connectedAt: number;
+}
+
 @Injectable()
 export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RuntimeBridgeService.name);
@@ -49,6 +71,8 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
   private httpServer: http.Server | null = null;
   private readonly clients = new Map<number, ClientConn>();
   private readonly pending = new Map<string, PendingRequest>();
+  // D8-2 · per-slotId bind 状态缓存
+  private readonly bindStates = new Map<number, BindStateCache>();
 
   constructor(
     private readonly config: ConfigService,
@@ -123,6 +147,38 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
 
   getConnectedSlots(): number[] {
     return Array.from(this.clients.keys());
+  }
+
+  /**
+   * D8-2 · 公共方法 · 触发 runtime 开始 bind 流程
+   */
+  async startBind(slotId: number, pairingPhoneNumber?: string): Promise<{ state: string }> {
+    const cmd = (pairingPhoneNumber
+      ? { kind: 'cmd', type: 'start-bind', pairingPhoneNumber }
+      : { kind: 'cmd', type: 'start-bind' }) as Omit<RuntimeCommand, 'requestId'>;
+    return this.sendCommand<{ state: string }>(slotId, cmd);
+  }
+
+  /**
+   * D8-2 · 公共方法 · 取消 runtime bind 流程
+   */
+  async cancelBind(slotId: number): Promise<{ wasInState: string }> {
+    return this.sendCommand<{ wasInState: string }>(slotId, { kind: 'cmd', type: 'cancel-bind' });
+  }
+
+  /**
+   * D8-2 · 公共方法 · 拉 runtime 当前 fsm 状态
+   */
+  async fetchStatus(slotId: number): Promise<{ state: string; sessionStartedAt: number; pageState: string }> {
+    return this.sendCommand(slotId, { kind: 'cmd', type: 'fetch-status' });
+  }
+
+  /**
+   * D8-2 · 拉 backend 缓存的 bind 状态 (UI 主用)
+   * 不打 runtime · 直接返本地缓存 · O(1)
+   */
+  getCachedBindState(slotId: number): BindStateCache | null {
+    return this.bindStates.get(slotId) ?? null;
   }
 
   /**
@@ -275,11 +331,16 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
       conn.lastHeartbeatAt = Date.now();
       conn.lastPageState = evt.pageState;
     }
+
+    // D8-2 · 更新 per-slot bind 缓存 (Codex 拍板 · 缓存按 slotId 独立)
+    this.updateBindStateCache(conn, evt);
+
     // 全部转发 EventEmitter2 · 业务模块订阅
     this.events.emit(eventName(evt.type), evt);
-    // D8-1 · 全部 info 级 log 方便验桥 · D8-2 后再降 heartbeat 到 debug
+
+    // D8-2 · log 策略: heartbeat 频率高 · 改 debug · 其他 info
     if (evt.type === 'heartbeat') {
-      this.logger.log(
+      this.logger.debug?.(
         `slot ${conn.slotId} heartbeat · pageState=${evt.pageState} uptimeMs=${evt.uptimeMs}`,
       );
     } else {
@@ -287,10 +348,74 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * D8-2 · 把 runtime event 投影到 per-slot 缓存 · UI 直接读这个
+   */
+  private updateBindStateCache(conn: ClientConn, evt: RuntimeEvent): void {
+    let cache = this.bindStates.get(conn.slotId);
+    if (!cache) {
+      cache = {
+        slotId: conn.slotId,
+        tenantId: conn.tenantId,
+        bindState: 'idle',
+        qrDataUrl: null,
+        qrRefreshCount: 0,
+        chatListSelector: null,
+        error: null,
+        lastEventAt: 0,
+        sessionStartedAt: 0,
+        connectedAt: 0,
+      };
+      this.bindStates.set(conn.slotId, cache);
+    }
+    cache.lastEventAt = evt.ts;
+
+    switch (evt.type) {
+      case 'bind-state':
+        cache.bindState = evt.state;
+        if (evt.error) cache.error = evt.error;
+        if (evt.state === 'starting') {
+          cache.sessionStartedAt = evt.ts;
+          cache.error = null;
+          cache.qrDataUrl = null;
+          cache.qrRefreshCount = 0;
+          cache.chatListSelector = null;
+          cache.connectedAt = 0;
+        }
+        if (evt.state === 'connected') {
+          cache.connectedAt = evt.ts;
+        }
+        break;
+      case 'qr':
+        cache.qrDataUrl = evt.dataUrl;
+        cache.qrRefreshCount = evt.qrRefreshCount;
+        break;
+      case 'connection-open':
+        cache.chatListSelector = evt.selector;
+        break;
+      case 'connection-close':
+        cache.bindState = 'idle';
+        cache.connectedAt = 0;
+        cache.error = evt.reason;
+        break;
+      // heartbeat / message-upsert / runtime-log / runtime-error 不动 bind 缓存
+      default:
+        break;
+    }
+  }
+
   private handleClose(conn: ClientConn, code: number, reason: string): void {
     // 只在还是当前连接时清 (可能已经被 replace 踢出)
     if (this.clients.get(conn.slotId) === conn) {
       this.clients.delete(conn.slotId);
+      // D8-2 · runtime 断 · 缓存的 bindState 标 idle (不删 · 保留最后一次 sessionStartedAt 等)
+      const cache = this.bindStates.get(conn.slotId);
+      if (cache && cache.bindState !== 'connected') {
+        // 跑 bind 中断 · 算 failed
+        cache.bindState = 'failed';
+        cache.error = `runtime disconnected · code=${code} reason=${reason}`;
+        cache.lastEventAt = Date.now();
+      }
     }
     this.logger.log(
       `runtime disconnected · slotId=${conn.slotId} code=${code} reason="${reason}" · 剩 ${this.clients.size} 个`,

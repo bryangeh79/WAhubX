@@ -24,6 +24,13 @@ import { detectCountry } from './wa-web/detect-country';
 import { injectStealthOverrides } from './wa-web/stealth-inject';
 import { IdleActivityScheduler } from './idle-activity';
 import { RuntimeWsClient } from './runtime-ws-client';
+import { BindStateMachine, type BindState } from './bind-state-machine';
+import type {
+  RuntimeCommand,
+  QrEvent,
+  BindStateEvent,
+  ConnectionOpenEvent,
+} from './protocol/runtime-protocol';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -291,46 +298,12 @@ async function main() {
     throw err;
   }
 
-  // ─── D2 Step 1-4 · 加载 WA Web + 状态识别 + 截图证据 ────────────
-  const result = await loadWaWebAndDetect(page, diagnosticsDir, log);
+  // ─── D8-2 · bind 流程状态机 ─────────────────────────────────────
+  // 严格单向 · idle → starting → qr → connecting → connected (Codex 锁)
+  const fsm = new BindStateMachine(log);
+  const slotIdNum = parseInt(SLOT_ID, 10) || 0;
 
-  // D8-1 · 状态同步给 WS client (心跳里 backend 看的 pageState 实时反映)
-  if (result.state === 'qr' || result.state === 'chat-list' || result.state === 'splash' || result.state === 'splash-stuck') {
-    g_state = result.state;
-  } else {
-    g_state = 'unknown';
-  }
-
-  log.info(
-    {
-      state: result.state,
-      selector: result.selector,
-      qrExtracted: !!result.qrCanvasDataUrl,
-      evidenceCount: result.evidence.length,
-      evidenceFiles: result.evidence.map((e) => e.pngPath),
-    },
-    'D2 wa-web load + state detect complete',
-  );
-
-  // 把 QR raw data URL 写到 diagnostics (后续控制面用)
-  if (result.qrCanvasDataUrl) {
-    const qrPath = path.join(diagnosticsDir, 'last-qr.dataurl.txt');
-    fs.writeFileSync(qrPath, result.qrCanvasDataUrl, 'utf-8');
-    log.info({ path: qrPath, bytes: result.qrCanvasDataUrl.length }, 'QR data URL persisted');
-  }
-
-  // ─── D6 · QR live server (host 浏览器看活 QR · 用手机扫真画布) ─
-  if (result.state === 'qr' && process.env.QR_LIVE_SERVER !== 'false') {
-    const port = Number(process.env.QR_LIVE_PORT ?? 9701);
-    startQrLiveServer({ page, port, log });
-  }
-
-  // ─── D6 · 命中 qr 后长 poll 等 chat-list (等用户真扫码) ───────
-  // C5/C6 验: 命中 chat-list 后 graceful shutdown · creds 落盘 · 二次 launch 期望
-  // 直接进 chat-list (因为 user-data-dir 含 IndexedDB session)
-  // 2026-04-25 · D7-1 · idle activity scheduler (Codex 拍板低强度 idle 行为)
-  // 仅 chat-list 状态启 · 5-15min 间隔 · 默认动作: scroll + mouse + focus cycle
-  // HUMAN_BEHAVIOR_ENABLED=false 完全禁用 (soak A/B 对照)
+  // ─── D7-1 · idle activity scheduler ──────────────────────────────
   let idleScheduler: IdleActivityScheduler | null = null;
   const startIdleSchedulerIfNeeded = (): void => {
     if (!SOAK_MODE) return;
@@ -343,68 +316,244 @@ async function main() {
     idleScheduler.start();
   };
 
-  if (result.state === 'qr') {
-    log.info('D6 · entering wait-for-login (long poll up to 10 min)');
-    const loginResult = await waitForLogin({ page, diagnosticsDir, log });
-    log.info(loginResult, 'D6 wait-for-login result');
-    if (loginResult.outcome === 'chat-list') {
-      // D8-1 · 状态同步: qr → chat-list
-      g_state = 'chat-list';
-      log.info(
-        { soakMode: SOAK_MODE },
-        'LOGIN SUCCESS · waiting 15s for Chromium to flush IndexedDB/Cookies',
-      );
-      // Chromium IndexedDB / Cookies 异步 flush · 太快 close 会丢 session
-      // 实测: 不等的话 wa-data-test/profile 目录都不会创建 (D6 实测踩坑)
-      await new Promise((r) => setTimeout(r, 15_000));
+  // ─── D8-2 · 事件 emit helpers (WS 桥推 backend) ──────────────────
+  // reason 是 transition 解释 (给 fsm log) · error 是真错信息 (只 failed/timeout/cancelled 才填)
+  const emitBindState = (state: BindState, reason?: string, error?: string): void => {
+    if (state === 'idle') return; // idle 不推 (内部状态)
+    if (!fsm.tryTransition(state, reason ?? '')) return;
+    if (!wsClient) return;
+    // 只 failed/timeout/cancelled 才传 error 给 backend · 其他 state error=undefined
+    const isErrorState = state === 'failed' || state === 'timeout' || state === 'cancelled';
+    const evt: Omit<BindStateEvent, 'kind'> & { kind: 'event' } = {
+      kind: 'event',
+      type: 'bind-state',
+      slotId: slotIdNum,
+      ts: Date.now(),
+      state: state as BindStateEvent['state'],
+      error: isErrorState ? error ?? reason : undefined,
+    };
+    wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
+  };
 
-      // 主动触发 page.evaluate · 强制 IndexedDB tx 完成
+  const emitQr = (dataUrl: string, refreshCount: number): void => {
+    if (!wsClient) return;
+    const evt: Omit<QrEvent, 'kind'> & { kind: 'event' } = {
+      kind: 'event',
+      type: 'qr',
+      slotId: slotIdNum,
+      ts: Date.now(),
+      dataUrl,
+      qrRefreshCount: refreshCount,
+    };
+    wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
+  };
+
+  const emitConnectionOpen = (selector: string): void => {
+    if (!wsClient) return;
+    const evt: Omit<ConnectionOpenEvent, 'kind'> & { kind: 'event' } = {
+      kind: 'event',
+      type: 'connection-open',
+      slotId: slotIdNum,
+      ts: Date.now(),
+      selector,
+    };
+    wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
+  };
+
+  // ─── D8-2 · 取消 controller (cancel-bind 触发) ───────────────────
+  let bindAbortController: AbortController | null = null;
+  let qrLiveServerStarted = false;
+
+  // ─── D8-2 · 核心: 跑一轮 bind 流程 ──────────────────────────────
+  // 共享给 WS 模式 (start-bind cmd) 和 standalone 模式 (auto-trigger)
+  async function runBindFlow(): Promise<{
+    outcome: 'connected' | 'timeout' | 'failed' | 'cancelled' | 'rehydrated';
+    error?: string;
+  }> {
+    emitBindState('starting');
+    bindAbortController = new AbortController();
+
+    const detectResult = await loadWaWebAndDetect(page, diagnosticsDir, log);
+    // D8-1 · 同步 g_state · WS 心跳即时反映
+    if (
+      detectResult.state === 'qr' ||
+      detectResult.state === 'chat-list' ||
+      detectResult.state === 'splash' ||
+      detectResult.state === 'splash-stuck'
+    ) {
+      g_state = detectResult.state;
+    } else {
+      g_state = 'unknown';
+    }
+    log.info(
+      {
+        state: detectResult.state,
+        selector: detectResult.selector,
+        qrExtracted: !!detectResult.qrCanvasDataUrl,
+      },
+      'D8-2 wa-web load + state detect complete',
+    );
+
+    // ─── 直接 chat-list (rehydrate 路径) ──────────────────
+    if (detectResult.state === 'chat-list') {
+      log.info('rehydrate · launched directly into chat-list (no QR)');
+      emitBindState('connecting', 'rehydrate · already chat-list');
+      emitBindState('connected', 'rehydrate complete');
+      emitConnectionOpen(detectResult.selector ?? '[data-testid="chat-list"]');
+      startIdleSchedulerIfNeeded();
+      return { outcome: 'rehydrated' };
+    }
+
+    // ─── 异常状态 · 直接失败 ──────────────────────────────
+    if (detectResult.state !== 'qr') {
+      const reason = `unexpected state: ${detectResult.state}`;
+      emitBindState('failed', reason);
+      return { outcome: 'failed', error: reason };
+    }
+
+    // ─── QR 状态 · 推首张 QR + 启 live server ──────────────
+    emitBindState('qr', 'page entered qr state');
+    if (detectResult.qrCanvasDataUrl) {
+      const qrPath = path.join(diagnosticsDir, 'last-qr.dataurl.txt');
+      fs.writeFileSync(qrPath, detectResult.qrCanvasDataUrl, 'utf-8');
+      emitQr(detectResult.qrCanvasDataUrl, 0);
+    }
+    if (!qrLiveServerStarted && process.env.QR_LIVE_SERVER !== 'false') {
+      const port = Number(process.env.QR_LIVE_PORT ?? 9701);
+      startQrLiveServer({ page, port, log });
+      qrLiveServerStarted = true;
+    }
+
+    // ─── 长 poll 等 chat-list (期间 QR refresh 推) ─────────
+    const loginResult = await waitForLogin({
+      page,
+      diagnosticsDir,
+      log,
+      onQrRefresh: (dataUrl, refreshCount) => {
+        emitQr(dataUrl, refreshCount);
+      },
+      cancelSignal: bindAbortController.signal,
+    });
+    log.info(loginResult, 'D8-2 wait-for-login result');
+
+    if (loginResult.outcome === 'cancelled') {
+      emitBindState('cancelled', 'cancel-bind from backend');
+      return { outcome: 'cancelled' };
+    }
+
+    if (loginResult.outcome === 'timeout') {
+      emitBindState('timeout', 'wait-for-login 10min timeout');
+      return { outcome: 'timeout' };
+    }
+
+    if (loginResult.outcome === 'chat-list') {
+      g_state = 'chat-list';
+      emitBindState('connecting', 'chat-list selector matched · 15s flush');
+      log.info('LOGIN SUCCESS · 15s flush for IndexedDB/Cookies');
+      await new Promise((r) => setTimeout(r, 15_000));
       try {
-        await page.evaluate(() => {
-          // WA Web 把 session 存 'wawc_db' / 'model-storage' 等 IndexedDB
-          // 等所有 transaction 完成 · 没直接 API · 用 storage estimate 触发 flush
-          return navigator.storage?.estimate?.();
-        });
+        await page.evaluate(() => navigator.storage?.estimate?.());
       } catch {
         /* ignore */
       }
-
-      if (SOAK_MODE) {
-        // D7-1 · soak 模式不 close · 启 idle 调度器 · 等 24h
-        log.info('D7-1 · SOAK_MODE=true · 不 close browser · 启 idle scheduler');
-        startIdleSchedulerIfNeeded();
-      } else {
-        // D6 测模式 (默认) · graceful close 验 C5/C6
-        log.info('D6 · graceful shutdown to persist session for C5/C6 verify');
-        try {
-          await browser.close();
-        } catch (err) {
-          log.warn({ err: err instanceof Error ? err.message : err }, 'browser.close after login failed');
-        }
-        log.info('D6 · runtime exit code=0 · 重启同 user-data-dir 应免扫码');
-        process.exit(0);
-      }
+      emitBindState('connected', 'flush done · session locked');
+      emitConnectionOpen(loginResult.chatListSelector ?? '[data-testid="chat-list"]');
+      startIdleSchedulerIfNeeded();
+      return { outcome: 'connected' };
     }
-  } else if (result.state === 'chat-list') {
-    log.info('launched directly into chat-list · session restored from user-data-dir (C6 PASS)');
-    // D7-1 · rehydrate 路径 · 直接进 idle scheduler (如开了 soak)
-    startIdleSchedulerIfNeeded();
+
+    emitBindState('failed', loginResult.error ?? 'unknown');
+    return { outcome: 'failed', error: loginResult.error };
   }
 
-  // ─── 占位心跳 (D4-5 替换为 WS) ────────────────────────────────
-  setInterval(() => {
-    log.info({ ts: Date.now(), state: result.state }, 'heartbeat (placeholder)');
-  }, 30_000);
+  // ─── D8-2 · WS 命令 handler (WS 模式才生效) ─────────────────────
+  if (wsClient) {
+    let runningPromise: Promise<unknown> | null = null;
+    wsClient.setOnCommand(async (cmd: RuntimeCommand) => {
+      log.info({ type: cmd.type, requestId: cmd.requestId }, 'D8-2 cmd received');
+      if (cmd.type === 'init') {
+        // D8-2: init 是空操作 · runtime 已自带 env 配置
+        // D9+ 可让 backend 通过 init 推 fingerprint / locale 覆盖 env
+        return { ok: true, data: { initialized: true, slotId: slotIdNum } };
+      }
+      if (cmd.type === 'start-bind') {
+        if (fsm.isInProgress()) {
+          return { ok: false, error: `bind already in progress · current=${fsm.state}` };
+        }
+        fsm.resetIfTerminal();
+        // 异步启动 · 立即 ACK · 流程通过事件流回报
+        runningPromise = runBindFlow()
+          .then((r) => {
+            log.info({ outcome: r.outcome, error: r.error }, 'D8-2 runBindFlow ended');
+            // terminal state 让 fsm 准备下一轮
+            fsm.resetIfTerminal();
+            runningPromise = null;
+          })
+          .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.error({ err: msg }, 'runBindFlow threw');
+            emitBindState('failed', msg);
+            fsm.resetIfTerminal();
+            runningPromise = null;
+          });
+        return { ok: true, data: { state: 'starting' } };
+      }
+      if (cmd.type === 'cancel-bind') {
+        if (!fsm.isInProgress()) {
+          return { ok: false, error: 'no bind in progress' };
+        }
+        bindAbortController?.abort();
+        return { ok: true, data: { wasInState: fsm.state } };
+      }
+      if (cmd.type === 'fetch-status') {
+        return {
+          ok: true,
+          data: {
+            state: fsm.state,
+            sessionStartedAt: fsm.sessionStartedAt,
+            pageState: g_state,
+          },
+        };
+      }
+      if (cmd.type === 'shutdown') {
+        // 优雅关 · 不立刻死 · 等 ACK 发出去再退
+        setTimeout(() => void shutdown('cmd-shutdown'), 200);
+        return { ok: true, data: { willShutdown: true } };
+      }
+      // send-text / send-media · D10 W2 实装 · 现 stub
+      return { ok: false, error: `cmd type "${cmd.type}" not implemented in D8-2 (W2 work)` };
+    });
+    log.info('D8-2 · WS command handlers registered (init/start-bind/cancel-bind/fetch-status/shutdown)');
+  }
 
-  // graceful shutdown
-  const shutdown = async (signal: string) => {
-    log.warn({ signal }, 'shutdown signal received');
-    if (idleScheduler) {
-      idleScheduler.stop();
-    }
-    if (wsClient) {
-      await wsClient.stop();
-    }
+  // ─── 启动行为分流 ───────────────────────────────────────────────
+  if (wsClient) {
+    // WS 模式 · 等 backend 发 start-bind · 不自动跑
+    log.info('D8-2 · WS mode · waiting for start-bind command from backend');
+  } else {
+    // standalone 模式 (D6 backward compat) · 自动跑一轮 + close
+    log.info('D8-2 · standalone mode · auto-trigger runBindFlow (D6 path)');
+    void runBindFlow().then(async (r) => {
+      log.info({ outcome: r.outcome }, 'standalone runBindFlow ended');
+      if (r.outcome === 'connected' || r.outcome === 'rehydrated') {
+        if (!SOAK_MODE) {
+          log.info('D6 standalone · no SOAK · graceful close + exit');
+          try {
+            await browser.close();
+          } catch {
+            /* ignore */
+          }
+          process.exit(0);
+        }
+      }
+    });
+  }
+
+  // ─── graceful shutdown ───────────────────────────────────────────
+  const shutdown = async (signal: string): Promise<void> => {
+    log.warn({ signal, fsmState: fsm.state }, 'shutdown signal received');
+    if (idleScheduler) idleScheduler.stop();
+    if (wsClient) await wsClient.stop();
     try {
       await browser.close();
     } catch (err) {
@@ -420,8 +569,9 @@ async function main() {
       soakMode: SOAK_MODE,
       humanBehavior: HUMAN_BEHAVIOR_ENABLED,
       wsBridge: !!wsClient,
+      fsmState: fsm.state,
     },
-    'runtime ready · D8-1 WS bridge active when configured',
+    'runtime ready · D8-2 bind 主链路 (WS or standalone)',
   );
 }
 

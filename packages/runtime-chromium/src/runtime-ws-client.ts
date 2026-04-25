@@ -50,6 +50,13 @@ export class RuntimeWsClient {
 
   constructor(private opts: RuntimeWsClientOptions) {}
 
+  /**
+   * D8-2 · 后绑 onCommand · 因为 page 准备好后才能定义真 handler
+   */
+  setOnCommand(handler: NonNullable<RuntimeWsClientOptions['onCommand']>): void {
+    this.opts.onCommand = handler;
+  }
+
   start(): void {
     this.intentionalClose = false;
     this.connect();

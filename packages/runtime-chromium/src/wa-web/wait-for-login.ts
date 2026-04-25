@@ -24,10 +24,14 @@ export interface WaitForLoginOptions {
   timeoutMs?: number;       // 默认 10 min · 真扫码场景
   pollIntervalMs?: number;  // 默认 2s
   refreshQrEverySec?: number; // QR 自动刷新检测 · 默认 25s 重新提一次 · 即使 selector 没变
+  // 2026-04-25 · D8-2 · QR 刷新时回调 · backend 通过 WS 拿到推 UI
+  onQrRefresh?: (dataUrl: string, refreshCount: number) => void;
+  // 2026-04-25 · D8-2 · 取消信号 · cancel-bind 命令触发
+  cancelSignal?: AbortSignal;
 }
 
 export interface WaitForLoginResult {
-  outcome: 'chat-list' | 'timeout' | 'error';
+  outcome: 'chat-list' | 'timeout' | 'error' | 'cancelled';
   durationMs: number;
   qrRefreshCount: number;
   finalState: 'qr' | 'chat-list' | 'splash' | 'unknown';
@@ -54,6 +58,18 @@ export async function waitForLogin(opts: WaitForLoginOptions): Promise<WaitForLo
   log.info({ timeoutMs, pollMs, qrRefreshMs }, 'D6 waitForLogin started · 等用户扫码');
 
   while (Date.now() - startedAt < timeoutMs) {
+    // 2026-04-25 · D8-2 · 取消信号检查 (每轮 poll 前)
+    if (opts.cancelSignal?.aborted) {
+      log.warn({ qrRefreshCount }, 'D8-2 waitForLogin CANCELLED · cancel-bind 命令触发');
+      return {
+        outcome: 'cancelled',
+        durationMs: Date.now() - startedAt,
+        qrRefreshCount,
+        finalState: 'qr',
+        chatListSelector: null,
+      };
+    }
+
     // 命中 chat-list = 成功
     const chatM = await findFirstMatch(opts.page, WA_SELECTORS.chatList);
     if (chatM.found) {
@@ -90,6 +106,14 @@ export async function waitForLogin(opts: WaitForLoginOptions): Promise<WaitForLo
           qrRefreshCount += 1;
           lastQrAt = Date.now();
           log.info({ qrRefreshCount, bytes: newQrDataUrl.length }, 'QR refreshed (落盘 last-qr.dataurl.txt)');
+          // 2026-04-25 · D8-2 · 推给 backend (经 WS · backend 缓存供 UI 拉)
+          if (opts.onQrRefresh) {
+            try {
+              opts.onQrRefresh(newQrDataUrl, qrRefreshCount);
+            } catch (cbErr) {
+              log.warn({ err: cbErr instanceof Error ? cbErr.message : cbErr }, 'onQrRefresh callback threw');
+            }
+          }
         }
       } catch (err) {
         log.warn({ err: err instanceof Error ? err.message : err }, 'QR refresh extraction failed');
