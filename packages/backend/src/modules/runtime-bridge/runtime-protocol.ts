@@ -4,6 +4,11 @@
 // D14+ 重构到 packages/shared/ 真正共享 · 现在双方各持一份不冲突.
 //
 // type 命名 / 字段顺序保持一致 · 防协议漂移.
+//
+// D8-3 · 语义边界 (Codex 锁定):
+//   bindState — runtime 当前一轮 bind session 的逻辑状态 (idle/starting/qr/connecting/connected/timeout/cancelled/failed)
+//   pageState — Chromium 页面物理状态 (qr/chat-list/splash/closed/etc)
+//   两者解耦. UI 视图取 bindState · 诊断取 pageState.
 
 export type RuntimeCommandType =
   | 'init'

@@ -30,6 +30,8 @@ import type {
   QrEvent,
   BindStateEvent,
   ConnectionOpenEvent,
+  ConnectionCloseEvent,
+  RuntimeErrorEvent,
 } from './protocol/runtime-protocol';
 
 const log = pino({
@@ -360,6 +362,93 @@ async function main() {
     wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
   };
 
+  // 2026-04-25 · D8-3 · connection-close emit · 4 类 (Codex 锁定)
+  // category: page-closed | browser-disconnected | wa-logged-out | runtime-fatal
+  let connectionCloseEmitted = false; // 防多源重复推 (page close + browser disconnect 可能同时触发)
+  const emitConnectionClose = (
+    reason: string,
+    category: 'page-closed' | 'browser-disconnected' | 'wa-logged-out' | 'runtime-fatal',
+  ): void => {
+    if (connectionCloseEmitted) return;
+    connectionCloseEmitted = true;
+    g_state = 'closed';
+    log.warn({ reason, category }, 'D8-3 connection-close');
+    if (!wsClient) return;
+    const evt: Omit<ConnectionCloseEvent, 'kind'> & { kind: 'event' } = {
+      kind: 'event',
+      type: 'connection-close',
+      slotId: slotIdNum,
+      ts: Date.now(),
+      reason,
+      category,
+    };
+    wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
+  };
+
+  // 2026-04-25 · D8-3 · runtime-error emit · 只转发 · 不 respawn (Codex 锁)
+  const emitRuntimeError = (errorMsg: string, fatal: boolean): void => {
+    log.error({ err: errorMsg, fatal }, 'D8-3 runtime-error');
+    if (!wsClient) return;
+    const evt: Omit<RuntimeErrorEvent, 'kind'> & { kind: 'event' } = {
+      kind: 'event',
+      type: 'runtime-error',
+      slotId: slotIdNum,
+      ts: Date.now(),
+      error: errorMsg,
+      fatal,
+    };
+    wsClient.emitEvent(evt as Parameters<typeof wsClient.emitEvent>[0]);
+  };
+
+  // ─── D8-3 · 挂 page/browser/process 关闭监听 ──────────────────────
+  page.on('close', () => {
+    emitConnectionClose('page closed (Chromium tab)', 'page-closed');
+  });
+  browser.on('disconnected', () => {
+    emitConnectionClose('browser disconnected (Chromium 进程退)', 'browser-disconnected');
+  });
+  process.on('uncaughtException', (err) => {
+    emitRuntimeError(`uncaughtException: ${err.message}`, true);
+  });
+  process.on('unhandledRejection', (reason) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    emitRuntimeError(`unhandledRejection: ${msg}`, false);
+  });
+
+  // 2026-04-25 · D8-3 · chat-list watchdog · 监 WA 主动踢号
+  // 30s 周期 · chat-list 选择器消失 = WA logged out · 立刻推 connection-close
+  // 仅 SOAK_MODE / always-on · 一次性绑测不启
+  let chatListWatchdog: NodeJS.Timeout | null = null;
+  let chatListMissCount = 0;
+  const startChatListWatchdog = (): void => {
+    if (chatListWatchdog) return;
+    log.info('D8-3 chat-list watchdog STARTED · 30s 周期 · 检测 WA 踢号');
+    chatListWatchdog = setInterval(() => {
+      void (async () => {
+        if (g_state !== 'chat-list') return; // 不在登录态不检
+        try {
+          // findFirstMatch 可能开销小 · 直接 page.$ 也行
+          const res = await page.$('[data-testid="chat-list"], #pane-side');
+          if (res) {
+            await res.dispose();
+            chatListMissCount = 0;
+            return;
+          }
+          chatListMissCount += 1;
+          log.warn({ chatListMissCount }, 'D8-3 chat-list watchdog · selector NOT found');
+          // 连续 2 次 (60s) 没 = 真踢 · 不是临时 DOM 抖动
+          if (chatListMissCount >= 2) {
+            emitConnectionClose('chat-list selector missing 60s · WA likely logged us out', 'wa-logged-out');
+            if (chatListWatchdog) clearInterval(chatListWatchdog);
+            chatListWatchdog = null;
+          }
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : err }, 'chat-list watchdog tick failed');
+        }
+      })();
+    }, 30_000);
+  };
+
   // ─── D8-2 · 取消 controller (cancel-bind 触发) ───────────────────
   let bindAbortController: AbortController | null = null;
   let qrLiveServerStarted = false;
@@ -459,6 +548,12 @@ async function main() {
       emitBindState('connected', 'flush done · session locked');
       emitConnectionOpen(loginResult.chatListSelector ?? '[data-testid="chat-list"]');
       startIdleSchedulerIfNeeded();
+      // 2026-04-25 · D8-3 · WA logged-out 监测 · 周期检查 chat-list 在不在
+      // 真用户被踢: chat-list 消失 · 出现 unsupported / qr / loading splash · 任一都不是 chat-list
+      // SOAK_MODE 下才启 (D6 一次性测不需要 · 跑完即关)
+      if (SOAK_MODE) {
+        startChatListWatchdog();
+      }
       return { outcome: 'connected' };
     }
 

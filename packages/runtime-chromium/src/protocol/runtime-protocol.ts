@@ -9,6 +9,18 @@
 //   - kind: 'cmd' | 'ack' | 'event'
 //   - 命令 / ACK 用 requestId 关联
 //   - 事件单向推 · 不带 requestId
+//
+// 2026-04-25 · D8-3 · 语义边界 (Codex 锁定):
+//
+//   bindState (BindStateEvent.state) — runtime 当前一轮 bind session 的逻辑状态
+//     · idle: 没在跑 bind (默认 / 一轮结束后)
+//     · starting / qr / connecting / connected: 一轮中
+//     · timeout / cancelled / failed: 一轮终态 · 即将 reset 回 idle
+//
+//   pageState (HeartbeatEvent.pageState) — Chromium 页面物理状态
+//     · qr / chat-list / splash / unknown / connecting / closed
+//     · 跟 bindState 解耦 · 例: bindState=idle 但 pageState=chat-list (rehydrate · session 已恢复但没新开 bind)
+//     · UI 应当只把 bindState 当 "bind UI 视图状态" · pageState 当 "诊断信息"
 
 // ═══ 命令 (Backend → Runtime) ═══════════════════════════════════════
 export type RuntimeCommandType =

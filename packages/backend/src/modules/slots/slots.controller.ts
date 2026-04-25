@@ -17,7 +17,7 @@ import type { SlotResponseDto } from './dto/slot-response.dto';
 import { SendTextMessageDto } from './dto/send-message.dto';
 import { SendMediaMessageDto } from './dto/send-media.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
-import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
+import { BaileysService } from '../baileys/baileys.service';
 import {
   SimInfoService,
   type UpdateSimInfoDto,
@@ -162,18 +162,20 @@ export class SlotsController {
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { phoneNumber?: string } = {},
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · 通过 SlotsService facade · RUNTIME_MODE 切 chromium 时走 RuntimeBridge
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.startBind(id, body.phoneNumber);
+    return this.slots.bindStartBind(id, body.phoneNumber);
   }
 
   @Get(':id/bind-existing/status')
   async bindStatus(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · facade · chromium runtime 直接返 backend 缓存
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.getStatus(id);
+    return this.slots.bindGetStatus(id);
   }
 
   @Post(':id/bind-existing/cancel')
@@ -181,9 +183,10 @@ export class SlotsController {
   async cancelBind(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · facade · 走 SlotsService 而非直接 BaileysService
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.cancelBind(id);
+    return this.slots.bindCancelBind(id);
   }
 
   // ── 消息收发 (M2 W2) ──────────────────────────────────

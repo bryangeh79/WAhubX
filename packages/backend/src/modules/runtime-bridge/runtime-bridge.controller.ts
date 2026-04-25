@@ -1,7 +1,18 @@
 // 2026-04-25 · D8-2 · admin endpoint · 调试用 · 直接触发 runtime bind 流程
 //
-// 临时性 · D8-3 后 SlotsController.startBind 内部走这个 service · 用户走业务路径
-// 不在 D8-2 范围: 鉴权 (现在 @Public · 任何人能调 · 仅限本机用)
+// ⚠ 临时调试接口 · D14 必须删除 (Codex 锁定 · 不带进交付版)
+//
+// 用户/前端 (BindExistingModal 等) 必须走 /slots/:id/bind-existing/* ·
+// 那条路径会经 SlotsService.findOne 做租户校验 · 这条路径无校验 · 任何人能调.
+//
+// 当前用途:
+//   - D8-2/D8-3 调试 · 验 RuntimeBridge 行为
+//   - 本机 dev 时手动触发 bind (curl/postman)
+//
+// D14 删除条件:
+//   - SlotsController.startBind 已通过 SlotsService.bindStartBind 走 RuntimeBridge
+//   - frontend BindExistingModal 已对接正式响应字段
+//   - 没有任何代码引用 /admin/runtime/*
 
 import {
   Controller,

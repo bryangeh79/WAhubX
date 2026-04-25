@@ -1,3 +1,14 @@
+// 2026-04-25 · D8-3 · 该 modal 当前调正式 /slots/:id/bind-existing/* endpoint
+// SlotsService.bindStartBind/bindCancelBind/bindGetStatus 内部按 RUNTIME_MODE
+// 切 chromium / baileys · 前端无感知.
+//
+// TODO (D14): RUNTIME_MODE=chromium 时响应来自 RuntimeBridgeService 缓存 · 字段形态跟老
+// BindStatusView 略有差异 (新增 bindState/qrDataUrl/runtime 字段). 这个 modal 现在的字段
+// 映射假设老 baileys 形态. 等 D9 ISlotRuntime 接口落地后 · 应统一响应字段 · 把 bindState
+// 跟 state 合并 · qrDataUrl 跟 qr 合并. D14 收敛点.
+//
+// 不要在 D8-3 阶段直接调 /admin/runtime/* endpoint · 那只是临时调试接口 · 不带租户校验.
+// 必须走 /slots/:id/bind-existing/* · 会自动经 SlotsService.findOne 做权限校验.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Checkbox, Input, Modal, Radio, Space, Spin, Tag, Typography } from 'antd';
 import QRCode from 'qrcode';

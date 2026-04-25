@@ -44,6 +44,11 @@ interface PendingRequest {
 
 // 2026-04-25 · D8-2 · per-slot bind 状态缓存 (Codex 拍板)
 // UI 拉这个就能渲 · 不用每次去问 runtime
+//
+// 语义边界 (D8-3 · Codex 锁定):
+//   bindState = bind session 状态 (idle 表示一轮结束)
+//   不等于 page 物理状态 · UI 取这个判断 "扫码进度"
+//   page 物理状态从 heartbeat.pageState 单独读 · 仅诊断用
 export interface BindStateCache {
   slotId: number;
   tenantId: number;
@@ -62,6 +67,11 @@ export interface BindStateCache {
   sessionStartedAt: number;
   /** connected 时间 · 未到为 0 */
   connectedAt: number;
+  // 2026-04-25 · D8-3 · 最后一次 connection-close 详情 (Codex 锁定 · 区分原因)
+  /** page-closed | browser-disconnected | wa-logged-out | runtime-fatal | null */
+  lastDisconnectCategory: string | null;
+  lastDisconnectReason: string | null;
+  lastDisconnectAt: number;
 }
 
 @Injectable()
@@ -350,6 +360,7 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * D8-2 · 把 runtime event 投影到 per-slot 缓存 · UI 直接读这个
+   * D8-3 · 加 connection-close 分类 + bindState/pageState 语义边界
    */
   private updateBindStateCache(conn: ClientConn, evt: RuntimeEvent): void {
     let cache = this.bindStates.get(conn.slotId);
@@ -365,6 +376,9 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
         lastEventAt: 0,
         sessionStartedAt: 0,
         connectedAt: 0,
+        lastDisconnectCategory: null,
+        lastDisconnectReason: null,
+        lastDisconnectAt: 0,
       };
       this.bindStates.set(conn.slotId, cache);
     }
@@ -375,15 +389,21 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
         cache.bindState = evt.state;
         if (evt.error) cache.error = evt.error;
         if (evt.state === 'starting') {
+          // 一轮新开 · 清旧
           cache.sessionStartedAt = evt.ts;
           cache.error = null;
           cache.qrDataUrl = null;
           cache.qrRefreshCount = 0;
           cache.chatListSelector = null;
           cache.connectedAt = 0;
+          // disconnect 信息保留 · 这样 UI 仍能看 "上次为何失败"
         }
         if (evt.state === 'connected') {
           cache.connectedAt = evt.ts;
+          // 成功连上 · 清 disconnect 历史 (这次干净了)
+          cache.lastDisconnectCategory = null;
+          cache.lastDisconnectReason = null;
+          cache.lastDisconnectAt = 0;
         }
         break;
       case 'qr':
@@ -394,11 +414,21 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
         cache.chatListSelector = evt.selector;
         break;
       case 'connection-close':
-        cache.bindState = 'idle';
-        cache.connectedAt = 0;
-        cache.error = evt.reason;
+        // D8-3 · 不直接覆盖 bindState · runtime 端会通过 bind-state event 显式切到 failed/idle
+        // 这里只记录 disconnect 详情 · UI 看 lastDisconnect* 知道为什么断
+        cache.lastDisconnectCategory = evt.category;
+        cache.lastDisconnectReason = evt.reason;
+        cache.lastDisconnectAt = evt.ts;
+        // 已 connected 的 session 被 close = 算非自愿断 · bindState 翻 failed
+        // (runtime 端 fsm 不一定能跑到 emitBindState · 比如 page 突然 close)
+        if (cache.bindState === 'connected') {
+          cache.bindState = 'failed';
+          cache.error = `connection lost: ${evt.category}`;
+          cache.connectedAt = 0;
+        }
         break;
       // heartbeat / message-upsert / runtime-log / runtime-error 不动 bind 缓存
+      // (runtime-error 单独转 EventEmitter2 给业务 · 不污染 bindState)
       default:
         break;
     }
