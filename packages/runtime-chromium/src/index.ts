@@ -20,6 +20,7 @@ import { runStartupChecks, IntegrityCheckFailedError } from './integrity-checks/
 import { loadWaWebAndDetect } from './wa-web/wa-web-loader';
 import { waitForLogin } from './wa-web/wait-for-login';
 import { startQrLiveServer } from './qr-live-server';
+import { detectCountry } from './wa-web/detect-country';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -46,6 +47,10 @@ const USER_AGENT =
   process.env.USER_AGENT ??
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
 
+// 2026-04-25 · D7-3 · 国家显式覆盖 · 不设则 ipinfo.io 探测
+// 例: PROXY_COUNTRY=MY (绕过探测 · 运维已知场景)
+const PROXY_COUNTRY = process.env.PROXY_COUNTRY ?? '';
+
 // ═══ 主流程 ════════════════════════════════════════════════════════
 
 async function main() {
@@ -59,6 +64,30 @@ async function main() {
   const profileDir = path.join(SESSION_DIR, 'profile');
   const diagnosticsDir = path.join(SESSION_DIR, 'diagnostics');
   fs.mkdirSync(diagnosticsDir, { recursive: true });
+
+  // ─── D7-3 · 国家探测 + locale 一组参数 ────────────────────────
+  // 关键: 让 WA 看到的国籍画像全栈一致 (timezone / locale / lang / Accept-Language)
+  // UK SIM 在马来 IP + en-US locale + Asia/KL timezone = 三处冲突 = 必踢
+  const countryResult = await detectCountry({
+    proxyUrl: PROXY_URL || null,
+    proxyAuth: PROXY_USER && PROXY_PASS ? { user: PROXY_USER, pass: PROXY_PASS } : undefined,
+    envCountry: PROXY_COUNTRY || null,
+    log,
+  });
+  log.info(
+    {
+      country: countryResult.locale.country,
+      timezone: countryResult.locale.timezone,
+      locale: countryResult.locale.locale,
+      languages: countryResult.locale.languages,
+      detectedRaw: countryResult.detectedCountry,
+      source: countryResult.source,
+      fallback: countryResult.fallback,
+      durationMs: countryResult.durationMs,
+    },
+    'D7-3 country/locale resolved',
+  );
+  const localeParams = countryResult.locale;
 
   // ─── Chromium launch args ────────────────────────────────────
   // 注意: 不在这里加 --user-data-dir · puppeteer 会忽略 args 里的此 flag
@@ -75,6 +104,8 @@ async function main() {
     '--enable-features=NetworkServiceInProcess',
     // D5 · Layer 1 · UA 覆盖 (已实锤破绽: 默认 UA 含 HeadlessChrome → WA 拒)
     `--user-agent=${USER_AGENT}`,
+    // D7-3 · 启动语言跟代理国家联动
+    `--lang=${localeParams.locale}`,
   ];
 
   // D6 · 远程调试 · 让 host 浏览器访问容器 chromium 实时屏幕 · 扫活 QR
@@ -116,11 +147,12 @@ async function main() {
 
   // D5 · Layer 3 · CDP Network.setUserAgentOverride (彻底覆盖 · 含子 frame 和 service worker)
   // userAgentMetadata 必须跟 UA 一致 · 否则 Client Hints 揭穿
+  // D7-3 · acceptLanguage 跟代理国家联动 (不再写死 en-US)
   try {
     const cdp = await page.createCDPSession();
     await cdp.send('Network.setUserAgentOverride', {
       userAgent: USER_AGENT,
-      acceptLanguage: 'en-US,en;q=0.9',
+      acceptLanguage: localeParams.acceptLanguage, // D7-3 · 国家驱动
       platform: 'Linux x86_64',
       userAgentMetadata: {
         brands: [
@@ -142,7 +174,31 @@ async function main() {
         mobile: false,
       },
     } as Parameters<typeof cdp.send>[1]);
-    log.info('D5 CDP Network.setUserAgentOverride applied (incl. userAgentMetadata)');
+    log.info(
+      { acceptLanguage: localeParams.acceptLanguage },
+      'D5+D7-3 CDP Network.setUserAgentOverride applied (UA + acceptLanguage)',
+    );
+
+    // D7-3 · CDP Emulation.setTimezoneOverride (跟代理国家联动)
+    // 不设的话 · headless Chromium 会用系统时区 (容器内是 UTC) · 跟代理国家不一致
+    try {
+      await cdp.send('Emulation.setTimezoneOverride', {
+        timezoneId: localeParams.timezone,
+      } as Parameters<typeof cdp.send>[1]);
+      log.info({ timezone: localeParams.timezone }, 'D7-3 CDP setTimezoneOverride applied');
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : err }, 'D7-3 setTimezoneOverride failed');
+    }
+
+    // D7-3 · CDP Emulation.setLocaleOverride (Intl.* 全套跟着改)
+    try {
+      await cdp.send('Emulation.setLocaleOverride', {
+        locale: localeParams.locale,
+      } as Parameters<typeof cdp.send>[1]);
+      log.info({ locale: localeParams.locale }, 'D7-3 CDP setLocaleOverride applied');
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : err }, 'D7-3 setLocaleOverride failed');
+    }
   } catch (err) {
     log.warn({ err: err instanceof Error ? err.message : err }, 'CDP UA override failed · falling back to layer 1+2');
   }
