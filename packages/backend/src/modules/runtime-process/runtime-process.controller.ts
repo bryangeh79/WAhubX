@@ -48,4 +48,11 @@ export class RuntimeProcessController {
   async kill(@Param('slotId', ParseIntPipe) slotId: number): Promise<ProcessState> {
     return this.mgr.stop(slotId, { graceful: false });
   }
+
+  // 2026-04-25 · D12-3 · 手动触发 auto-spawn 扫描 (调试用)
+  @Public()
+  @Post('auto-spawn')
+  async autoSpawn(): Promise<{ scanned: number; eligible: number; started: number }> {
+    return this.mgr.triggerAutoSpawn();
+  }
 }

@@ -21,6 +21,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -29,7 +30,11 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { DataSource } from 'typeorm';
 import { resolveRuntimeLaunchConfig, type RuntimeLaunchConfig } from '@wahubx/shared';
-import { AccountSlotEntity } from '../slots/account-slot.entity';
+import {
+  AccountSlotEntity,
+  AccountSlotRole,
+  AccountSlotStatus,
+} from '../slots/account-slot.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import {
   type ProcessState,
@@ -45,20 +50,113 @@ interface ProcessHandle {
 }
 
 @Injectable()
-export class RuntimeProcessManagerService implements OnModuleDestroy {
+export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RuntimeProcessManagerService.name);
   private readonly handles = new Map<number, ProcessHandle>();
+  // D12-3 · 防 onModuleInit 期间业务调 start (会走 race · 单实例约束兜底)
+  private autoSpawnInProgress = false;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService,
   ) {}
 
+  // 2026-04-25 · D12-3 · backend 启动后 auto-spawn 符合条件的 active slot
+  // (Codex 锁 6 边界 · 严格不越界)
+  async onModuleInit(): Promise<void> {
+    const enabled = this.config.get<string>('AUTO_SPAWN_ON_BOOT', 'true');
+    if (enabled === 'false') {
+      this.logger.log('D12-3 auto-spawn disabled · AUTO_SPAWN_ON_BOOT=false');
+      return;
+    }
+    // 不阻塞 onModuleInit · 异步起 (DB 还在初始化时 onModuleInit 顺序可能未完)
+    setTimeout(() => {
+      void this.autoSpawnActiveSlots();
+    }, 2_000);
+  }
+
   async onModuleDestroy(): Promise<void> {
-    // 进程退出时把所有子进程也收掉 · 不留孤儿
+    // 进程退出时把所有子进程也收掉 · 不留孤儿 (Codex 边界 5 · best-effort)
     const slots = Array.from(this.handles.keys());
-    this.logger.log(`onModuleDestroy · stopping ${slots.length} runtime processes`);
+    this.logger.log(`onModuleDestroy · stopping ${slots.length} runtime processes (best-effort)`);
     await Promise.all(slots.map((s) => this.stop(s, { graceful: true, timeoutMs: 5_000 }).catch(() => {})));
+  }
+
+  /**
+   * D12-3 · 判定一个 slot 是否要 backend 启动时自动拉起
+   * (Codex 边界 2 · 保守集合)
+   */
+  private shouldAutoStart(slot: AccountSlotEntity): boolean {
+    // 必须已绑账号
+    if (!slot.accountId) return false;
+    // 必须 customer_service (always-on 角色 · broadcast 号 D11 走批跑 · 不在这里启)
+    if (slot.role !== AccountSlotRole.CustomerService) return false;
+    // 状态必须在线集合 · empty/quarantine/suspended 排除
+    if (
+      slot.status !== AccountSlotStatus.Active &&
+      slot.status !== AccountSlotStatus.Warmup
+    ) {
+      return false;
+    }
+    // 冷却期内的 suspended 不拉
+    if (slot.suspendedUntil && slot.suspendedUntil > new Date()) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * D12-3 · 扫所有 slot · 符合条件的 stagger 启动
+   * Codex 边界 3: 一个一个起 · 间隔 3-10s · 不并发风暴
+   * Codex 边界 4: 单 slot 起不来只 log · 不影响别人
+   */
+  private async autoSpawnActiveSlots(): Promise<void> {
+    if (this.autoSpawnInProgress) return;
+    this.autoSpawnInProgress = true;
+    try {
+      const allSlots = await this.dataSource.getRepository(AccountSlotEntity).find();
+      const eligible = allSlots.filter((s) => this.shouldAutoStart(s));
+      this.logger.log(
+        `D12-3 auto-spawn scan · 总 ${allSlots.length} 个 slot · 符合条件 ${eligible.length} 个`,
+      );
+
+      if (eligible.length === 0) {
+        this.logger.log('D12-3 auto-spawn · 无符合条件 slot · 跳');
+        return;
+      }
+
+      // stagger 间隔 (Codex 边界 3): 默认 5s · env 可调 · 范围 3-30s
+      const intervalRaw = this.config.get<string>('AUTO_SPAWN_INTERVAL_MS', '5000');
+      const interval = Math.max(3_000, Math.min(30_000, parseInt(intervalRaw, 10) || 5_000));
+      this.logger.log(`D12-3 auto-spawn 间隔 ${interval}ms · 启动顺序 = slot id ASC`);
+
+      for (let i = 0; i < eligible.length; i++) {
+        const slot = eligible[i];
+        const order = `${i + 1}/${eligible.length}`;
+        this.logger.log(
+          `D12-3 auto-spawn ${order} · slot ${slot.id} (tenant=${slot.tenantId} idx=${slot.slotIndex} role=${slot.role})`,
+        );
+        try {
+          const state = await this.start(slot.id);
+          this.logger.log(
+            `D12-3 auto-spawn ${order} · slot ${slot.id} · result=${state.status} pid=${state.pid ?? '?'}`,
+          );
+        } catch (err) {
+          // Codex 边界 4: 单 slot 起不来 · log + 继续 · 不重试不升级
+          this.logger.error(
+            { err: err instanceof Error ? err.message : err, slotId: slot.id },
+            `D12-3 auto-spawn ${order} · slot ${slot.id} 启动失败 · 跳 · 继续下一个`,
+          );
+        }
+        // 最后一个不等
+        if (i < eligible.length - 1) {
+          await new Promise((r) => setTimeout(r, interval));
+        }
+      }
+      this.logger.log(`D12-3 auto-spawn 完成 · 处理 ${eligible.length} 个 slot`);
+    } finally {
+      this.autoSpawnInProgress = false;
+    }
   }
 
   // ═══ 公共 API ════════════════════════════════════════════════════
@@ -243,6 +341,26 @@ export class RuntimeProcessManagerService implements OnModuleDestroy {
    */
   listAll(): ProcessState[] {
     return Array.from(this.handles.values()).map((h) => ({ ...h.state }));
+  }
+
+  /**
+   * D12-3 · 手动触发 auto-spawn (admin 调试用 · onModuleInit 也走这个)
+   */
+  async triggerAutoSpawn(): Promise<{ scanned: number; eligible: number; started: number }> {
+    const allSlots = await this.dataSource.getRepository(AccountSlotEntity).find();
+    const eligible = allSlots.filter((s) => this.shouldAutoStart(s));
+    let started = 0;
+    for (const slot of eligible) {
+      try {
+        const state = await this.start(slot.id);
+        if (state.status === 'running' || state.status === 'starting') started += 1;
+      } catch {
+        /* ignore · 继续 */
+      }
+      // 间隔 3s (manual trigger 比 boot 快一点)
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+    return { scanned: allSlots.length, eligible: eligible.length, started };
   }
 
   // ═══ private ═════════════════════════════════════════════════════
