@@ -15,6 +15,7 @@ import type { Page } from 'puppeteer-core';
 import type { Logger } from 'pino';
 import { findFirstMatch, WA_SELECTORS } from './wa-web-selectors';
 import { captureEvidence, type EvidenceShot } from './screenshot-evidence';
+import { createNavTimingsTracker, type NavTimings } from './nav-timing';
 
 export type WaWebState = 'qr' | 'chat-list' | 'splash' | 'unknown';
 
@@ -24,6 +25,7 @@ export interface WaWebLoadResult {
   selector: string | null;
   qrCanvasDataUrl: string | null; // qr 状态时 · base64 image data URL
   evidence: EvidenceShot[];
+  timings: NavTimings; // D3 · 定位卡点用
 }
 
 const WA_WEB_URL = 'https://web.whatsapp.com';
@@ -49,17 +51,22 @@ export async function loadWaWebAndDetect(
   evidence.push(ev1);
   log.info({ url: ev1.url, png: ev1.pngPath }, 'evidence#1 captured (pre-load)');
 
-  // ─── 加载 WA Web ────────────────────────────────────────────
+  // ─── 加载 WA Web · 装 timing tracker ─────────────────────────
+  const tracker = createNavTimingsTracker(page, WA_WEB_URL);
   log.info({ url: WA_WEB_URL, timeout: NAV_TIMEOUT_MS }, 'navigating to WA Web');
+  tracker.markGoto();
   try {
     await page.goto(WA_WEB_URL, {
       waitUntil: 'networkidle2',
       timeout: NAV_TIMEOUT_MS,
     });
+    tracker.markNetworkIdle();
   } catch (err) {
     // networkidle2 未达可能仍在加载 chat 数据 · 不算失败 · 只 log
+    tracker.markNetworkIdleTimeout();
     log.warn({ err: err instanceof Error ? err.message : err }, 'goto did not reach networkidle2 · continuing');
   }
+  log.info(tracker.snapshot(), 'nav-timings after goto');
 
   // ─── Evidence #2 · WA Web 加载后 (state 未定) ─────────────────
   const ev2 = await captureEvidence(page, diagnosticsDir, 'post-load-wa-web');
@@ -76,12 +83,14 @@ export async function loadWaWebAndDetect(
     if (qrM.found) {
       state = 'qr';
       matchedSelector = qrM.selector;
+      tracker.markStateDetected();
       break;
     }
     const chatM = await findFirstMatch(page, WA_SELECTORS.chatList);
     if (chatM.found) {
       state = 'chat-list';
       matchedSelector = chatM.selector;
+      tracker.markStateDetected();
       break;
     }
     const splashM = await findFirstMatch(page, WA_SELECTORS.splash);
@@ -124,11 +133,15 @@ export async function loadWaWebAndDetect(
     'evidence#3 captured (state-detected)',
   );
 
+  const timings = tracker.snapshot();
+  log.info(timings, 'nav-timings final · use to diagnose stall point');
+
   return {
     state,
     detectedAt: Date.now(),
     selector: matchedSelector,
     qrCanvasDataUrl,
     evidence,
+    timings,
   };
 }

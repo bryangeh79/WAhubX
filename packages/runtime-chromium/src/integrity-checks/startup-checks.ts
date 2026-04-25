@@ -1,17 +1,22 @@
-// 2026-04-25 · runtime 启动后必须先过的安全闸 (C7 / C8 自动化验证)
+// 2026-04-25 · runtime 启动后必跑安全闸 (C7 整套自动化)
 //
-// D3 实装 · D2 仅占位 · index.ts 调用入口收口在这
-// 验证项 (按 § 第 4 轮 锁定 POC 验收标准):
-//   C7.2 · proxy 出口 IP 三段式 (browserIp === shellIp · browserIp !== hostPublicIp)
-//   C7.3.1 · iptables 53 DROP (init.sh 已装载 · 这里 verify dump)
-//   C7.3.2 · Chromium launch args 含 socks5h + host-resolver-rules + DnsOverHttps disable
-//   C7.3.3 · negative test (dig timeout · nslookup timeout · getent fail)
-//   C7.3.4 · positive test (browser fetch ipify ok)
+// 顺序固定 (符合 § 锁定 D3 第 1 条):
+//   1. C7.3 dns-leak (含 iptables 校验 + launch args 校验 + 4 子项)
+//   2. C7.2 proxy-egress (shell/browser/host 三段式)
 //
-// 不通过即抛 IntegrityCheckFailedError · runtime 立即退出.
-// runtime 开发周内 (D2) 这模块只导出占位 · D3 真实装
+// 任一失败:
+//   - 写 JSON 证据
+//   - 抛 IntegrityCheckFailedError · runtime 退码 2 退出
+//   - 不进入 WA Web 加载 (锁定: 整体性 fail-fast)
+//
+// 例外: env SKIP_INTEGRITY_CHECKS=true (仅 dev/test override · 生产禁用)
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { Page } from 'puppeteer-core';
+import type { Logger } from 'pino';
+import { checkDnsLeak, type DnsLeakCheckResult } from './dns-leak';
+import { checkProxyEgress, type ProxyEgressCheckResult } from './proxy-egress';
 
 export class IntegrityCheckFailedError extends Error {
   constructor(public readonly check: string, message: string) {
@@ -20,27 +25,110 @@ export class IntegrityCheckFailedError extends Error {
   }
 }
 
-export interface IntegrityCheckResult {
-  check: string;
-  ok: boolean;
-  details?: Record<string, unknown>;
-  error?: string;
+export interface StartupCheckReport {
+  runStartedAt: string;
+  durationMs: number;
+  overallPass: boolean;
+  failFastTriggered: boolean;
+  reportPath: string;
+  checks: Array<{
+    name: string;
+    pass: boolean;
+    durationMs: number;
+    error?: string;
+    details: unknown;
+  }>;
 }
 
 export interface StartupChecksOptions {
   page: Page;
-  proxyUrl: string | null; // socks5h://... · null 表示直连 (开发环境)
-  expectedShellIpFn?: () => Promise<string>; // 容器内 curl 出口 IP
-  expectedHostPublicIpFn?: () => Promise<string>; // host curl 出口 IP (开发期)
+  launchArgs: string[];
+  proxyUrl: string | null;
+  proxyAuth?: { user: string; pass: string };
+  hostPublicIp: string | null;
+  diagnosticsDir: string;
+  log: Logger;
+  failFast?: boolean; // 默认 true · SKIP_INTEGRITY_CHECKS env 可覆盖
 }
 
 /**
- * D2 占位 · D3 实装. 当前直接返 OK · 不阻断 D2 跑通 WA Web 加载.
- * D3 接入后会自动跑 C7.2 + C7.3 全套.
+ * 跑全套 + 写证据 · failFast 时任一失败抛 IntegrityCheckFailedError
  */
-export async function runStartupChecks(opts: StartupChecksOptions): Promise<IntegrityCheckResult[]> {
-  // TODO(D3): proxyEgress + dnsLeak 实装
-  return [
-    { check: 'startup-checks-stub', ok: true, details: { note: 'D3 will implement' } },
-  ];
+export async function runStartupChecks(opts: StartupChecksOptions): Promise<StartupCheckReport> {
+  const failFast = opts.failFast ?? process.env.SKIP_INTEGRITY_CHECKS !== 'true';
+  const startedAt = Date.now();
+  const checks: StartupCheckReport['checks'] = [];
+
+  // ─── 1. DNS leak (C7.3) ───────────────────────────────────────
+  const t1 = Date.now();
+  let dnsLeakResult: DnsLeakCheckResult | null = null;
+  let dnsErr: string | undefined;
+  try {
+    dnsLeakResult = await checkDnsLeak(opts.page, opts.launchArgs, opts.log);
+  } catch (e) {
+    dnsErr = e instanceof Error ? e.message : String(e);
+  }
+  checks.push({
+    name: 'dns-leak (C7.3.1-3.4)',
+    pass: dnsLeakResult?.pass ?? false,
+    durationMs: Date.now() - t1,
+    error: dnsErr ?? (dnsLeakResult?.pass ? undefined : 'one or more sub-checks failed'),
+    details: dnsLeakResult ?? { fatalError: dnsErr },
+  });
+
+  // ─── 2. Proxy egress (C7.2) ──────────────────────────────────
+  const t2 = Date.now();
+  let egressResult: ProxyEgressCheckResult | null = null;
+  let egressErr: string | undefined;
+  try {
+    egressResult = await checkProxyEgress(opts.page, opts.proxyUrl, opts.hostPublicIp, opts.log, opts.proxyAuth);
+  } catch (e) {
+    egressErr = e instanceof Error ? e.message : String(e);
+  }
+  checks.push({
+    name: 'proxy-egress (C7.2 three-way)',
+    pass: egressResult?.pass ?? false,
+    durationMs: Date.now() - t2,
+    error: egressErr ?? (egressResult?.pass ? undefined : egressResult?.reasons.join(' · ')),
+    details: egressResult ?? { fatalError: egressErr },
+  });
+
+  // ─── 报告 ─────────────────────────────────────────────────────
+  const overallPass = checks.every((c) => c.pass);
+  const ts = new Date(startedAt).toISOString().replace(/[:.]/g, '-');
+  const reportPath = path.join(opts.diagnosticsDir, `startup-checks-${ts}.json`);
+
+  await fs.mkdir(opts.diagnosticsDir, { recursive: true }).catch(() => {});
+  const report: StartupCheckReport = {
+    runStartedAt: new Date(startedAt).toISOString(),
+    durationMs: Date.now() - startedAt,
+    overallPass,
+    failFastTriggered: !overallPass && failFast,
+    reportPath,
+    checks,
+  };
+
+  try {
+    await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    opts.log.info({ reportPath, overallPass }, 'startup-checks report written');
+  } catch (err) {
+    opts.log.error({ err: err instanceof Error ? err.message : err }, 'failed to write startup-checks report');
+  }
+
+  // ─── fail-fast ────────────────────────────────────────────────
+  if (!overallPass && failFast) {
+    const firstFail = checks.find((c) => !c.pass)!;
+    const msg = `${firstFail.name} failed: ${firstFail.error ?? 'see report'} · report=${reportPath}`;
+    opts.log.error({ check: firstFail.name, error: firstFail.error, reportPath }, 'INTEGRITY CHECK FAILED · aborting');
+    throw new IntegrityCheckFailedError(firstFail.name, msg);
+  }
+
+  if (!overallPass && !failFast) {
+    opts.log.warn(
+      { failedChecks: checks.filter((c) => !c.pass).map((c) => c.name) },
+      'integrity checks failed but SKIP_INTEGRITY_CHECKS=true · continuing (DEV ONLY · UNSAFE)',
+    );
+  }
+
+  return report;
 }

@@ -16,7 +16,7 @@ import pino from 'pino';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { runStartupChecks } from './integrity-checks/startup-checks';
+import { runStartupChecks, IntegrityCheckFailedError } from './integrity-checks/startup-checks';
 import { loadWaWebAndDetect } from './wa-web/wa-web-loader';
 
 const log = pino({
@@ -90,19 +90,37 @@ async function main() {
     await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
   }
 
-  // ─── D3 占位 · integrity-checks (当前 stub 直返 OK) ─────────────
-  const checkResults = await runStartupChecks({
-    page,
-    proxyUrl: PROXY_URL || null,
-    expectedHostPublicIpFn: HOST_PUBLIC_IP ? async () => HOST_PUBLIC_IP : undefined,
-  });
-  for (const r of checkResults) {
-    if (!r.ok) {
-      log.error({ check: r.check, error: r.error }, 'integrity check FAILED · runtime aborting');
-      await browser.close();
+  // ─── D3 · integrity-checks · fail-fast 不进 WA Web ────────────
+  try {
+    const checkReport = await runStartupChecks({
+      page,
+      launchArgs,
+      proxyUrl: PROXY_URL || null,
+      proxyAuth: PROXY_USER && PROXY_PASS ? { user: PROXY_USER, pass: PROXY_PASS } : undefined,
+      hostPublicIp: HOST_PUBLIC_IP || null,
+      diagnosticsDir,
+      log,
+    });
+    log.info(
+      {
+        overallPass: checkReport.overallPass,
+        durationMs: checkReport.durationMs,
+        reportPath: checkReport.reportPath,
+        checks: checkReport.checks.map((c) => ({ name: c.name, pass: c.pass, durationMs: c.durationMs })),
+      },
+      'startup-checks done',
+    );
+  } catch (err) {
+    if (err instanceof IntegrityCheckFailedError) {
+      log.error({ check: err.check, message: err.message }, 'integrity FAIL · runtime exiting code=2');
+      try {
+        await browser.close();
+      } catch {
+        /* ignore */
+      }
       process.exit(2);
     }
-    log.info({ check: r.check, details: r.details }, 'integrity check passed');
+    throw err;
   }
 
   // ─── D2 Step 1-4 · 加载 WA Web + 状态识别 + 截图证据 ────────────
