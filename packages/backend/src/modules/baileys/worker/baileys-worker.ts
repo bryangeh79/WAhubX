@@ -36,7 +36,10 @@ import type {
   WorkerCommandAck,
   WorkerEvent,
   InitCommand,
+  StartBindCommand,
   SendTextCommand,
+  SendMediaCommand,
+  SendPresenceCommand,
 } from './worker-protocol';
 import { WORKER_HEARTBEAT_INTERVAL_MS } from './worker-protocol';
 import { buildProxyAgent, type ProxyDescriptor } from '../../../common/proxy-config';
@@ -45,11 +48,16 @@ import { buildProxyAgent, type ProxyDescriptor } from '../../../common/proxy-con
 // 每个 worker 进程只服务一个 slot · 全局单例足够
 
 let g_slotId = -1;
-let g_initialized = false;
+let g_config: InitCommand | null = null; // init 后存 · 后续 spawn 都用这份
 let g_sock: WASocket | null = null;
 let g_saveCreds: (() => Promise<void>) | null = null;
 let g_heartbeatTimer: NodeJS.Timeout | null = null;
 let g_shuttingDown = false;
+// bind 状态 · 只在 start-bind 期间活
+let g_bindActive = false;
+let g_bindMode: 'qr' | 'pair' = 'qr';
+let g_bindPairingPhone: string | undefined = undefined;
+let g_bindPairRequested = false;
 
 // worker 内部 logger · 通过 process.send 转发 · 父进程统一打 pino
 const logLocal = (level: 'info' | 'warn' | 'error', message: string): void => {
@@ -98,48 +106,107 @@ function emitEvent(evt: { type: WorkerEvent['type']; [k: string]: unknown }): vo
 // ═══ 命令处理 ═════════════════════════════════════════════════════════
 
 async function handleInit(cmd: InitCommand): Promise<void> {
-  if (g_initialized) {
+  if (g_config) {
     ack(cmd.requestId, false, undefined, 'worker already initialized');
     return;
   }
-
   g_slotId = cmd.slotId;
+  g_config = cmd;
+  startHeartbeat();
+  logLocal('info', `worker initialized for slot ${cmd.slotId} (index ${cmd.slotIndex})`);
+  ack(cmd.requestId, true);
+}
 
+// 统一创建 socket · bind 和 rehydrate 都走这里
+// rebind=true 表示这是 QR 流中的 515 重启 spawn · 保持原 auth state
+async function spawnSocket(): Promise<WASocket> {
+  if (!g_config) throw new Error('not initialized');
+  const cmd = g_config;
+  const { state, saveCreds } = await useMultiFileAuthState(cmd.sessionDir);
+  g_saveCreds = saveCreds;
+
+  const proxyAgent = cmd.proxy ? buildProxyAgent(cmd.proxy as ProxyDescriptor) : null;
+
+  const opts = cmd.fingerprint.baileysOpts;
+  const sock = makeWASocket({
+    version: cmd.waVersion,
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'warn' }) as unknown as ReturnType<typeof pino>,
+    browser: cmd.fingerprint.baileysBrowser,
+    agent: (proxyAgent ?? undefined) as never,
+    fetchAgent: (proxyAgent ?? undefined) as never,
+    syncFullHistory: false,
+    connectTimeoutMs: opts.connectTimeoutMs,
+    keepAliveIntervalMs: opts.keepAliveIntervalMs,
+    defaultQueryTimeoutMs: opts.defaultQueryTimeoutMs,
+    emitOwnEvents: opts.emitOwnEvents,
+    markOnlineOnConnect: opts.markOnlineOnConnect,
+  });
+
+  attachSocketListeners(sock);
+  g_sock = sock;
+  return sock;
+}
+
+async function handleRehydrate(requestId: string): Promise<void> {
+  if (!g_config) {
+    ack(requestId, false, undefined, 'not initialized');
+    return;
+  }
+  if (g_sock) {
+    ack(requestId, false, undefined, 'socket already exists');
+    return;
+  }
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(cmd.sessionDir);
-    g_saveCreds = saveCreds;
+    await spawnSocket();
+    ack(requestId, true);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logLocal('error', `rehydrate failed: ${msg}`);
+    ack(requestId, false, undefined, msg);
+  }
+}
 
-    const proxyAgent = cmd.proxy ? buildProxyAgent(cmd.proxy as ProxyDescriptor) : null;
-
-    const opts = cmd.fingerprint.baileysOpts;
-    g_sock = makeWASocket({
-      version: cmd.waVersion,
-      auth: state,
-      printQRInTerminal: false,
-      logger: pino({ level: 'warn' }) as unknown as ReturnType<typeof pino>,
-      browser: cmd.fingerprint.baileysBrowser,
-      agent: (proxyAgent ?? undefined) as never,
-      fetchAgent: (proxyAgent ?? undefined) as never,
-      syncFullHistory: false,
-      connectTimeoutMs: opts.connectTimeoutMs,
-      keepAliveIntervalMs: opts.keepAliveIntervalMs,
-      defaultQueryTimeoutMs: opts.defaultQueryTimeoutMs,
-      emitOwnEvents: opts.emitOwnEvents,
-      markOnlineOnConnect: opts.markOnlineOnConnect,
-    });
-
-    attachSocketListeners(g_sock);
-
-    g_initialized = true;
-    startHeartbeat();
-    logLocal('info', `worker initialized for slot ${cmd.slotId} (index ${cmd.slotIndex})`);
+async function handleStartBind(cmd: StartBindCommand): Promise<void> {
+  if (!g_config) {
+    ack(cmd.requestId, false, undefined, 'not initialized');
+    return;
+  }
+  if (g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket already exists · cancel first');
+    return;
+  }
+  g_bindActive = true;
+  g_bindMode = cmd.pairingPhoneNumber ? 'pair' : 'qr';
+  g_bindPairingPhone = cmd.pairingPhoneNumber;
+  g_bindPairRequested = false;
+  try {
+    await spawnSocket();
+    emitEvent({ type: 'bind-state', state: 'starting' });
     ack(cmd.requestId, true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logLocal('error', `init failed: ${msg}`);
+    logLocal('error', `start-bind failed: ${msg}`);
+    g_bindActive = false;
     ack(cmd.requestId, false, undefined, msg);
-    emitEvent({ type: 'worker-error', error: msg, fatal: true });
   }
+}
+
+async function handleCancelBind(requestId: string): Promise<void> {
+  if (!g_bindActive) {
+    ack(requestId, true);
+    return;
+  }
+  g_bindActive = false;
+  try {
+    g_sock?.end(undefined);
+  } catch {
+    /* ignore */
+  }
+  g_sock = null;
+  emitEvent({ type: 'bind-state', state: 'cancelled' });
+  ack(requestId, true);
 }
 
 function attachSocketListeners(sock: WASocket): void {
@@ -154,11 +221,36 @@ function attachSocketListeners(sock: WASocket): void {
   });
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, qr, lastDisconnect } = update;
+
+    // bind 流: QR 事件
+    if (qr && g_bindActive) {
+      if (g_bindMode === 'qr') {
+        emitEvent({ type: 'qr', qr });
+        emitEvent({ type: 'bind-state', state: 'qr' });
+      } else if (g_bindMode === 'pair' && !g_bindPairRequested && g_bindPairingPhone) {
+        g_bindPairRequested = true;
+        void requestPairingCode(sock, g_bindPairingPhone);
+      }
+    }
+
+    if (connection === 'connecting') {
+      if (g_bindActive) emitEvent({ type: 'bind-state', state: 'connecting' });
+    }
+
     if (connection === 'open') {
       const userId = sock.user?.id ?? undefined;
       emitEvent({ type: 'connection-open', userId });
+      if (g_bindActive) {
+        g_bindActive = false;
+        emitEvent({
+          type: 'bind-state',
+          state: 'connected',
+          phoneNumber: userId?.split(':')[0].split('@')[0],
+        });
+      }
     }
+
     if (connection === 'close') {
       const code =
         lastDisconnect?.error instanceof Boom
@@ -166,7 +258,31 @@ function attachSocketListeners(sock: WASocket): void {
           : 0;
       const reason =
         Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown';
+
+      // 515 restartRequired: 扫码成功 WA 要求重开 socket · worker 自动处理
+      if (code === DisconnectReason.restartRequired && g_bindActive) {
+        logLocal('info', `restart required · respawning socket with registered creds`);
+        try {
+          g_sock?.end(undefined);
+        } catch {
+          /* ignore */
+        }
+        g_sock = null;
+        g_bindPairRequested = false; // pair 码只首次需要 · 重启不再请求
+        void spawnSocket().catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logLocal('error', `restart respawn failed: ${msg}`);
+          g_bindActive = false;
+          emitEvent({ type: 'bind-state', state: 'failed', error: msg });
+        });
+        return;
+      }
+
       emitEvent({ type: 'connection-close', code, reason });
+      if (g_bindActive) {
+        g_bindActive = false;
+        emitEvent({ type: 'bind-state', state: 'failed', error: `连接关闭 (${reason})` });
+      }
     }
   });
 
@@ -178,6 +294,19 @@ function attachSocketListeners(sock: WASocket): void {
       messages: evt.messages as unknown[],
     });
   });
+}
+
+async function requestPairingCode(sock: WASocket, phone: string): Promise<void> {
+  try {
+    // baileys requestPairingCode 需等 socket noise handshake 完成 · qr 事件是标志
+    const code = await sock.requestPairingCode(phone);
+    const formatted = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+    emitEvent({ type: 'pairing-code', code: formatted });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logLocal('error', `requestPairingCode failed: ${msg}`);
+    emitEvent({ type: 'bind-state', state: 'failed', error: `配对码请求失败 (${msg})` });
+  }
 }
 
 async function handleSendText(cmd: SendTextCommand): Promise<void> {
@@ -192,6 +321,56 @@ async function handleSendText(cmd: SendTextCommand): Promise<void> {
       waMessageId: sent?.key?.id ?? null,
       to: jid,
     });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ack(cmd.requestId, false, undefined, msg);
+  }
+}
+
+async function handleSendMedia(cmd: SendMediaCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const jid = cmd.to.includes('@') ? cmd.to : `${cmd.to}@s.whatsapp.net`;
+    const buf = Buffer.from(cmd.mediaBase64, 'base64');
+    let content: Record<string, unknown>;
+    switch (cmd.mediaType) {
+      case 'image':
+        content = { image: buf, caption: cmd.caption, mimetype: cmd.mimetype };
+        break;
+      case 'video':
+        content = { video: buf, caption: cmd.caption, mimetype: cmd.mimetype };
+        break;
+      case 'voice':
+      case 'audio':
+        content = { audio: buf, mimetype: cmd.mimetype ?? 'audio/ogg; codecs=opus', ptt: cmd.ptt ?? cmd.mediaType === 'voice' };
+        break;
+      default:
+        ack(cmd.requestId, false, undefined, `unsupported media type: ${String(cmd.mediaType)}`);
+        return;
+    }
+    const sent = await g_sock.sendMessage(jid, content as Parameters<WASocket['sendMessage']>[1]);
+    ack(cmd.requestId, true, {
+      waMessageId: sent?.key?.id ?? null,
+      to: jid,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    ack(cmd.requestId, false, undefined, msg);
+  }
+}
+
+async function handleSendPresence(cmd: SendPresenceCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const jid = cmd.to.includes('@') ? cmd.to : `${cmd.to}@s.whatsapp.net`;
+    await g_sock.sendPresenceUpdate(cmd.presence, jid);
+    ack(cmd.requestId, true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ack(cmd.requestId, false, undefined, msg);
@@ -234,9 +413,11 @@ function handleForceEvict(requestId: string): void {
 function handleFetchStatus(requestId: string): void {
   const ws = (g_sock as unknown as { ws?: { readyState?: number } })?.ws;
   ack(requestId, true, {
-    initialized: g_initialized,
+    initialized: g_config !== null,
+    hasSocket: g_sock !== null,
     wsOpen: ws?.readyState === 1,
     userId: g_sock?.user?.id ?? null,
+    bindActive: g_bindActive,
   });
 }
 
@@ -262,8 +443,23 @@ process.on('message', (msg: unknown) => {
     case 'init':
       void handleInit(cmd);
       break;
+    case 'rehydrate':
+      void handleRehydrate(cmd.requestId);
+      break;
+    case 'start-bind':
+      void handleStartBind(cmd);
+      break;
+    case 'cancel-bind':
+      void handleCancelBind(cmd.requestId);
+      break;
     case 'send-text':
       void handleSendText(cmd);
+      break;
+    case 'send-media':
+      void handleSendMedia(cmd);
+      break;
+    case 'send-presence':
+      void handleSendPresence(cmd);
       break;
     case 'shutdown':
       void handleShutdown(cmd.requestId);
@@ -274,9 +470,16 @@ process.on('message', (msg: unknown) => {
     case 'fetch-status':
       handleFetchStatus(cmd.requestId);
       break;
-    default:
-      // MVP 未实现的命令
-      ack(cmd.requestId, false, undefined, `command type "${cmd.type}" not implemented in MVP`);
+    default: {
+      // 穷举保护 · 若未来加了新 command 类型这里会 TS 错 · 提醒补 case
+      const exhaustive = cmd as WorkerCommand;
+      ack(
+        exhaustive.requestId,
+        false,
+        undefined,
+        `command type "${exhaustive.type}" not implemented`,
+      );
+    }
   }
 });
 

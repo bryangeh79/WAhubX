@@ -93,7 +93,7 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
     if (!slot) throw new Error(`slot ${slotId} 不存在`);
-    if (!slot.accountId) throw new Error(`slot ${slotId} 未绑号 · 无需 worker`);
+    // 允许 empty slot (accountId=null) · 因为 bind 流用 worker 做 QR handshake
 
     const initCmd = await this.buildInitCommand(slot);
     const handle = await this.forkAndInit(slot, initCmd);
@@ -111,6 +111,84 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
       text,
     });
     return ret;
+  }
+
+  /**
+   * 发送媒体 (image/video/voice/audio)
+   */
+  async sendMedia(
+    slotId: number,
+    to: string,
+    mediaType: 'image' | 'video' | 'voice' | 'audio',
+    mediaBase64: string,
+    options?: { mimetype?: string; caption?: string; ptt?: boolean },
+  ): Promise<{ waMessageId: string | null; to: string }> {
+    return this.sendCommand(slotId, {
+      type: 'send-media',
+      requestId: this.newReqId(),
+      to,
+      mediaType,
+      mediaBase64,
+      mimetype: options?.mimetype,
+      caption: options?.caption,
+      ptt: options?.ptt,
+    });
+  }
+
+  /**
+   * 发 presence (composing / recording / paused / available / unavailable)
+   */
+  async sendPresence(
+    slotId: number,
+    to: string,
+    presence: 'composing' | 'recording' | 'paused' | 'available' | 'unavailable',
+  ): Promise<void> {
+    await this.sendCommand(slotId, {
+      type: 'send-presence',
+      requestId: this.newReqId(),
+      to,
+      presence,
+    });
+  }
+
+  /**
+   * rehydrate · 已有 session 的 slot 重新起 socket
+   */
+  async rehydrate(slotId: number): Promise<void> {
+    // spawnWorker 内部已 init · 再显式 rehydrate 创建 socket
+    if (!this.hasWorker(slotId)) {
+      await this.spawnWorker(slotId);
+    }
+    await this.sendCommand(slotId, {
+      type: 'rehydrate',
+      requestId: this.newReqId(),
+    });
+  }
+
+  /**
+   * 开始 bind 流 · QR 或 pair code
+   * Worker 会通过 baileys.worker.qr / baileys.worker.pairing-code / baileys.worker.bind-state 事件汇报进度
+   */
+  async startBind(slotId: number, pairingPhoneNumber?: string): Promise<void> {
+    if (!this.hasWorker(slotId)) {
+      await this.spawnWorker(slotId);
+    }
+    await this.sendCommand(slotId, {
+      type: 'start-bind',
+      requestId: this.newReqId(),
+      pairingPhoneNumber,
+    });
+  }
+
+  /**
+   * 取消 bind
+   */
+  async cancelBind(slotId: number): Promise<void> {
+    if (!this.hasWorker(slotId)) return;
+    await this.sendCommand(slotId, {
+      type: 'cancel-bind',
+      requestId: this.newReqId(),
+    });
   }
 
   /**
