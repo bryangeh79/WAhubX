@@ -31,8 +31,7 @@ export class StatusReactExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
 
     const cache = this.baileys.getStatusCache();
     if (!cache) {
@@ -49,9 +48,18 @@ export class StatusReactExecutor implements TaskExecutor {
       if (reacted >= maxPerDay) break;
       ctx.throwIfPaused?.();
       try {
-        await sock.sendMessage('status@broadcast', {
-          react: { key: item.key, text: emoji },
-        });
+        // 2026-04-25 · Phase 2 · 通过 baileys.sendReact facade · 自动走 worker
+        await this.baileys.sendReact(
+          slot.id,
+          'status@broadcast',
+          {
+            remoteJid: item.key.remoteJid ?? 'status@broadcast',
+            id: item.key.id ?? '',
+            fromMe: item.key.fromMe ?? false,
+            participant: item.key.participant ?? undefined,
+          },
+          emoji,
+        );
         cache.markReacted(ctx.accountId, item.key);
         reacted++;
         ctx.log('status-react', true, { author: item.author, emoji });

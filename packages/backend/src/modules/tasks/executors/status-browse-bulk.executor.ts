@@ -33,8 +33,7 @@ export class StatusBrowseBulkExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
 
     const cache = this.baileys.getStatusCache();
     if (!cache) {
@@ -50,7 +49,15 @@ export class StatusBrowseBulkExecutor implements TaskExecutor {
     for (const item of statuses) {
       ctx.throwIfPaused?.();
       try {
-        await sock.readMessages([item.key]);
+        // 2026-04-25 · Phase 2 · 通过 baileys.readMessages facade · 自动走 worker
+        await this.baileys.readMessages(slot.id, [
+          {
+            remoteJid: item.key.remoteJid ?? 'status@broadcast',
+            id: item.key.id ?? '',
+            fromMe: item.key.fromMe ?? false,
+            participant: item.key.participant ?? undefined,
+          },
+        ]);
         cache.markViewed(ctx.accountId, item.key);
         viewed++;
       } catch (err) {

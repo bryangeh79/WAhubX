@@ -42,30 +42,21 @@ export class JoinGroupExecutor implements TaskExecutor {
       return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
     }
 
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) {
-      return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    if (!this.baileys.isSlotOnline(slot.id)) {
+      return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
     }
 
     try {
-      // 1. 预览 (可选但推荐)
-      let preview: { subject: string; size: number } | null = null;
-      try {
-        const meta = await sock.groupGetInviteInfo(payload.inviteCode);
-        preview = { subject: meta.subject, size: meta.participants?.length ?? 0 };
-        ctx.log('group-preview', true, preview);
-      } catch (e) {
-        ctx.log('group-preview-failed', false, { err: String(e) });
-      }
-
+      // 2026-04-25 · Phase 2 · 直接走 groupAcceptInvite facade (worker 模式 / 老路径都兼容)
+      // 跳过预览 (groupGetInviteInfo) · worker 协议未实装 · 加群成功后取 metadata 也行
       ctx.throwIfPaused?.();
 
-      // 2. 加群
-      const groupJid = await sock.groupAcceptInvite(payload.inviteCode);
+      // 加群
+      const groupJid = await this.baileys.groupAcceptInvite(slot.id, payload.inviteCode);
       if (!groupJid) {
         return { success: false, errorCode: 'JOIN_FAILED', errorMessage: '加群返回空 jid · 可能邀请过期/满员' };
       }
-      ctx.log('group-joined', true, { groupJid, ...preview });
+      ctx.log('group-joined', true, { groupJid });
 
       ctx.throwIfPaused?.();
 

@@ -40,8 +40,13 @@ import type {
   SendTextCommand,
   SendMediaCommand,
   SendPresenceCommand,
+  SendReactCommand,
+  ReadMessagesCommand,
   NewsletterMetadataCommand,
   NewsletterFollowCommand,
+  GroupAcceptInviteCommand,
+  ProfilePictureUrlCommand,
+  UpdateProfileStatusCommand,
 } from './worker-protocol';
 import { WORKER_HEARTBEAT_INTERVAL_MS } from './worker-protocol';
 import { buildProxyAgent, type ProxyDescriptor } from '../../../common/proxy-config';
@@ -471,6 +476,73 @@ async function handleSendMedia(cmd: SendMediaCommand): Promise<void> {
   }
 }
 
+async function handleSendReact(cmd: SendReactCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const sent = await g_sock.sendMessage(cmd.to, {
+      react: { key: cmd.key as Parameters<WASocket['sendMessage']>[1] extends infer T ? T extends { react: { key: infer K } } ? K : never : never, text: cmd.emoji },
+    } as Parameters<WASocket['sendMessage']>[1]);
+    ack(cmd.requestId, true, { waMessageId: sent?.key?.id ?? null });
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleReadMessages(cmd: ReadMessagesCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    await g_sock.readMessages(cmd.keys as Parameters<WASocket['readMessages']>[0]);
+    ack(cmd.requestId, true);
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleGroupAcceptInvite(cmd: GroupAcceptInviteCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const groupJid = await g_sock.groupAcceptInvite(cmd.inviteCode);
+    ack(cmd.requestId, true, { groupJid });
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleProfilePictureUrl(cmd: ProfilePictureUrlCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const url = await g_sock.profilePictureUrl(cmd.jid, cmd.highRes ? 'image' : 'preview');
+    ack(cmd.requestId, true, { url: url ?? null });
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleUpdateProfileStatus(cmd: UpdateProfileStatusCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    await g_sock.updateProfileStatus(cmd.status);
+    ack(cmd.requestId, true);
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function handleNewsletterMetadata(cmd: NewsletterMetadataCommand): Promise<void> {
   if (!g_sock) {
     ack(cmd.requestId, false, undefined, 'socket not ready');
@@ -606,11 +678,26 @@ process.on('message', (msg: unknown) => {
     case 'send-presence':
       void handleSendPresence(cmd);
       break;
+    case 'send-react':
+      void handleSendReact(cmd);
+      break;
+    case 'read-messages':
+      void handleReadMessages(cmd);
+      break;
     case 'newsletter-metadata':
       void handleNewsletterMetadata(cmd);
       break;
     case 'newsletter-follow':
       void handleNewsletterFollow(cmd);
+      break;
+    case 'group-accept-invite':
+      void handleGroupAcceptInvite(cmd);
+      break;
+    case 'profile-picture-url':
+      void handleProfilePictureUrl(cmd);
+      break;
+    case 'update-profile-status':
+      void handleUpdateProfileStatus(cmd);
       break;
     case 'shutdown':
       void handleShutdown(cmd.requestId);

@@ -137,6 +137,72 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
   }
 
   /**
+   * 发表情反应 · status@broadcast 或聊天 jid
+   */
+  async sendReact(
+    slotId: number,
+    to: string,
+    key: { remoteJid: string; id: string; fromMe?: boolean; participant?: string },
+    emoji: string,
+  ): Promise<{ waMessageId: string | null }> {
+    return this.sendCommand(slotId, {
+      type: 'send-react',
+      requestId: this.newReqId(),
+      to,
+      key,
+      emoji,
+    });
+  }
+
+  /**
+   * 标已读 (status@broadcast view · 聊天已读等)
+   */
+  async readMessages(
+    slotId: number,
+    keys: Array<{ remoteJid: string; id: string; fromMe?: boolean; participant?: string }>,
+  ): Promise<void> {
+    await this.sendCommand(slotId, {
+      type: 'read-messages',
+      requestId: this.newReqId(),
+      keys,
+    });
+  }
+
+  /**
+   * 接受群邀请
+   */
+  async groupAcceptInvite(slotId: number, inviteCode: string): Promise<{ groupJid: string }> {
+    return this.sendCommand(slotId, {
+      type: 'group-accept-invite',
+      requestId: this.newReqId(),
+      inviteCode,
+    });
+  }
+
+  /**
+   * 取头像 URL
+   */
+  async profilePictureUrl(slotId: number, jid: string, highRes = false): Promise<{ url: string | null }> {
+    return this.sendCommand(slotId, {
+      type: 'profile-picture-url',
+      requestId: this.newReqId(),
+      jid,
+      highRes,
+    });
+  }
+
+  /**
+   * 改 About 签名
+   */
+  async updateProfileStatus(slotId: number, status: string): Promise<void> {
+    await this.sendCommand(slotId, {
+      type: 'update-profile-status',
+      requestId: this.newReqId(),
+      status,
+    });
+  }
+
+  /**
    * 查频道 metadata (lookupBy='invite' 用 invite code · 'jid' 用频道 jid)
    */
   async newsletterMetadata(

@@ -41,14 +41,14 @@ export class ProfileRefreshExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
 
     let actions = 0;
     if (mode === 'signature' || mode === 'both') {
       const sig = signatures[Math.floor(Math.random() * signatures.length)];
       try {
-        await sock.updateProfileStatus(sig);
+        // 2026-04-25 · Phase 2 · 通过 baileys.updateProfileStatus facade
+        await this.baileys.updateProfileStatus(slot.id, sig);
         actions++;
         ctx.log('signature-updated', true, { sig });
       } catch (err) {

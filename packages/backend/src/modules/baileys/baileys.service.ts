@@ -287,6 +287,72 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return this.pool.has(slotId);
   }
 
+  // 2026-04-25 · Phase 2 · 发表情反应 · status@broadcast 或聊天 jid
+  async sendReact(
+    slotId: number,
+    to: string,
+    key: { remoteJid: string; id: string; fromMe?: boolean; participant?: string },
+    emoji: string,
+  ): Promise<{ waMessageId: string | null }> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      return this.workerManager.sendReact(slotId, to, key, emoji);
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    const sent = await sock.sendMessage(to, {
+      react: { key, text: emoji },
+    } as Parameters<WASocket['sendMessage']>[1]);
+    return { waMessageId: sent?.key?.id ?? null };
+  }
+
+  // 2026-04-25 · Phase 2 · 标已读
+  async readMessages(
+    slotId: number,
+    keys: Array<{ remoteJid: string; id: string; fromMe?: boolean; participant?: string }>,
+  ): Promise<void> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      await this.workerManager.readMessages(slotId, keys);
+      return;
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    await sock.readMessages(keys as Parameters<WASocket['readMessages']>[0]);
+  }
+
+  // 2026-04-25 · Phase 2 · 接受群邀请
+  async groupAcceptInvite(slotId: number, inviteCode: string): Promise<string | undefined> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      const ret = await this.workerManager.groupAcceptInvite(slotId, inviteCode);
+      return ret.groupJid;
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    return sock.groupAcceptInvite(inviteCode);
+  }
+
+  // 2026-04-25 · Phase 2 · 取头像
+  async profilePictureUrl(slotId: number, jid: string, highRes = false): Promise<string | null> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      const ret = await this.workerManager.profilePictureUrl(slotId, jid, highRes);
+      return ret.url;
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    const url = await sock.profilePictureUrl(jid, highRes ? 'image' : 'preview');
+    return url ?? null;
+  }
+
+  // 2026-04-25 · Phase 2 · 改 About 签名
+  async updateProfileStatus(slotId: number, status: string): Promise<void> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      await this.workerManager.updateProfileStatus(slotId, status);
+      return;
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    await sock.updateProfileStatus(status);
+  }
+
   // 2026-04-25 · Phase 2 · 频道 metadata · worker 模式走 IPC · 否则走老 sock
   async newsletterMetadata(
     slotId: number,

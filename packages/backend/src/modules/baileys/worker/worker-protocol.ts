@@ -17,10 +17,15 @@ export type WorkerCommandType =
   | 'cancel-bind'           // 取消 bind
   | 'rehydrate'             // 从磁盘 session 起常驻 socket
   | 'send-text'             // 发文本
-  | 'send-media'            // 发媒体 (image/video/voice)
+  | 'send-media'            // 发媒体 (image/video/voice/file)
   | 'send-presence'         // composing / recording / paused / available
+  | 'send-react'            // 发表情反应 (status@broadcast 或聊天)
+  | 'read-messages'         // 标已读 (用 message keys)
   | 'newsletter-metadata'   // 查频道 metadata (invite code 或 jid)
   | 'newsletter-follow'     // follow 频道
+  | 'group-accept-invite'   // 接受群邀请 (invite code)
+  | 'profile-picture-url'   // 取头像 URL
+  | 'update-profile-status' // 改 About 签名
   | 'fetch-status'          // 查当前 socket 状态
   | 'shutdown'              // 优雅关闭 (save creds + close socket)
   | 'force-evict';          // 强制踢 socket (不存 creds)
@@ -108,6 +113,42 @@ export interface NewsletterFollowCommand extends WorkerCommandBase {
   jid: string;
 }
 
+// 简化 WAMessageKey · IPC 序列化时只传必要字段
+export interface MinimalMessageKey {
+  remoteJid: string;
+  id: string;
+  fromMe?: boolean;
+  participant?: string;
+}
+
+export interface SendReactCommand extends WorkerCommandBase {
+  type: 'send-react';
+  to: string;             // 'status@broadcast' 或聊天 jid
+  key: MinimalMessageKey; // 被反应的消息
+  emoji: string;          // 反应表情 (空字符串=取消反应)
+}
+
+export interface ReadMessagesCommand extends WorkerCommandBase {
+  type: 'read-messages';
+  keys: MinimalMessageKey[];
+}
+
+export interface GroupAcceptInviteCommand extends WorkerCommandBase {
+  type: 'group-accept-invite';
+  inviteCode: string;
+}
+
+export interface ProfilePictureUrlCommand extends WorkerCommandBase {
+  type: 'profile-picture-url';
+  jid: string;
+  highRes?: boolean; // 'image' = high-res · 'preview' = thumb (默认)
+}
+
+export interface UpdateProfileStatusCommand extends WorkerCommandBase {
+  type: 'update-profile-status';
+  status: string; // WA "About" 文本
+}
+
 export interface FetchStatusCommand extends WorkerCommandBase {
   type: 'fetch-status';
 }
@@ -128,8 +169,13 @@ export type WorkerCommand =
   | SendTextCommand
   | SendMediaCommand
   | SendPresenceCommand
+  | SendReactCommand
+  | ReadMessagesCommand
   | NewsletterMetadataCommand
   | NewsletterFollowCommand
+  | GroupAcceptInviteCommand
+  | ProfilePictureUrlCommand
+  | UpdateProfileStatusCommand
   | FetchStatusCommand
   | ShutdownCommand
   | ForceEvictCommand;
