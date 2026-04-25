@@ -92,6 +92,10 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   private readonly bindContexts = new Map<number, BindContext>();
   // 已绑定账号的常驻 socket 池: key=slotId
   private readonly pool = new Map<number, WASocket>();
+  // 2026-04-25 · Phase 2 · WA_WORKER_MODE=true 时 bind 状态存这里 · 事件驱动更新
+  private readonly workerBindViews = new Map<number, BindStatusView>();
+  // bind 超时定时器 · worker 模式下父进程管理
+  private readonly workerBindTimers = new Map<number, NodeJS.Timeout>();
   // dev 排查代理时暴露 Baileys 内部错误; M3 走 config 按 NODE_ENV 切回 silent
   private readonly baileysLogger = pino({ level: 'warn' });
   // 动态拉来的 WA 版本, 进程生命周期复用避免反复请求
@@ -305,6 +309,11 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
   // ── Bind 流程 ─────────────────────────────────────────
   getStatus(slotId: number): BindStatusView {
+    // 2026-04-25 · Phase 2 · worker 模式优先读 workerBindViews
+    if (WORKER_MODE_ENABLED()) {
+      const view = this.workerBindViews.get(slotId);
+      if (view) return { ...view };
+    }
     const ctx = this.bindContexts.get(slotId);
     if (!ctx) {
       return {
@@ -350,6 +359,55 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     await this.dataSource
       .getRepository(TenantEntity)
       .update(slot.tenantId, { lastBindAt: new Date() });
+
+    // 2026-04-25 · Phase 2 · worker 模式: 清 session + delegate · 其余流程由 worker 驱动
+    if (WORKER_MODE_ENABLED() && this.workerManager) {
+      const sessionDir = getWaSessionDir(slot.slotIndex);
+      if (fs.existsSync(sessionDir)) {
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+          this.logger.log(`slot ${slotId} · worker mode · 清理残留 session`);
+        } catch {
+          /* ignore */
+        }
+      }
+      const initialView: BindStatusView = {
+        state: 'starting',
+        qr: null,
+        pairingCode: null,
+        mode: pairingPhoneNumber ? 'pairing-code' : 'qr',
+        phoneNumber: pairingPhoneNumber ?? null,
+        startedAt: new Date().toISOString(),
+        lastEventAt: new Date().toISOString(),
+        error: null,
+      };
+      this.workerBindViews.set(slotId, initialView);
+      try {
+        await this.workerManager.startBind(slotId, pairingPhoneNumber);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const failedView: BindStatusView = { ...initialView, state: 'failed', error: msg };
+        this.workerBindViews.set(slotId, failedView);
+        return failedView;
+      }
+      // 2 min timeout · 超时自动 cancel
+      const timeoutTimer = setTimeout(() => {
+        const cur = this.workerBindViews.get(slotId);
+        if (cur && ['starting', 'qr', 'connecting'].includes(cur.state)) {
+          void this.workerManager?.cancelBind(slotId).catch(() => {
+            /* ignore */
+          });
+          this.workerBindViews.set(slotId, {
+            ...cur,
+            state: 'timeout',
+            lastEventAt: new Date().toISOString(),
+            error: '2 分钟内未完成扫码',
+          });
+        }
+      }, BIND_TIMEOUT_MS);
+      this.workerBindTimers.set(slotId, timeoutTimer);
+      return initialView;
+    }
 
     const existing = this.bindContexts.get(slotId);
     if (existing && ['qr', 'connecting', 'starting'].includes(existing.status.state)) {
@@ -406,6 +464,30 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cancelBind(slotId: number): Promise<BindStatusView> {
+    // 2026-04-25 · Phase 2 · worker 模式取消
+    if (WORKER_MODE_ENABLED() && this.workerManager) {
+      try {
+        await this.workerManager.cancelBind(slotId);
+      } catch {
+        /* ignore */
+      }
+      const timer = this.workerBindTimers.get(slotId);
+      if (timer) {
+        clearTimeout(timer);
+        this.workerBindTimers.delete(slotId);
+      }
+      const cur = this.workerBindViews.get(slotId);
+      if (cur) {
+        const updated: BindStatusView = {
+          ...cur,
+          state: 'cancelled',
+          lastEventAt: new Date().toISOString(),
+        };
+        this.workerBindViews.set(slotId, updated);
+        return updated;
+      }
+      return this.getStatus(slotId);
+    }
     const ctx = this.bindContexts.get(slotId);
     if (!ctx) return this.getStatus(slotId);
     await this.teardownBind(ctx, 'cancelled', 'user cancelled');
@@ -1288,6 +1370,56 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
   // Worker 发 baileys.worker.* 事件 · 这里订阅并复用 Phase 1 持久化逻辑
   // 仅 WA_WORKER_MODE=true 时 worker 会发这些事件 · 关闭时 worker 也不存在 · 天然无竞态
 
+  @OnEvent('baileys.worker.qr')
+  onWorkerQr(evt: { slotId: number; qr: string }): void {
+    const cur = this.workerBindViews.get(evt.slotId);
+    if (!cur) return;
+    this.workerBindViews.set(evt.slotId, {
+      ...cur,
+      state: 'qr',
+      qr: evt.qr,
+      lastEventAt: new Date().toISOString(),
+    });
+  }
+
+  @OnEvent('baileys.worker.pairing-code')
+  onWorkerPairingCode(evt: { slotId: number; code: string }): void {
+    const cur = this.workerBindViews.get(evt.slotId);
+    if (!cur) return;
+    this.workerBindViews.set(evt.slotId, {
+      ...cur,
+      state: 'qr', // 复用 'qr' state · 前端按 mode=pairing-code 显 code
+      pairingCode: evt.code,
+      lastEventAt: new Date().toISOString(),
+    });
+  }
+
+  @OnEvent('baileys.worker.bind-state')
+  onWorkerBindState(evt: {
+    slotId: number;
+    state: BindState;
+    error?: string;
+    phoneNumber?: string;
+  }): void {
+    const cur = this.workerBindViews.get(evt.slotId);
+    if (!cur) return;
+    this.workerBindViews.set(evt.slotId, {
+      ...cur,
+      state: evt.state,
+      error: evt.error ?? cur.error,
+      phoneNumber: evt.phoneNumber ?? cur.phoneNumber,
+      lastEventAt: new Date().toISOString(),
+    });
+    // 终态清超时定时器
+    if (['connected', 'failed', 'cancelled', 'timeout'].includes(evt.state)) {
+      const timer = this.workerBindTimers.get(evt.slotId);
+      if (timer) {
+        clearTimeout(timer);
+        this.workerBindTimers.delete(evt.slotId);
+      }
+    }
+  }
+
   @OnEvent('baileys.worker.message-upsert')
   async onWorkerMessageUpsert(evt: MessageUpsertEvent): Promise<void> {
     const slot = await this.dataSource
@@ -1310,13 +1442,69 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
   @OnEvent('baileys.worker.connection-open')
   async onWorkerConnectionOpen(evt: ConnectionOpenEvent): Promise<void> {
-    // 类似原 pool listener 的自愈逻辑 · 尊重 suspended_until 冷却
     try {
       const slot = await this.dataSource
         .getRepository(AccountSlotEntity)
         .findOne({ where: { id: evt.slotId } });
       if (!slot) return;
       if (slot.status === AccountSlotStatus.Quarantine) return;
+
+      // 2026-04-25 · Phase 2 · bind 完成路径: slot 无 accountId + evt 有 userId
+      // 等价原 onBindConnectionOpen 事务 (创 wa_account + AccountHealth + update slot)
+      if (!slot.accountId && evt.userId) {
+        const phone = evt.userId.split(':')[0].split('@')[0];
+        try {
+          await this.dataSource.transaction(async (manager) => {
+            const existing = await manager.findOne(WaAccountEntity, { where: { phoneNumber: phone } });
+            if (existing) {
+              throw new Error(
+                `手机号 ${phone} 已被其他租户占用 · worker bind 拒绝`,
+              );
+            }
+            const waAccount = manager.create(WaAccountEntity, {
+              phoneNumber: phone,
+              countryCode: phone.startsWith('60') ? 'MY' : phone.slice(0, 2),
+              sessionPath: getWaSessionDir(slot.slotIndex),
+              registeredAt: new Date(),
+              lastOnlineAt: new Date(),
+              waNickname: null,
+              deviceFingerprint: ensureFingerprint({
+                slotIndex: slot.slotIndex,
+                tenantId: slot.tenantId,
+              }) as unknown as Record<string, unknown>,
+            });
+            const saved = await manager.save(waAccount);
+            await manager.save(
+              manager.create(AccountHealthEntity, {
+                accountId: saved.id,
+                healthScore: 100,
+                riskLevel: RiskLevel.Low,
+                riskFlags: [],
+                totalSent: 0,
+                totalReceived: 0,
+              }),
+            );
+            await manager.update(AccountSlotEntity, slot.id, {
+              accountId: saved.id,
+              status: AccountSlotStatus.Warmup,
+              profilePath: getWaSessionDir(slot.slotIndex),
+              socketLastHeartbeatAt: new Date(),
+            });
+          });
+          this.logger.log(`worker slot ${evt.slotId} bind 完成 · phone=${phone}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`worker bind 完成处理失败 slot ${evt.slotId}: ${msg}`);
+          // 标 bind 失败视图
+          const cur = this.workerBindViews.get(evt.slotId);
+          if (cur) {
+            this.workerBindViews.set(evt.slotId, { ...cur, state: 'failed', error: msg });
+          }
+        }
+        return;
+      }
+
+      // 已绑号路径 · 自愈 suspended→active 逻辑 · 尊重 suspended_until 冷却
       if (slot.status === AccountSlotStatus.Suspended) {
         const now = Date.now();
         if (slot.suspendedUntil && new Date(slot.suspendedUntil).getTime() > now) {
