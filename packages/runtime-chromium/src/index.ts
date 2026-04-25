@@ -22,6 +22,7 @@ import { waitForLogin } from './wa-web/wait-for-login';
 import { startQrLiveServer } from './qr-live-server';
 import { detectCountry } from './wa-web/detect-country';
 import { injectStealthOverrides } from './wa-web/stealth-inject';
+import { IdleActivityScheduler } from './idle-activity';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -51,6 +52,15 @@ const USER_AGENT =
 // 2026-04-25 · D7-3 · 国家显式覆盖 · 不设则 ipinfo.io 探测
 // 例: PROXY_COUNTRY=MY (绕过探测 · 运维已知场景)
 const PROXY_COUNTRY = process.env.PROXY_COUNTRY ?? '';
+
+// 2026-04-25 · D7-1 · 行为模拟开关 (Codex 拍板护栏 · soak A/B 用)
+// 默认 true · 设 'false' 完全关闭 idle 行为模拟
+const HUMAN_BEHAVIOR_ENABLED = process.env.HUMAN_BEHAVIOR_ENABLED !== 'false';
+
+// 2026-04-25 · D7-1 · soak 模式开关
+// 默认 false (D6 测模式 · 登录后 close)
+// 设 'true' = 登录后不 close · 启 idle 调度器 · 24h 长跑
+const SOAK_MODE = process.env.SOAK_MODE === 'true';
 
 // ═══ 主流程 ════════════════════════════════════════════════════════
 
@@ -281,12 +291,30 @@ async function main() {
   // ─── D6 · 命中 qr 后长 poll 等 chat-list (等用户真扫码) ───────
   // C5/C6 验: 命中 chat-list 后 graceful shutdown · creds 落盘 · 二次 launch 期望
   // 直接进 chat-list (因为 user-data-dir 含 IndexedDB session)
+  // 2026-04-25 · D7-1 · idle activity scheduler (Codex 拍板低强度 idle 行为)
+  // 仅 chat-list 状态启 · 5-15min 间隔 · 默认动作: scroll + mouse + focus cycle
+  // HUMAN_BEHAVIOR_ENABLED=false 完全禁用 (soak A/B 对照)
+  let idleScheduler: IdleActivityScheduler | null = null;
+  const startIdleSchedulerIfNeeded = (): void => {
+    if (!SOAK_MODE) return;
+    if (idleScheduler) return;
+    idleScheduler = new IdleActivityScheduler({
+      page,
+      log,
+      enabled: HUMAN_BEHAVIOR_ENABLED,
+    });
+    idleScheduler.start();
+  };
+
   if (result.state === 'qr') {
     log.info('D6 · entering wait-for-login (long poll up to 10 min)');
     const loginResult = await waitForLogin({ page, diagnosticsDir, log });
     log.info(loginResult, 'D6 wait-for-login result');
     if (loginResult.outcome === 'chat-list') {
-      log.info('D6 · LOGIN SUCCESS · waiting 15s for Chromium to flush IndexedDB/Cookies before close');
+      log.info(
+        { soakMode: SOAK_MODE },
+        'LOGIN SUCCESS · waiting 15s for Chromium to flush IndexedDB/Cookies',
+      );
       // Chromium IndexedDB / Cookies 异步 flush · 太快 close 会丢 session
       // 实测: 不等的话 wa-data-test/profile 目录都不会创建 (D6 实测踩坑)
       await new Promise((r) => setTimeout(r, 15_000));
@@ -302,17 +330,26 @@ async function main() {
         /* ignore */
       }
 
-      log.info('D6 · graceful shutdown to persist session for C5/C6 verify');
-      try {
-        await browser.close();
-      } catch (err) {
-        log.warn({ err: err instanceof Error ? err.message : err }, 'browser.close after login failed');
+      if (SOAK_MODE) {
+        // D7-1 · soak 模式不 close · 启 idle 调度器 · 等 24h
+        log.info('D7-1 · SOAK_MODE=true · 不 close browser · 启 idle scheduler');
+        startIdleSchedulerIfNeeded();
+      } else {
+        // D6 测模式 (默认) · graceful close 验 C5/C6
+        log.info('D6 · graceful shutdown to persist session for C5/C6 verify');
+        try {
+          await browser.close();
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : err }, 'browser.close after login failed');
+        }
+        log.info('D6 · runtime exit code=0 · 重启同 user-data-dir 应免扫码');
+        process.exit(0);
       }
-      log.info('D6 · runtime exit code=0 · 重启同 user-data-dir 应免扫码');
-      process.exit(0);
     }
   } else if (result.state === 'chat-list') {
-    log.info('D6 · launched directly into chat-list · session restored from user-data-dir (C6 PASS)');
+    log.info('launched directly into chat-list · session restored from user-data-dir (C6 PASS)');
+    // D7-1 · rehydrate 路径 · 直接进 idle scheduler (如开了 soak)
+    startIdleSchedulerIfNeeded();
   }
 
   // ─── 占位心跳 (D4-5 替换为 WS) ────────────────────────────────
@@ -323,6 +360,9 @@ async function main() {
   // graceful shutdown
   const shutdown = async (signal: string) => {
     log.warn({ signal }, 'shutdown signal received');
+    if (idleScheduler) {
+      idleScheduler.stop();
+    }
     try {
       await browser.close();
     } catch (err) {
@@ -333,7 +373,10 @@ async function main() {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
 
-  log.info('runtime ready · D4-5 will add WS bridge');
+  log.info(
+    { soakMode: SOAK_MODE, humanBehavior: HUMAN_BEHAVIOR_ENABLED },
+    'runtime ready · D7-1 idle scheduler controlled by SOAK_MODE',
+  );
 }
 
 function extractProxyHost(url: string): string | null {
