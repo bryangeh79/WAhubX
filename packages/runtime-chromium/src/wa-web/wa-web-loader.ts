@@ -11,21 +11,29 @@
 //   - send_text / send_media (W2)
 //   - 多状态机 (P3)
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { Page } from 'puppeteer-core';
 import type { Logger } from 'pino';
-import { findFirstMatch, WA_SELECTORS } from './wa-web-selectors';
+import { findFirstMatch, WA_SELECTORS, SPLASH_STUCK_THRESHOLD_MS } from './wa-web-selectors';
 import { captureEvidence, type EvidenceShot } from './screenshot-evidence';
 import { createNavTimingsTracker, type NavTimings } from './nav-timing';
+import { runDomForensics, type DomForensicsReport } from './dom-forensics';
+import { captureAntiBotSignals, type AntiBotSignals } from './anti-bot-signals';
 
-export type WaWebState = 'qr' | 'chat-list' | 'splash' | 'unknown';
+// D4: 5 态 (锁定 · 不再扩)
+export type WaWebState = 'qr' | 'chat-list' | 'splash' | 'splash-stuck' | 'unknown';
 
 export interface WaWebLoadResult {
   state: WaWebState;
   detectedAt: number;
   selector: string | null;
-  qrCanvasDataUrl: string | null; // qr 状态时 · base64 image data URL
+  qrCanvasDataUrl: string | null;
   evidence: EvidenceShot[];
-  timings: NavTimings; // D3 · 定位卡点用
+  timings: NavTimings;
+  forensics: DomForensicsReport | null;       // D4 · 法医分析
+  antiBotSignals: AntiBotSignals | null;       // D4 · 反爬可见性
+  unsupportedDetected: boolean;                // D4 · landing 降级页 detect
 }
 
 const WA_WEB_URL = 'https://web.whatsapp.com';
@@ -73,10 +81,11 @@ export async function loadWaWebAndDetect(
   evidence.push(ev2);
   log.info({ url: ev2.url, title: ev2.title, png: ev2.pngPath }, 'evidence#2 captured (post-load)');
 
-  // ─── 状态识别循环 (qr or chat-list · 45s 上限) ────────────────
+  // ─── 状态识别循环 · D4 · 5 态机 ──────────────────────────────
   const startedAt = Date.now();
   let state: WaWebState = 'unknown';
   let matchedSelector: string | null = null;
+  let firstSplashAt: number | null = null;
 
   while (Date.now() - startedAt < STATE_DETECT_TIMEOUT_MS) {
     const qrM = await findFirstMatch(page, WA_SELECTORS.qrCanvas);
@@ -95,10 +104,25 @@ export async function loadWaWebAndDetect(
     }
     const splashM = await findFirstMatch(page, WA_SELECTORS.splash);
     if (splashM.found) {
-      // splash 可见 · 继续等真实状态出现 · 不 break
-      log.info({ selector: splashM.selector }, 'splash detected · waiting for qr/chat-list');
+      if (firstSplashAt === null) firstSplashAt = Date.now();
+      // D4 · splash 持续超阈值 → splash-stuck (跟普通 unknown 区分开)
+      if (Date.now() - firstSplashAt > SPLASH_STUCK_THRESHOLD_MS) {
+        state = 'splash-stuck';
+        matchedSelector = splashM.selector;
+        tracker.markStateDetected();
+        break;
+      }
+      log.info(
+        { selector: splashM.selector, splashSec: Math.round((Date.now() - firstSplashAt) / 1000) },
+        'splash detected · waiting',
+      );
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  // 退出 loop 时仍 splash 状态 → 'splash' (不超阈值的轻微卡顿)
+  if (state === 'unknown' && firstSplashAt !== null) {
+    state = 'splash';
+    matchedSelector = null;
   }
 
   // ─── QR 提取 (qr 状态时) ────────────────────────────────────
@@ -136,6 +160,70 @@ export async function loadWaWebAndDetect(
   const timings = tracker.snapshot();
   log.info(timings, 'nav-timings final · use to diagnose stall point');
 
+  // D4-1 · DOM 法医 (任何状态都跑 · 给 unknown 提供线索)
+  let forensics: DomForensicsReport | null = null;
+  try {
+    forensics = await runDomForensics(page);
+    log.info(
+      {
+        unsupported: forensics.unsupportedLanding.detected,
+        unsupportedText: forensics.unsupportedLanding.visibleText,
+        anchors: {
+          dataTestids: forensics.anchors.dataTestids.length,
+          ariaLabels: forensics.anchors.ariaLabels.length,
+          roles: forensics.anchors.roles.length,
+        },
+        qrPresent: forensics.qrCanvasPresent,
+        chatListPresent: forensics.chatListPresent,
+      },
+      'DOM forensics summary',
+    );
+    await fs.writeFile(
+      path.join(diagnosticsDir, `forensics-${Date.now()}.json`),
+      JSON.stringify(forensics, null, 2),
+      'utf-8',
+    );
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, 'forensics failed');
+  }
+
+  // D4-2 · 反爬可见性
+  let antiBotSignals: AntiBotSignals | null = null;
+  try {
+    antiBotSignals = await captureAntiBotSignals(page);
+    log.info(
+      {
+        webdriver: antiBotSignals.navigatorWebdriver,
+        ua: antiBotSignals.userAgent.slice(0, 80),
+        uaChromeVersion: antiBotSignals.uaChromeVersion,
+        uaIncludesHeadless: antiBotSignals.uaIncludesHeadless,
+        languages: antiBotSignals.languages,
+        platform: antiBotSignals.platform,
+        webglRenderer: antiBotSignals.webglRenderer,
+      },
+      'anti-bot signals summary',
+    );
+    await fs.writeFile(
+      path.join(diagnosticsDir, `anti-bot-signals-${Date.now()}.json`),
+      JSON.stringify(antiBotSignals, null, 2),
+      'utf-8',
+    );
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, 'anti-bot signals failed');
+  }
+
+  // unsupported landing 检测 (D4 法医驱动 · 不改主状态机但加证据字段)
+  const unsupportedDetected = forensics?.unsupportedLanding.detected ?? false;
+  if (unsupportedDetected) {
+    log.error(
+      {
+        indicators: forensics?.unsupportedLanding.indicators,
+        text: forensics?.unsupportedLanding.visibleText,
+      },
+      'WA Web shows UNSUPPORTED BROWSER landing page · stealth/UA needs patch',
+    );
+  }
+
   return {
     state,
     detectedAt: Date.now(),
@@ -143,5 +231,8 @@ export async function loadWaWebAndDetect(
     qrCanvasDataUrl,
     evidence,
     timings,
+    forensics,
+    antiBotSignals,
+    unsupportedDetected,
   };
 }

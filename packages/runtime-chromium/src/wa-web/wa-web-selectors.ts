@@ -26,12 +26,25 @@ export const WA_SELECTORS = {
   ],
 
   // 启动初期通用 · 'Loading your chats' / WhatsApp logo splash
+  // 注: 'splash' 检测以 css var 为主 (D4 法医证实 selector 池里 testid 不一定渲染)
   splash: [
     'div[data-testid="intro-md-beta-logo-dark"]',
     'div[data-testid="intro-md-beta-logo-light"]',
     'div[data-testid="splash-screen"]',
+    '[class*="_aig0"]', // splash 核心容器 emotion class fragment (D4 法医补)
+  ],
+
+  // 2026-04-25 · D4 法医新发现: WA "你浏览器不支持" 降级页
+  // 检测 class*= 关键 fragment + 特定文字 (不限版本)
+  unsupportedLanding: [
+    '[class*="landing-wrapper"]',
+    '[class*="landing-headerTitle"]',
+    '[class*="version-title"]',
   ],
 };
+
+// D4 · splash 持续阈值 · splash 见到后超过这时间仍无 qr/chat-list → 标 splash-stuck
+export const SPLASH_STUCK_THRESHOLD_MS = 30_000;
 
 /**
  * 在 page 内尝试匹配第一个命中的 selector
