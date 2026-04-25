@@ -40,6 +40,7 @@ import type {
   ConnectionCloseEvent,
   RuntimeErrorEvent,
 } from '@wahubx/shared';
+import { resolveRuntimeLaunchConfigFromEnv } from '@wahubx/shared';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -88,6 +89,45 @@ const RUNTIME_AUTH_TOKEN = process.env.RUNTIME_AUTH_TOKEN ?? 'dev-runtime-token'
 // ═══ 主流程 ════════════════════════════════════════════════════════
 
 async function main() {
+  // 2026-04-25 · D12-1 · 统一启动配置抽象 (Codex 锁定 6 边界)
+  // 单一来源 RuntimeLaunchConfig · 替代散落 env 读 · backend / runtime 共用同一份 resolver
+  // D12-1 阶段先 log · D12-2 进程管理才真接管业务流
+  const cfg = resolveRuntimeLaunchConfigFromEnv();
+  log.info(
+    {
+      os: cfg.os,
+      slotId: cfg.slotId,
+      slotIndex: cfg.slotIndex,
+      tenantId: cfg.tenantId,
+      dataDir: cfg.dataDir,
+      profileDir: cfg.profileDir,
+      diagnosticsDir: cfg.diagnosticsDir,
+      chromiumExecutablePath: cfg.chromiumExecutablePath,
+      chromiumExecutableExists: cfg.chromiumExecutableExists,
+      hasProxy: !!cfg.proxyUrl,
+      proxyCountry: cfg.proxyCountry,
+      dnsStrategy: cfg.dnsStrategy,
+      soakMode: cfg.soakMode,
+      humanBehaviorEnabled: cfg.humanBehaviorEnabled,
+      hasWsBridge: !!cfg.controlPlaneWsUrl,
+      qrLiveServerEnabled: cfg.qrLiveServerEnabled,
+      warningCount: cfg.warnings.length,
+    },
+    'D12-1 RuntimeLaunchConfig resolved',
+  );
+  if (cfg.warnings.length > 0) {
+    for (const w of cfg.warnings) {
+      log.warn({ source: 'D12-1' }, w);
+    }
+  }
+  if (!cfg.chromiumExecutableExists) {
+    log.error(
+      { chromiumPath: cfg.chromiumExecutablePath },
+      'D12-1 · chromium 可执行文件不存在 · puppeteer.launch 必失败 · 显式 PUPPETEER_EXECUTABLE_PATH 修复',
+    );
+    // 不立刻 exit · 保留 D6 测路径行为 · 让下游 puppeteer 抛真错误
+  }
+
   log.info({ slotId: SLOT_ID, tenantId: TENANT_ID, sessionDir: SESSION_DIR }, 'runtime starting');
 
   if (!fs.existsSync(SESSION_DIR)) {
