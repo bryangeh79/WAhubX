@@ -23,6 +23,7 @@ export type WorkerCommandType =
   | 'read-messages'         // 标已读 (用 message keys)
   | 'newsletter-metadata'   // 查频道 metadata (invite code 或 jid)
   | 'newsletter-follow'     // follow 频道
+  | 'group-get-invite-info' // 预览群邀请 (subject / size · 不加群)
   | 'group-accept-invite'   // 接受群邀请 (invite code)
   | 'profile-picture-url'   // 取头像 URL
   | 'update-profile-status' // 改 About 签名
@@ -133,6 +134,11 @@ export interface ReadMessagesCommand extends WorkerCommandBase {
   keys: MinimalMessageKey[];
 }
 
+export interface GroupGetInviteInfoCommand extends WorkerCommandBase {
+  type: 'group-get-invite-info';
+  inviteCode: string;
+}
+
 export interface GroupAcceptInviteCommand extends WorkerCommandBase {
   type: 'group-accept-invite';
   inviteCode: string;
@@ -173,6 +179,7 @@ export type WorkerCommand =
   | ReadMessagesCommand
   | NewsletterMetadataCommand
   | NewsletterFollowCommand
+  | GroupGetInviteInfoCommand
   | GroupAcceptInviteCommand
   | ProfilePictureUrlCommand
   | UpdateProfileStatusCommand

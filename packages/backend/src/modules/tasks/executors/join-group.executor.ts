@@ -47,16 +47,23 @@ export class JoinGroupExecutor implements TaskExecutor {
     }
 
     try {
-      // 2026-04-25 · Phase 2 · 直接走 groupAcceptInvite facade (worker 模式 / 老路径都兼容)
-      // 跳过预览 (groupGetInviteInfo) · worker 协议未实装 · 加群成功后取 metadata 也行
+      // 1. 预览 (可选但推荐) · Phase 2 · 走 baileys.groupGetInviteInfo facade
+      let preview: { subject: string; size: number } | null = null;
+      try {
+        preview = await this.baileys.groupGetInviteInfo(slot.id, payload.inviteCode);
+        if (preview) ctx.log('group-preview', true, preview);
+      } catch (e) {
+        ctx.log('group-preview-failed', false, { err: String(e) });
+      }
+
       ctx.throwIfPaused?.();
 
-      // 加群
+      // 2. 加群
       const groupJid = await this.baileys.groupAcceptInvite(slot.id, payload.inviteCode);
       if (!groupJid) {
         return { success: false, errorCode: 'JOIN_FAILED', errorMessage: '加群返回空 jid · 可能邀请过期/满员' };
       }
-      ctx.log('group-joined', true, { groupJid });
+      ctx.log('group-joined', true, { groupJid, ...(preview ?? {}) });
 
       ctx.throwIfPaused?.();
 

@@ -169,6 +169,17 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
   }
 
   /**
+   * 预览群邀请 (不加群)
+   */
+  async groupGetInviteInfo(slotId: number, inviteCode: string): Promise<unknown> {
+    return this.sendCommand(slotId, {
+      type: 'group-get-invite-info',
+      requestId: this.newReqId(),
+      inviteCode,
+    });
+  }
+
+  /**
    * 接受群邀请
    */
   async groupAcceptInvite(slotId: number, inviteCode: string): Promise<{ groupJid: string }> {

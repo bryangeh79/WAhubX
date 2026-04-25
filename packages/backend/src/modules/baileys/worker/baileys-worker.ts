@@ -44,6 +44,7 @@ import type {
   ReadMessagesCommand,
   NewsletterMetadataCommand,
   NewsletterFollowCommand,
+  GroupGetInviteInfoCommand,
   GroupAcceptInviteCommand,
   ProfilePictureUrlCommand,
   UpdateProfileStatusCommand,
@@ -504,6 +505,19 @@ async function handleReadMessages(cmd: ReadMessagesCommand): Promise<void> {
   }
 }
 
+async function handleGroupGetInviteInfo(cmd: GroupGetInviteInfoCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const meta = await g_sock.groupGetInviteInfo(cmd.inviteCode);
+    ack(cmd.requestId, true, meta);
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function handleGroupAcceptInvite(cmd: GroupAcceptInviteCommand): Promise<void> {
   if (!g_sock) {
     ack(cmd.requestId, false, undefined, 'socket not ready');
@@ -689,6 +703,9 @@ process.on('message', (msg: unknown) => {
       break;
     case 'newsletter-follow':
       void handleNewsletterFollow(cmd);
+      break;
+    case 'group-get-invite-info':
+      void handleGroupGetInviteInfo(cmd);
       break;
     case 'group-accept-invite':
       void handleGroupAcceptInvite(cmd);

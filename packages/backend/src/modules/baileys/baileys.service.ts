@@ -319,6 +319,24 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     await sock.readMessages(keys as Parameters<WASocket['readMessages']>[0]);
   }
 
+  // 2026-04-25 · Phase 2 · 预览群邀请 (不加群)
+  async groupGetInviteInfo(
+    slotId: number,
+    inviteCode: string,
+  ): Promise<{ subject: string; size: number } | null> {
+    let raw: unknown = null;
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      raw = await this.workerManager.groupGetInviteInfo(slotId, inviteCode);
+    } else {
+      const sock = this.pool.get(slotId);
+      if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+      raw = await sock.groupGetInviteInfo(inviteCode);
+    }
+    if (!raw) return null;
+    const meta = raw as { subject?: string; participants?: unknown[] };
+    return { subject: meta.subject ?? '', size: meta.participants?.length ?? 0 };
+  }
+
   // 2026-04-25 · Phase 2 · 接受群邀请
   async groupAcceptInvite(slotId: number, inviteCode: string): Promise<string | undefined> {
     if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
