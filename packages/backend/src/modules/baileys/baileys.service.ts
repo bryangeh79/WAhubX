@@ -179,8 +179,14 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
         await new Promise((r) => setTimeout(r, STAGGER_MS));
       }
       try {
-        await this.spawnPooledSocket(slot.id, slot.slotIndex);
-        this.logger.log(`rehydrated slot ${slot.id} (index ${slot.slotIndex})`);
+        // 2026-04-25 · Phase 2 · worker 模式走子进程 rehydrate
+        if (WORKER_MODE_ENABLED() && this.workerManager) {
+          await this.workerManager.rehydrate(slot.id);
+          this.logger.log(`rehydrated slot ${slot.id} (index ${slot.slotIndex}) via worker`);
+        } else {
+          await this.spawnPooledSocket(slot.id, slot.slotIndex);
+          this.logger.log(`rehydrated slot ${slot.id} (index ${slot.slotIndex})`);
+        }
       } catch (err) {
         this.logger.error(`rehydrate slot ${slot.id} failed: ${err}`);
       }
@@ -206,7 +212,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
   // 2026-04-25 · pool 中有活 socket 的 slot 写入心跳戳
   // 判活标准: this.pool.has(slotId) && sock.ws?.readyState === OPEN
+  // 2026-04-25 · Phase 2 · worker 模式下 pool 必空 · heartbeat 由 workerManager 写
   private async heartbeatTick(): Promise<void> {
+    if (WORKER_MODE_ENABLED()) return;
     if (this.pool.size === 0) return;
     const aliveSlotIds: number[] = [];
     for (const [slotId, sock] of this.pool.entries()) {
@@ -502,11 +510,6 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     contentBase64: string,
     options: { mimeType?: string; filename?: string; caption?: string } = {},
   ): Promise<{ waMessageId: string | null; mediaPath: string | null }> {
-    const sock = this.pool.get(slotId);
-    if (!sock) {
-      const friendly = await this.friendlySlotName(slotId);
-      throw new BadRequestException(`${friendly} 未在线 (pool 无 socket)`);
-    }
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
@@ -518,6 +521,67 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(`媒体大小超过 WA 16MB 上限 (${buffer.length} bytes)`);
     }
     const jid = this.normalizeJid(to);
+
+    // 2026-04-25 · Phase 2 · worker 模式走子进程 (file 型在 WA 协议里是 document · worker 用 audio 接收 voice+audio)
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      // Worker 的 send-media 支持 image/video/voice/audio · 'file' 映射到 audio 不合适 · 特殊处理
+      if (type === 'file') {
+        throw new BadRequestException(
+          'Phase 2 worker 模式下文件类型尚未支持 · 请先用其他类型或临时关 WA_WORKER_MODE',
+        );
+      }
+      // 打字/录音模拟
+      const presenceType: 'recording' | 'composing' = type === 'voice' ? 'recording' : 'composing';
+      const len = options.caption?.length ?? (type === 'voice' ? 30 : 12);
+      const perChar = 80 + Math.random() * 70;
+      const typingMs = Math.min(8000, Math.max(1500, Math.round(len * perChar)));
+      try {
+        await this.workerManager.sendPresence(slotId, jid, presenceType);
+        await new Promise((r) => setTimeout(r, typingMs));
+        await this.workerManager.sendPresence(slotId, jid, 'paused');
+      } catch {
+        /* 模拟失败不阻断 */
+      }
+      const ret = await this.workerManager.sendMedia(slotId, jid, type, contentBase64, {
+        mimetype: options.mimeType,
+        caption: options.caption,
+        ptt: type === 'voice',
+      });
+      const waMessageId = ret.waMessageId;
+      // 落盘备份
+      let mediaPath: string | null = null;
+      try {
+        const ext = this.guessExtFromType(type, options.mimeType, options.filename);
+        const filename = `${waMessageId ?? Date.now()}-out${ext}`;
+        const abs = path.join(getMediaDir(slot.slotIndex), filename);
+        fs.writeFileSync(abs, buffer);
+        mediaPath = path.relative(process.cwd(), abs);
+      } catch (err) {
+        this.logger.warn(`slot ${slotId} outbound media (worker) 落盘失败: ${err}`);
+      }
+      const msgTypeEnum =
+        type === 'image' ? MessageType.Image :
+        type === 'video' ? MessageType.Video :
+        MessageType.Voice;
+      await this.persistMessage({
+        accountId: slot.accountId,
+        remoteJid: jid,
+        direction: MessageDirection.Out,
+        msgType: msgTypeEnum,
+        content: options.caption ?? null,
+        mediaPath,
+        sentAt: new Date(),
+        waMessageId,
+      });
+      return { waMessageId, mediaPath };
+    }
+
+    // 老路径
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      const friendly = await this.friendlySlotName(slotId);
+      throw new BadRequestException(`${friendly} 未在线 (pool 无 socket)`);
+    }
 
     let sendPayload: Parameters<WASocket['sendMessage']>[1];
     let msgTypeEnum: MessageType;
@@ -699,16 +763,33 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
    * 返 null waMessageId 仍写 chat_message (msg_type=status) 便于日历幂等与统计.
    */
   async sendStatusText(slotId: number, text: string): Promise<{ waMessageId: string | null }> {
+    const slot = await this.dataSource
+      .getRepository(AccountSlotEntity)
+      .findOne({ where: { id: slotId } });
+    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
+
+    // 2026-04-25 · Phase 2 · worker 模式 · status@broadcast 当 jid 传 · worker 透传 sendMessage
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      const ret = await this.workerManager.sendText(slotId, 'status@broadcast', text);
+      const waMessageId = ret.waMessageId;
+      await this.persistMessage({
+        accountId: slot.accountId,
+        remoteJid: 'status@broadcast',
+        direction: MessageDirection.Out,
+        msgType: MessageType.Text,
+        content: `[STATUS] ${text}`,
+        sentAt: new Date(),
+        waMessageId,
+      });
+      return { waMessageId };
+    }
+
     const sock = this.pool.get(slotId);
     if (!sock) {
       throw new BadRequestException(
         `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
       );
     }
-    const slot = await this.dataSource
-      .getRepository(AccountSlotEntity)
-      .findOne({ where: { id: slotId } });
-    if (!slot?.accountId) throw new BadRequestException(`${await this.friendlySlotName(slotId)} 没有绑定账号`);
 
     // 'status@broadcast' 是 WA 协议约定 jid · Baileys 透传
     const sendResult = await sock.sendMessage('status@broadcast', { text });
@@ -739,12 +820,6 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     contentBase64: string,
     options: { mimeType?: string; filename?: string; caption?: string } = {},
   ): Promise<{ waMessageId: string | null }> {
-    const sock = this.pool.get(slotId);
-    if (!sock) {
-      throw new BadRequestException(
-        `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
-      );
-    }
     const slot = await this.dataSource
       .getRepository(AccountSlotEntity)
       .findOne({ where: { id: slotId } });
@@ -754,6 +829,46 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     if (buffer.length === 0) throw new BadRequestException('contentBase64 解码后为空');
     if (buffer.length > 16 * 1024 * 1024) {
       throw new BadRequestException(`媒体大小超过 WA 16MB 上限 (${buffer.length} bytes)`);
+    }
+
+    // 2026-04-25 · Phase 2 · worker 模式
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      if (type === 'file') {
+        throw new BadRequestException('Phase 2 worker 模式下 status file 类型尚未支持');
+      }
+      const ret = await this.workerManager.sendMedia(
+        slotId,
+        'status@broadcast',
+        type,
+        contentBase64,
+        {
+          mimetype: options.mimeType,
+          caption: options.caption,
+          ptt: type === 'voice',
+        },
+      );
+      const waMessageId = ret.waMessageId;
+      const msgTypeEnum =
+        type === 'image' ? MessageType.Image :
+        type === 'video' ? MessageType.Video :
+        MessageType.Voice;
+      await this.persistMessage({
+        accountId: slot.accountId,
+        remoteJid: 'status@broadcast',
+        direction: MessageDirection.Out,
+        msgType: msgTypeEnum,
+        content: options.caption ? `[STATUS] ${options.caption}` : `[STATUS ${type}]`,
+        sentAt: new Date(),
+        waMessageId,
+      });
+      return { waMessageId };
+    }
+
+    const sock = this.pool.get(slotId);
+    if (!sock) {
+      throw new BadRequestException(
+        `${await this.friendlySlotName(slotId)} 未在线 (pool 无 socket). 先完成扫码绑定 / 等 rehydrate 完成.`,
+      );
     }
 
     let sendPayload: Parameters<WASocket['sendMessage']>[1];
