@@ -26,7 +26,7 @@
 //   任何 → connected 跳过 connecting (除 idle 路径直接 chat-list rehydrate · 视为 starting → connecting → connected)
 
 import type { Logger } from 'pino';
-import type { BindStateEvent } from './protocol/runtime-protocol';
+import type { BindStateEvent } from '@wahubx/shared';
 
 export type BindState = BindStateEvent['state'] | 'idle';
 

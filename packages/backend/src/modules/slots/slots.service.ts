@@ -5,7 +5,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
@@ -16,7 +15,7 @@ import { TenantEntity } from '../tenants/tenant.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { BaileysService } from '../baileys/baileys.service';
-import { RuntimeBridgeService } from '../runtime-bridge/runtime-bridge.service';
+import { SlotRuntimeRegistry } from '../slot-runtime/slot-runtime.registry';
 import { getSlotDir } from '../../common/storage';
 import { ensureFingerprint } from '../../common/fingerprint';
 import { writeProxyConf, type ProxyDescriptor } from '../../common/proxy-config';
@@ -64,54 +63,32 @@ export class SlotsService {
     @Inject(forwardRef(() => BaileysService))
     private readonly baileys: BaileysService,
     private readonly dataSource: DataSource,
-    // 2026-04-25 · D8-3 · RuntimeBridge facade · Optional 防 Module 顺序导致 undefined
-    @Optional() private readonly runtimeBridge?: RuntimeBridgeService,
+    // 2026-04-25 · D9-4 · 通过 Registry 选 runtime 实装 · 替 D8-3 直接 inject
+    private readonly runtimes: SlotRuntimeRegistry,
   ) {}
 
-  // 2026-04-25 · D8-3 · runtime mode 切换器 (Codex 锁定 · 只替 startBind/cancelBind/getBindStatus)
-  // env RUNTIME_MODE=chromium | baileys (默认 baileys · 老路径)
-  // chromium 模式下 · 三个方法走 RuntimeBridgeService · 其他 BaileysService 调用点不动
-  private isChromiumRuntimeMode(): boolean {
-    return process.env.RUNTIME_MODE === 'chromium';
-  }
+  // 2026-04-25 · D9-4 · bind facade · 走 Registry · backend 不再到处写 if chromium / if baileys
+  // (Codex 边界 6: 单一 runtime 协议来源 · bind/status/send 抽象层成立)
 
-  /**
-   * D8-3 · 切到 chromium runtime 后这里走 WS 桥 · 否则走 BaileysService
-   */
   async bindStartBind(slotId: number, pairingPhoneNumber?: string): Promise<unknown> {
-    if (this.isChromiumRuntimeMode() && this.runtimeBridge) {
-      this.logger.log(`slot ${slotId} startBind · routing to ChromiumRuntime (WS bridge)`);
-      return this.runtimeBridge.startBind(slotId, pairingPhoneNumber);
-    }
-    return this.baileys.startBind(slotId, pairingPhoneNumber);
+    return this.runtimes.current().startBind(slotId, pairingPhoneNumber);
   }
 
-  /**
-   * D8-3 · cancel-bind facade
-   */
   async bindCancelBind(slotId: number): Promise<unknown> {
-    if (this.isChromiumRuntimeMode() && this.runtimeBridge) {
-      this.logger.log(`slot ${slotId} cancelBind · routing to ChromiumRuntime`);
-      return this.runtimeBridge.cancelBind(slotId);
-    }
-    return this.baileys.cancelBind(slotId);
+    return this.runtimes.current().cancelBind(slotId);
   }
 
-  /**
-   * D8-3 · get-bind-status facade
-   * chromium: 直接返 backend 缓存 (RuntimeBridgeService.getCachedBindState)
-   * baileys: 走 BaileysService.getStatus
-   */
   bindGetStatus(slotId: number): unknown {
-    if (this.isChromiumRuntimeMode() && this.runtimeBridge) {
-      const cached = this.runtimeBridge.getCachedBindState(slotId);
-      return {
-        runtime: 'chromium',
-        connected: this.runtimeBridge.hasConnection(slotId),
-        ...(cached ?? { bindState: 'idle' }),
-      };
+    const status = this.runtimes.current().getBindStatus(slotId);
+    // 兼容老前端字段: 加上 runtime/connected 别名 (D14 收敛)
+    if (status && typeof (status as { then?: unknown }).then === 'function') {
+      // 异步返回 (理论上 ISlotRuntime.getBindStatus 同步 · 但允许 Promise)
+      return status;
     }
-    return this.baileys.getStatus(slotId);
+    return {
+      runtime: this.runtimes.getCurrentMode(),
+      ...status,
+    };
   }
 
   /**

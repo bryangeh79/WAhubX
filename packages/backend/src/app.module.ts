@@ -28,6 +28,7 @@ import { ChannelItemsModule } from './modules/channel-items/channel-items.module
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { IntelligentReplyModule } from './modules/intelligent-reply/intelligent-reply.module';
 import { RuntimeBridgeModule } from './modules/runtime-bridge/runtime-bridge.module';
+import { SlotRuntimeModule } from './modules/slot-runtime/slot-runtime.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { RuntimeBridgeModule } from './modules/runtime-bridge/runtime-bridge.mod
     CampaignsModule,
     IntelligentReplyModule,
     RuntimeBridgeModule,
+    SlotRuntimeModule,
     HealthModule,
   ],
   providers: [

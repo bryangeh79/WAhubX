@@ -36,6 +36,6 @@ fi
 mkdir -p "$SESSION_DIR"
 echo "[init] session dir: $SESSION_DIR ($(du -sh $SESSION_DIR 2>/dev/null | cut -f1))"
 
-# 启 Node runtime
+# 启 Node runtime · D9 改: dist 在 runtime-chromium 子包内
 echo "[init] launching node runtime..."
-exec node /app/dist/index.js
+exec node /app/packages/runtime-chromium/dist/index.js

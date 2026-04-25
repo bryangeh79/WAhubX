@@ -14,16 +14,17 @@
     "lint": "eslint \"src/**/*.ts\" --fix"
   },
   "dependencies": {
+    "@wahubx/shared": "workspace:^",
+    "pino": "^9.0.0",
+    "puppeteer-core": "^22.13.1",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "puppeteer-core": "^22.13.1",
-    "ws": "^8.18.0",
-    "pino": "^9.0.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.4.0",
-    "ts-node": "^10.9.0"
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
   }
 }

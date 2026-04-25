@@ -10,7 +10,7 @@ import { SimInfoService } from './sim-info.service';
 import { HandoverService } from './handover.service';
 import { SlotsController } from './slots.controller';
 import { BaileysModule } from '../baileys/baileys.module';
-import { RuntimeBridgeModule } from '../runtime-bridge/runtime-bridge.module';
+import { SlotRuntimeModule } from '../slot-runtime/slot-runtime.module';
 
 @Module({
   imports: [
@@ -22,7 +22,7 @@ import { RuntimeBridgeModule } from '../runtime-bridge/runtime-bridge.module';
       ProxyEntity,
     ]),
     forwardRef(() => BaileysModule),
-    RuntimeBridgeModule,
+    SlotRuntimeModule,
   ],
   controllers: [SlotsController],
   providers: [SlotsService, SimInfoService, HandoverService],

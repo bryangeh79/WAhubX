@@ -25,7 +25,7 @@ import {
   type RuntimeMessage,
   type RuntimeAck,
   type RuntimeEvent,
-} from './runtime-protocol';
+} from '@wahubx/shared';
 
 interface ClientConn {
   ws: WebSocket;

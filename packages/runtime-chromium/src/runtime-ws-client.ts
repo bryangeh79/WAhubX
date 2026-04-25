@@ -25,7 +25,7 @@ import {
   type RuntimeCommand,
   type RuntimeMessage,
   type HeartbeatEvent,
-} from './protocol/runtime-protocol';
+} from '@wahubx/shared';
 
 export interface RuntimeWsClientOptions {
   controlPlaneUrl: string; // ws://localhost:9700/runtime

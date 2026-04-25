@@ -32,7 +32,7 @@ import type {
   ConnectionOpenEvent,
   ConnectionCloseEvent,
   RuntimeErrorEvent,
-} from './protocol/runtime-protocol';
+} from '@wahubx/shared';
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? 'info',
