@@ -13,6 +13,7 @@ import type {
   SendResult,
   RuntimeEvent,
   RuntimeEventHandler,
+  RuntimeCommand,
 } from '@wahubx/shared';
 import { eventName } from '@wahubx/shared';
 import { RuntimeBridgeService } from '../runtime-bridge/runtime-bridge.service';
@@ -80,22 +81,40 @@ export class ChromiumSlotRuntime implements ISlotRuntime {
     return this.bridge.hasConnection(slotId);
   }
 
-  // ─── 消息收发 · D9-3 stub · D10 W2 真实装 ───────────
-  async sendText(_slotId: number, _to: string, _text: string): Promise<SendResult> {
-    // D10 W2: this.bridge.sendCommand(slotId, { kind:'cmd', type:'send-text', to, text })
-    //         然后 runtime 走 WA Web DOM 自动化点击/输入/发送
-    throw new Error('chromium runtime: sendText not implemented yet (W2 D10)');
+  // ─── 消息收发 · D10 W2 真实装 ─────────────────────
+  async sendText(slotId: number, to: string, text: string): Promise<SendResult> {
+    const cmd = {
+      kind: 'cmd',
+      type: 'send-text',
+      to,
+      text,
+    } as unknown as Omit<RuntimeCommand, 'requestId'>;
+    const r = await this.bridge.sendCommand<{ messageId: string | null }>(slotId, cmd);
+    return { messageId: r?.messageId ?? null };
   }
 
   async sendMedia(
-    _slotId: number,
-    _to: string,
-    _mediaType: 'image' | 'video' | 'voice' | 'audio' | 'file',
-    _mediaBase64: string,
-    _options?: SendMediaOptions,
+    slotId: number,
+    to: string,
+    mediaType: 'image' | 'video' | 'voice' | 'audio' | 'file',
+    mediaBase64: string,
+    options?: SendMediaOptions,
   ): Promise<SendResult> {
-    // D10 W2: 走 input[type=file] 上传路径 (Codex 锁: paste 留后续 · 优先 file input)
-    throw new Error('chromium runtime: sendMedia not implemented yet (W2 D10)');
+    // D10 范围 (Codex 锁): image/file · video/voice 抛 not-supported (留 D11+)
+    if (mediaType === 'video' || mediaType === 'voice' || mediaType === 'audio') {
+      throw new Error(`chromium runtime D10: ${mediaType} not supported · D11+ extends`);
+    }
+    const cmd = {
+      kind: 'cmd',
+      type: 'send-media',
+      to,
+      mediaType,
+      mediaBase64,
+      caption: options?.caption,
+      fileName: options?.fileName,
+    } as unknown as Omit<RuntimeCommand, 'requestId'>;
+    const r = await this.bridge.sendCommand<{ messageId: string | null }>(slotId, cmd);
+    return { messageId: r?.messageId ?? null };
   }
 
   // ─── 事件订阅 ────────────────────────────────────

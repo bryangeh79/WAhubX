@@ -41,6 +41,56 @@ export const WA_SELECTORS = {
     '[class*="landing-headerTitle"]',
     '[class*="version-title"]',
   ],
+
+  // 2026-04-25 · D10 W2 · 发消息相关 selector
+  // 进 chat 后的消息输入框 (contenteditable)
+  // WA Web 用 div[contenteditable=true] 不是 textarea
+  messageInput: [
+    'div[contenteditable="true"][data-tab="10"]',           // 当前主流 · data-tab=10 是消息输入
+    'div[contenteditable="true"][role="textbox"][title*="essag"]', // i18n: Type a message / Message
+    'footer div[contenteditable="true"]',                   // footer 内的可编辑区
+    'div[contenteditable="true"][data-testid="conversation-compose-box-input"]',
+  ],
+
+  // 发送按钮 (paperplane icon) · 但通常我们用 Enter 键 · 这里留 fallback
+  sendButton: [
+    'button[data-tab="11"]',                                // 主流 · paperplane
+    'button[aria-label*="Send"]',                           // i18n: Send / Enviar
+    'button[data-testid="compose-btn-send"]',
+    'span[data-icon="send"]',                               // icon span 直接点也行
+  ],
+
+  // 附件按钮 (paperclip · 弹出 image/video/document/etc)
+  attachButton: [
+    'button[title*="Attach"]',                              // i18n
+    'div[title*="Attach"]',
+    'span[data-icon="plus-rounded"]',                       // 新版 + 号
+    'span[data-icon="attach-menu-plus"]',
+    'span[data-icon="clip"]',                               // 旧版 paperclip
+    'button[aria-label*="Attach"]',
+  ],
+
+  // 附件菜单弹出后 · 各类文件 input
+  attachImageInput: [
+    'input[accept*="image"]',
+    'button[aria-label*="Photo"] input',
+    'span[data-icon="image"] input',
+  ],
+
+  attachDocumentInput: [
+    'input[accept="*"]',                                    // 文档默认 accept=* (旧版)
+    'input[type="file"]:not([accept*="image"]):not([accept*="video"]):not([accept*="audio"])',
+    'span[data-icon="document"] input',
+  ],
+
+  // 发送状态 · 单勾 (已发) / 双勾 (已送达) / 蓝勾 (已读)
+  // D10 sendText 单勾即认成功 (Codex 锁: 不做"等已送达确认")
+  messageStatusTick: [
+    'span[data-icon="msg-check"]',                          // 单勾 (sent)
+    'span[data-icon="msg-time"]',                           // pending (clock icon)
+    'span[data-icon="msg-dblcheck"]',                       // 双勾 (delivered)
+    'span[data-icon="msg-dblcheck-light"]',                 // 双勾蓝 (read)
+  ],
 };
 
 // D4 · splash 持续阈值 · splash 见到后超过这时间仍无 qr/chat-list → 标 splash-stuck

@@ -25,6 +25,13 @@ import { injectStealthOverrides } from './wa-web/stealth-inject';
 import { IdleActivityScheduler } from './idle-activity';
 import { RuntimeWsClient } from './runtime-ws-client';
 import { BindStateMachine, type BindState } from './bind-state-machine';
+import { HumanBehaviorSimulator } from './human-behavior';
+import {
+  openChatByPhone,
+  sendTextInOpenChat,
+  sendMediaInOpenChat,
+} from './wa-web/actions';
+import { installInboundWatcher } from './wa-web/inbound-watcher';
 import type {
   RuntimeCommand,
   QrEvent,
@@ -415,6 +422,36 @@ async function main() {
     emitRuntimeError(`unhandledRejection: ${msg}`, false);
   });
 
+  // 2026-04-25 · D10 · inbound watcher · 监听新消息推 message-upsert event
+  // 仅 connected 后启 · uninstall 在 shutdown
+  let inboundUninstall: (() => Promise<void>) | null = null;
+  const installInboundWatcherIfNeeded = async (): Promise<void> => {
+    if (inboundUninstall) return; // 已装
+    try {
+      const { uninstall } = await installInboundWatcher(page, {
+        log,
+        onIncoming: (hint) => {
+          // 推 message-upsert event · backend 转给业务模块
+          if (!wsClient) return;
+          wsClient.emitEvent({
+            kind: 'event',
+            type: 'message-upsert',
+            slotId: slotIdNum,
+            ts: Date.now(),
+            messages: [hint as unknown],
+          } as Parameters<typeof wsClient.emitEvent>[0]);
+        },
+      });
+      inboundUninstall = uninstall;
+      log.info('D10 inbound watcher installed');
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        'D10 inbound watcher install failed · 不阻塞 · receive 暂不可用',
+      );
+    }
+  };
+
   // 2026-04-25 · D8-3 · chat-list watchdog · 监 WA 主动踢号
   // 30s 周期 · chat-list 选择器消失 = WA logged out · 立刻推 connection-close
   // 仅 SOAK_MODE / always-on · 一次性绑测不启
@@ -490,6 +527,7 @@ async function main() {
       emitBindState('connected', 'rehydrate complete');
       emitConnectionOpen(detectResult.selector ?? '[data-testid="chat-list"]');
       startIdleSchedulerIfNeeded();
+      void installInboundWatcherIfNeeded();
       return { outcome: 'rehydrated' };
     }
 
@@ -548,6 +586,7 @@ async function main() {
       emitBindState('connected', 'flush done · session locked');
       emitConnectionOpen(loginResult.chatListSelector ?? '[data-testid="chat-list"]');
       startIdleSchedulerIfNeeded();
+      void installInboundWatcherIfNeeded();
       // 2026-04-25 · D8-3 · WA logged-out 监测 · 周期检查 chat-list 在不在
       // 真用户被踢: chat-list 消失 · 出现 unsupported / qr / loading splash · 任一都不是 chat-list
       // SOAK_MODE 下才启 (D6 一次性测不需要 · 跑完即关)
@@ -615,10 +654,71 @@ async function main() {
         setTimeout(() => void shutdown('cmd-shutdown'), 200);
         return { ok: true, data: { willShutdown: true } };
       }
-      // send-text / send-media · D10 W2 实装 · 现 stub
-      return { ok: false, error: `cmd type "${cmd.type}" not implemented in D8-2 (W2 work)` };
+      // 2026-04-25 · D10 W2 · sendText 实装
+      if (cmd.type === 'send-text') {
+        if (g_state !== 'chat-list') {
+          return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
+        }
+        try {
+          const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
+          if (!openR.ok) {
+            return { ok: false, error: `open chat failed: ${openR.error}` };
+          }
+          const sim = new HumanBehaviorSimulator(page);
+          const sendR = await sendTextInOpenChat(page, cmd.text, log, {
+            simulator: sim,
+            diagnosticsDir,
+          });
+          if (!sendR.ok) {
+            return { ok: false, error: sendR.error };
+          }
+          return { ok: true, data: { messageId: sendR.pseudoMessageId } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ok: false, error: `send-text threw: ${msg}` };
+        }
+      }
+      // 2026-04-25 · D10 W2 · sendMedia 实装 (image/file)
+      if (cmd.type === 'send-media') {
+        if (g_state !== 'chat-list') {
+          return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
+        }
+        const supported = cmd.mediaType === 'image' || cmd.mediaType === 'file';
+        if (!supported) {
+          return {
+            ok: false,
+            error: `D10 only supports image/file · got: ${cmd.mediaType} (W2+ extends video/voice)`,
+          };
+        }
+        try {
+          const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
+          if (!openR.ok) {
+            return { ok: false, error: `open chat failed: ${openR.error}` };
+          }
+          const sendR = await sendMediaInOpenChat(
+            page,
+            cmd.mediaBase64,
+            {
+              caption: cmd.caption,
+              fileName: cmd.fileName,
+              kind: cmd.mediaType === 'image' ? 'image' : 'file',
+              diagnosticsDir,
+            },
+            log,
+          );
+          if (!sendR.ok) {
+            return { ok: false, error: sendR.error };
+          }
+          return { ok: true, data: { messageId: sendR.pseudoMessageId } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ok: false, error: `send-media threw: ${msg}` };
+        }
+      }
+      // 所有合法分支都覆盖 · 这里仅防御性兜底
+      return { ok: false, error: `cmd type "${(cmd as { type?: string }).type ?? 'unknown'}" not implemented` };
     });
-    log.info('D8-2 · WS command handlers registered (init/start-bind/cancel-bind/fetch-status/shutdown)');
+    log.info('D10 · WS command handlers registered (init/start-bind/cancel-bind/fetch-status/send-text/send-media/shutdown)');
   }
 
   // ─── 启动行为分流 ───────────────────────────────────────────────
@@ -648,6 +748,13 @@ async function main() {
   const shutdown = async (signal: string): Promise<void> => {
     log.warn({ signal, fsmState: fsm.state }, 'shutdown signal received');
     if (idleScheduler) idleScheduler.stop();
+    if (inboundUninstall) {
+      try {
+        await inboundUninstall();
+      } catch {
+        /* ignore */
+      }
+    }
     if (wsClient) await wsClient.stop();
     try {
       await browser.close();
