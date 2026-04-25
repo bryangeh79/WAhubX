@@ -40,6 +40,8 @@ import type {
   SendTextCommand,
   SendMediaCommand,
   SendPresenceCommand,
+  NewsletterMetadataCommand,
+  NewsletterFollowCommand,
 } from './worker-protocol';
 import { WORKER_HEARTBEAT_INTERVAL_MS } from './worker-protocol';
 import { buildProxyAgent, type ProxyDescriptor } from '../../../common/proxy-config';
@@ -58,6 +60,18 @@ let g_bindActive = false;
 let g_bindMode: 'qr' | 'pair' = 'qr';
 let g_bindPairingPhone: string | undefined = undefined;
 let g_bindPairRequested = false;
+
+// 2026-04-25 · P0#1 · worker 自管重连状态 (Phase 1 BaileysService.scheduleReconnect 等价)
+// 父进程 facade 已经通过 OnEvent('baileys.worker.connection-close') 接事件 ·
+// 但不再触发 reconnect (worker 自管). 父只用作日志 / status 维护.
+let g_reconnectAttempts = 0;
+let g_consecutive440 = 0;
+let g_reconnectTimer: NodeJS.Timeout | null = null;
+let g_stableTimer: NodeJS.Timeout | null = null;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_BASE_MS = 60_000; // 60 × 2^n × jitter(0.7-1.3)
+const QUARANTINE_440_THRESHOLD = 2;
+const STABLE_RESET_MS = 10_000;
 
 // worker 内部 logger · 通过 process.send 转发 · 父进程统一打 pino
 const logLocal = (level: 'info' | 'warn' | 'error', message: string): void => {
@@ -249,6 +263,13 @@ function attachSocketListeners(sock: WASocket): void {
           phoneNumber: userId?.split(':')[0].split('@')[0],
         });
       }
+      // 10s 稳定 · 重置重连计数
+      if (g_stableTimer) clearTimeout(g_stableTimer);
+      g_stableTimer = setTimeout(() => {
+        g_reconnectAttempts = 0;
+        g_consecutive440 = 0;
+        g_stableTimer = null;
+      }, STABLE_RESET_MS);
     }
 
     if (connection === 'close') {
@@ -278,11 +299,91 @@ function attachSocketListeners(sock: WASocket): void {
         return;
       }
 
+      // 取消未启动的 stableTimer · close 没到 10s 计数不归零
+      if (g_stableTimer) {
+        clearTimeout(g_stableTimer);
+        g_stableTimer = null;
+      }
+
       emitEvent({ type: 'connection-close', code, reason });
+
       if (g_bindActive) {
         g_bindActive = false;
         emitEvent({ type: 'bind-state', state: 'failed', error: `连接关闭 (${reason})` });
+        return;
       }
+
+      // 2026-04-25 · P0#1 · worker 自管重连
+      // 1. loggedOut · 不重连 · 父进程 markSlotSuspended
+      if (code === DisconnectReason.loggedOut) {
+        logLocal('warn', `logged out remotely · 不再重连 · 等父进程处理`);
+        try {
+          g_sock?.end(undefined);
+        } catch {
+          /* ignore */
+        }
+        g_sock = null;
+        return;
+      }
+
+      // 2. connectionReplaced (440) · 累计 2 次进 quarantine
+      if (code === DisconnectReason.connectionReplaced) {
+        g_consecutive440 += 1;
+        if (g_consecutive440 >= QUARANTINE_440_THRESHOLD) {
+          logLocal('error', `连续 ${g_consecutive440} 次 440 · 不再重连 · 触发 fatal worker-error 让父 quarantine`);
+          emitEvent({
+            type: 'worker-error',
+            error: `consecutive 440 · likely WA flagged this number`,
+            fatal: true,
+          });
+          try {
+            g_sock?.end(undefined);
+          } catch {
+            /* ignore */
+          }
+          g_sock = null;
+          return;
+        }
+        logLocal('warn', `440 第 ${g_consecutive440} 次 · 仍重连`);
+      }
+
+      // 3. 普通 close · 指数退避 + jitter 重连
+      if (g_reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        logLocal('error', `达到 ${MAX_RECONNECT_ATTEMPTS} 次重连上限 · 等父进程处理`);
+        try {
+          g_sock?.end(undefined);
+        } catch {
+          /* ignore */
+        }
+        g_sock = null;
+        return;
+      }
+
+      const baseMs = RECONNECT_BASE_MS * Math.pow(2, g_reconnectAttempts);
+      const jitter = 0.7 + Math.random() * 0.6;
+      const delayMs = Math.round(baseMs * jitter);
+      g_reconnectAttempts += 1;
+      logLocal(
+        'warn',
+        `reconnect #${g_reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${Math.round(delayMs / 1000)}s (code=${code})`,
+      );
+
+      try {
+        g_sock?.end(undefined);
+      } catch {
+        /* ignore */
+      }
+      g_sock = null;
+
+      if (g_reconnectTimer) clearTimeout(g_reconnectTimer);
+      g_reconnectTimer = setTimeout(() => {
+        g_reconnectTimer = null;
+        spawnSocket().catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logLocal('error', `reconnect spawn failed: ${msg}`);
+          // 失败后下一次 close 事件触发再重试
+        });
+      }, delayMs);
     }
   });
 
@@ -362,6 +463,38 @@ async function handleSendMedia(cmd: SendMediaCommand): Promise<void> {
   }
 }
 
+async function handleNewsletterMetadata(cmd: NewsletterMetadataCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const s = g_sock as unknown as {
+      newsletterMetadata: (lookupBy: string, key: string) => Promise<unknown>;
+    };
+    const meta = await s.newsletterMetadata(cmd.lookupBy, cmd.key);
+    ack(cmd.requestId, true, meta ?? null);
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleNewsletterFollow(cmd: NewsletterFollowCommand): Promise<void> {
+  if (!g_sock) {
+    ack(cmd.requestId, false, undefined, 'socket not ready');
+    return;
+  }
+  try {
+    const s = g_sock as unknown as {
+      newsletterFollow: (jid: string) => Promise<unknown>;
+    };
+    const result = await s.newsletterFollow(cmd.jid);
+    ack(cmd.requestId, true, result ?? null);
+  } catch (err) {
+    ack(cmd.requestId, false, undefined, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function handleSendPresence(cmd: SendPresenceCommand): Promise<void> {
   if (!g_sock) {
     ack(cmd.requestId, false, undefined, 'socket not ready');
@@ -380,6 +513,8 @@ async function handleSendPresence(cmd: SendPresenceCommand): Promise<void> {
 async function handleShutdown(requestId: string): Promise<void> {
   g_shuttingDown = true;
   if (g_heartbeatTimer) clearInterval(g_heartbeatTimer);
+  if (g_reconnectTimer) clearTimeout(g_reconnectTimer);
+  if (g_stableTimer) clearTimeout(g_stableTimer);
   try {
     // 保存 creds 再关
     await g_saveCreds?.();
@@ -401,6 +536,8 @@ async function handleShutdown(requestId: string): Promise<void> {
 function handleForceEvict(requestId: string): void {
   g_shuttingDown = true;
   if (g_heartbeatTimer) clearInterval(g_heartbeatTimer);
+  if (g_reconnectTimer) clearTimeout(g_reconnectTimer);
+  if (g_stableTimer) clearTimeout(g_stableTimer);
   try {
     g_sock?.end(undefined);
   } catch {
@@ -460,6 +597,12 @@ process.on('message', (msg: unknown) => {
       break;
     case 'send-presence':
       void handleSendPresence(cmd);
+      break;
+    case 'newsletter-metadata':
+      void handleNewsletterMetadata(cmd);
+      break;
+    case 'newsletter-follow':
+      void handleNewsletterFollow(cmd);
       break;
     case 'shutdown':
       void handleShutdown(cmd.requestId);

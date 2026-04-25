@@ -47,8 +47,7 @@ export class AutoAcceptExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker
 
     // Phase 裁剪
     const plan = await this.warmupRepo.findOne({ where: { accountId: ctx.accountId } });
@@ -93,7 +92,7 @@ export class AutoAcceptExecutor implements TaskExecutor {
       if (accepted >= cap) break;
       const text = texts[Math.floor(Math.random() * texts.length)];
       try {
-        await sock.sendMessage(contact.remoteJid, { text });
+        await this.baileys.sendText(slot.id, contact.remoteJid, text);
         await this.contactRepo.update(contact.id, {
           lastMessageAt: new Date(),
         });

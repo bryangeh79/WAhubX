@@ -50,8 +50,7 @@ export class AddContactExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker (若 WA_WORKER_MODE)
 
     let added = 0;
     for (const num of numbers.slice(0, maxCount)) {
@@ -59,7 +58,7 @@ export class AddContactExecutor implements TaskExecutor {
       const jid = `${num}@s.whatsapp.net`;
       const text = openings[Math.floor(Math.random() * openings.length)];
       try {
-        await sock.sendMessage(jid, { text });
+        await this.baileys.sendText(slot.id, jid, text);
         added++;
         ctx.log('contact-added', true, { jid });
       } catch (err) {

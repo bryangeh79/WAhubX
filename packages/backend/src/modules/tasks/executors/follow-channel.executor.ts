@@ -43,8 +43,7 @@ export class FollowChannelExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    // 2026-04-25 · Phase 2 · 通过 baileys.newsletterMetadata/newsletterFollow facade · 自动走 worker
 
     const mode = payload.followMode ?? (payload.inviteCode ? 'manual' : 'random');
     const count = Math.min(Math.max(payload.count ?? 1, 1), 20);
@@ -61,7 +60,7 @@ export class FollowChannelExecutor implements TaskExecutor {
       if (!payload.inviteCode) {
         return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'manual 模式 inviteCode 必填' };
       }
-      const outcome = await this.tryFollowOnce(sock, payload.inviteCode);
+      const outcome = await this.tryFollowOnce(slot.id, payload.inviteCode);
       ctx.log('follow-attempt', outcome.ok, { code: payload.inviteCode, ...outcome });
       if (outcome.ok) {
         return {
@@ -95,7 +94,7 @@ export class FollowChannelExecutor implements TaskExecutor {
       tried.add(pick.inviteCode);
       attempt++;
 
-      const outcome = await this.tryFollowOnce(sock, pick.inviteCode);
+      const outcome = await this.tryFollowOnce(slot.id, pick.inviteCode);
       ctx.log(outcome.ok ? 'followed' : 'failed', outcome.ok, {
         code: pick.inviteCode,
         name: pick.name,
@@ -161,7 +160,7 @@ export class FollowChannelExecutor implements TaskExecutor {
    * 实际操作可能已成功 · workaround: 报错后 re-fetch metadata · 检查 viewer_metadata.mute 或 subscribers_count
    */
   private async tryFollowOnce(
-    sock: unknown,
+    slotId: number,
     inviteCode: string,
   ): Promise<{
     ok: boolean;
@@ -172,19 +171,13 @@ export class FollowChannelExecutor implements TaskExecutor {
     isDeadCode?: boolean;
   }> {
     try {
-      const s = sock as {
-        newsletterMetadata: (
-          t: string,
-          k: string,
-        ) => Promise<{
-          id?: string;
-          name?: string | { text?: string };
-          thread_metadata?: { name?: { text?: string } };
-          viewer_metadata?: { mute?: string; role?: string } | null;
-        } | null>;
-        newsletterFollow: (jid: string) => Promise<unknown>;
-      };
-      const meta = await s.newsletterMetadata('invite', inviteCode);
+      // 2026-04-25 · Phase 2 · 通过 baileys.newsletterMetadata/newsletterFollow facade
+      const meta = (await this.baileys.newsletterMetadata(slotId, 'invite', inviteCode)) as {
+        id?: string;
+        name?: string | { text?: string };
+        thread_metadata?: { name?: { text?: string } };
+        viewer_metadata?: { mute?: string; role?: string } | null;
+      } | null;
       if (!meta?.id) {
         return {
           ok: false,
@@ -205,7 +198,7 @@ export class FollowChannelExecutor implements TaskExecutor {
       }
 
       try {
-        await s.newsletterFollow(jid);
+        await this.baileys.newsletterFollow(slotId, jid);
         return { ok: true, jid, resolvedName };
       } catch (followErr: unknown) {
         const e = followErr as { message?: string };
@@ -217,7 +210,9 @@ export class FollowChannelExecutor implements TaskExecutor {
           for (let i = 0; i < 3; i++) {
             try {
               await new Promise((r) => setTimeout(r, (i + 1) * 2000)); // 2s, 4s, 6s
-              const recheck = await s.newsletterMetadata('jid', jid);
+              const recheck = (await this.baileys.newsletterMetadata(slotId, 'jid', jid)) as {
+                viewer_metadata?: { role?: string; mute?: string } | null;
+              } | null;
               const vm = (recheck?.viewer_metadata ?? null) as { role?: string; mute?: string } | null;
               this.logger.log(
                 `follow workaround check ${i + 1}/3 · jid=${jid} · viewer=${JSON.stringify(vm)}`,

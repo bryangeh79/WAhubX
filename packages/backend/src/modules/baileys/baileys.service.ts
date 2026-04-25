@@ -273,8 +273,39 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
 
   // 2026-04-21 · executor 需要直接调 Baileys 高级 API (加群/关频道/读消息)
   // 暴露 getSocket 让 JoinGroupExecutor / FollowChannelExecutor / StatusReactExecutor 等使用
+  // 2026-04-25 · Phase 2 · worker 模式下返 null · 调用方应用专用 facade (newsletterMetadata 等)
   getSocket(slotId: number): WASocket | null {
     return this.pool.get(slotId) ?? null;
+  }
+
+  // 2026-04-25 · Phase 2 · 频道 metadata · worker 模式走 IPC · 否则走老 sock
+  async newsletterMetadata(
+    slotId: number,
+    lookupBy: 'invite' | 'jid',
+    key: string,
+  ): Promise<unknown> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      return this.workerManager.newsletterMetadata(slotId, lookupBy, key);
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    const s = sock as unknown as {
+      newsletterMetadata: (lookupBy: string, key: string) => Promise<unknown>;
+    };
+    return s.newsletterMetadata(lookupBy, key);
+  }
+
+  // 2026-04-25 · Phase 2 · follow 频道
+  async newsletterFollow(slotId: number, jid: string): Promise<unknown> {
+    if (WORKER_MODE_ENABLED() && this.workerManager?.hasWorker(slotId)) {
+      return this.workerManager.newsletterFollow(slotId, jid);
+    }
+    const sock = this.pool.get(slotId);
+    if (!sock) throw new BadRequestException(`槽位 ${slotId} 未在线`);
+    const s = sock as unknown as {
+      newsletterFollow: (jid: string) => Promise<unknown>;
+    };
+    return s.newsletterFollow(jid);
   }
 
   /**

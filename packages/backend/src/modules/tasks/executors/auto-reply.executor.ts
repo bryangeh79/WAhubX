@@ -61,8 +61,7 @@ export class AutoReplyExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker
 
     const since = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
     // 查 · 最近 N 小时内有入境消息 · 但入境消息之后我方没回过 的 contact
@@ -106,7 +105,7 @@ export class AutoReplyExecutor implements TaskExecutor {
 
       const text = templates[Math.floor(Math.random() * templates.length)];
       try {
-        await sock.sendMessage(contact.remoteJid, { text });
+        await this.baileys.sendText(slot.id, contact.remoteJid, text);
         replied++;
         ctx.log('auto-replied', true, { jid: contact.remoteJid, text });
       } catch (err) {

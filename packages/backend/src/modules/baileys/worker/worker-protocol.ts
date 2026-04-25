@@ -19,6 +19,8 @@ export type WorkerCommandType =
   | 'send-text'             // 发文本
   | 'send-media'            // 发媒体 (image/video/voice)
   | 'send-presence'         // composing / recording / paused / available
+  | 'newsletter-metadata'   // 查频道 metadata (invite code 或 jid)
+  | 'newsletter-follow'     // follow 频道
   | 'fetch-status'          // 查当前 socket 状态
   | 'shutdown'              // 优雅关闭 (save creds + close socket)
   | 'force-evict';          // 强制踢 socket (不存 creds)
@@ -94,6 +96,17 @@ export interface SendPresenceCommand extends WorkerCommandBase {
   presence: 'composing' | 'recording' | 'paused' | 'available' | 'unavailable';
 }
 
+export interface NewsletterMetadataCommand extends WorkerCommandBase {
+  type: 'newsletter-metadata';
+  lookupBy: 'invite' | 'jid';
+  key: string;
+}
+
+export interface NewsletterFollowCommand extends WorkerCommandBase {
+  type: 'newsletter-follow';
+  jid: string;
+}
+
 export interface FetchStatusCommand extends WorkerCommandBase {
   type: 'fetch-status';
 }
@@ -114,6 +127,8 @@ export type WorkerCommand =
   | SendTextCommand
   | SendMediaCommand
   | SendPresenceCommand
+  | NewsletterMetadataCommand
+  | NewsletterFollowCommand
   | FetchStatusCommand
   | ShutdownCommand
   | ForceEvictCommand;

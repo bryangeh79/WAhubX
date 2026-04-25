@@ -136,6 +136,33 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
   }
 
   /**
+   * 查频道 metadata (lookupBy='invite' 用 invite code · 'jid' 用频道 jid)
+   */
+  async newsletterMetadata(
+    slotId: number,
+    lookupBy: 'invite' | 'jid',
+    key: string,
+  ): Promise<unknown> {
+    return this.sendCommand(slotId, {
+      type: 'newsletter-metadata',
+      requestId: this.newReqId(),
+      lookupBy,
+      key,
+    });
+  }
+
+  /**
+   * follow 频道
+   */
+  async newsletterFollow(slotId: number, jid: string): Promise<unknown> {
+    return this.sendCommand(slotId, {
+      type: 'newsletter-follow',
+      requestId: this.newReqId(),
+      jid,
+    });
+  }
+
+  /**
    * 发 presence (composing / recording / paused / available / unavailable)
    */
   async sendPresence(
@@ -408,11 +435,36 @@ export class BaileysWorkerManagerService implements OnModuleDestroy {
           else this.logger.log(`${prefix} ${logEvt.message}`);
         }
         break;
-      case 'worker-error':
+      case 'worker-error': {
+        const errEvt = evt as Extract<WorkerEvent, { type: 'worker-error' }>;
         this.logger.error(
-          `worker slot ${evt.slotId} error (fatal=${(evt as Extract<WorkerEvent, { type: 'worker-error' }>).fatal}): ${(evt as Extract<WorkerEvent, { type: 'worker-error' }>).error}`,
+          `worker slot ${evt.slotId} error (fatal=${errEvt.fatal}): ${errEvt.error}`,
         );
+        // 2026-04-25 · P0#1 · fatal worker-error · 父进程标 quarantine
+        // 主因: worker 自管重连时连续 2 次 440 触发
+        if (errEvt.fatal) {
+          void this.dataSource
+            .getRepository(AccountSlotEntity)
+            .update(evt.slotId, { status: AccountSlotStatus.Quarantine })
+            .then(() => {
+              this.logger.error(
+                `slot ${evt.slotId} · QUARANTINE · 由 worker fatal error 触发 · 需人工换号`,
+              );
+              if (this.eventBus) {
+                const handle = this.workers.get(evt.slotId);
+                this.eventBus.emit('slot.suspended', {
+                  slotId: evt.slotId,
+                  accountId: handle?.slotId, // accountId 父这边没存 · 用 slotId 占位 · dispatcher 自己查 DB
+                });
+                this.eventBus.emit('slot.quarantined', { slotId: evt.slotId });
+              }
+            })
+            .catch((err) => {
+              this.logger.warn(`update quarantine failed slot ${evt.slotId}: ${err}`);
+            });
+        }
         break;
+      }
       case 'connection-open':
       case 'connection-close':
       case 'message-upsert':
