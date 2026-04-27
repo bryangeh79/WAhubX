@@ -47,6 +47,12 @@ interface ProcessHandle {
   child: ChildProcess | null;
   /** stop() 已发 · 用于 close 事件分类 */
   stopRequested: boolean;
+  /** C1 · auto-respawn 计数 · 滑动窗口 */
+  respawnAttempts: number;
+  respawnWindowStartAt: number;
+  /** quarantine 期间禁再 respawn · 60s 后解 */
+  quarantinedUntil: number;
+  respawnTimer: NodeJS.Timeout | null;
 }
 
 @Injectable()
@@ -375,6 +381,10 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
         state: initialProcessState(slotId),
         child: null,
         stopRequested: false,
+        respawnAttempts: 0,
+        respawnWindowStartAt: 0,
+        quarantinedUntil: 0,
+        respawnTimer: null,
       };
       this.handles.set(slotId, handle);
     }
@@ -424,7 +434,49 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
       this.logger.log(
         `slot ${slotId} · runtime closed · pid=${handle.state.pid} · code=${code} signal=${signal} · class=${exitClass}`,
       );
+
+      // 2026-04-28 · C1 · auto-respawn unexpected-exit
+      // 窗口内 3 次以内立刻重启 (1s/3s/10s 退避) · 第 4 次起 60s quarantine
+      if (exitClass === 'unexpected-exit') {
+        this.scheduleAutoRespawn(slotId, handle);
+      }
     });
+  }
+
+  private scheduleAutoRespawn(slotId: number, handle: ProcessHandle): void {
+    const now = Date.now();
+    if (handle.quarantinedUntil > now) {
+      this.logger.warn(
+        `slot ${slotId} · auto-respawn 跳 · quarantined for ${Math.ceil((handle.quarantinedUntil - now) / 1000)}s`,
+      );
+      return;
+    }
+    // 滑动窗口 5min · 超出重置计数
+    if (now - handle.respawnWindowStartAt > 300_000) {
+      handle.respawnAttempts = 0;
+      handle.respawnWindowStartAt = now;
+    }
+    handle.respawnAttempts += 1;
+    const backoffMs = handle.respawnAttempts === 1 ? 1_000 : handle.respawnAttempts === 2 ? 3_000 : 10_000;
+    if (handle.respawnAttempts > 3) {
+      handle.quarantinedUntil = now + 60_000;
+      this.logger.error(
+        `slot ${slotId} · C1 auto-respawn · 已 ${handle.respawnAttempts} 次连退 · quarantine 60s`,
+      );
+      return;
+    }
+    this.logger.warn(
+      `slot ${slotId} · C1 auto-respawn 调度 · attempt=${handle.respawnAttempts} · backoff=${backoffMs}ms`,
+    );
+    if (handle.respawnTimer) clearTimeout(handle.respawnTimer);
+    handle.respawnTimer = setTimeout(() => {
+      handle.respawnTimer = null;
+      this.start(slotId).catch((err) => {
+        this.logger.error(
+          `slot ${slotId} · C1 auto-respawn 启失败 · ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, backoffMs);
   }
 
   private classifyExit(
