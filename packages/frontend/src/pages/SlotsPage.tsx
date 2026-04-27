@@ -684,6 +684,7 @@ export function SlotsPage() {
                       onManage={() => setChatTarget(slot)}
                       onFactoryReset={() => void handleFactoryReset(slot, load)}
                       onReload={() => void load()}
+                      onToggleRole={() => void handleToggleRole(slot)}
                     />
                   </Col>
                 ))}
@@ -770,6 +771,7 @@ function ActiveSlotCard({
   onManage,
   onFactoryReset,
   onReload,
+  onToggleRole,
 }: {
   slot: SlotItem;
   groups: GroupSummary[];
@@ -777,6 +779,7 @@ function ActiveSlotCard({
   onManage: () => void;
   onFactoryReset: () => void;
   onReload: () => void;
+  onToggleRole: () => void;
 }) {
   // 2026-04-22 · 区分 "待养号" (status=warmup 但无 plan) vs "养号中" (有 plan)
   const hasWarmupPlan = !!slot.warmupStartedAt;
@@ -1091,7 +1094,7 @@ function ActiveSlotCard({
         )}
         <Button
           size="small"
-          onClick={() => void handleToggleRole(slot)}
+          onClick={onToggleRole}
           style={{ fontSize: 12, padding: '0 10px', height: 24, borderRadius: 12 }}
         >
           ⇄ 切换

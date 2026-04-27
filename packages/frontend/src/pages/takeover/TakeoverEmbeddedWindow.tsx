@@ -94,7 +94,6 @@ export function TakeoverEmbeddedWindow({ slotId, enableInput = true }: Props) {
       try {
         ns.emit('unsubscribe', { slotId });
         ns.disconnect();
-        socket.disconnect();
       } catch {
         /* ignore */
       }
