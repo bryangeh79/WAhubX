@@ -131,6 +131,16 @@ export class CampaignsController {
     return this.service.runNowTarget(this.tenantOf(cur), id, targetId);
   }
 
+  // 2026-04-28 · 删除单个 target · 取消 pending task + 标 skipped
+  @Delete(':id/targets/:targetId')
+  cancelTarget(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('targetId') targetId: string,
+  ) {
+    return this.service.cancelTarget(this.tenantOf(cur), id, targetId);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {

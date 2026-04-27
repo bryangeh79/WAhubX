@@ -660,6 +660,48 @@ export class CampaignsService {
     return { pushed: true };
   }
 
+  /**
+   * 2026-04-28 · 删除单个 target · 取消未执行的 task + 标 target 跳过
+   * UI: targets 表每行的"删除"按钮调这个
+   * 行为:
+   *   - 若 task 仍 pending: UPDATE task SET status='cancelled'
+   *   - target.status = 4 (Skipped)
+   *   - errorCode/errorMsg 标记 'CANCELLED_BY_USER'
+   *   - 不物理 DELETE row (保留审计 + 报告统计)
+   */
+  async cancelTarget(
+    tenantId: number,
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ cancelled: boolean; taskCancelled: boolean }> {
+    await this.findById(tenantId, campaignId);
+    const target = await this.targetRepo.findOne({
+      where: { id: targetId, campaignId },
+    });
+    if (!target) {
+      throw new NotFoundException(`目标 ${targetId} 不存在或不属于该投放`);
+    }
+    let taskCancelled = false;
+    if (target.taskId !== null) {
+      const r = (await this.targetRepo.query(
+        `UPDATE task SET status = 'cancelled', last_error = 'cancelled by user'
+         WHERE id = $1 AND status = 'pending'
+         RETURNING id`,
+        [target.taskId],
+      )) as Array<{ id: number }>;
+      taskCancelled = r.length > 0;
+    }
+    await this.targetRepo.update(target.id, {
+      status: 4, // Skipped
+      errorCode: 'CANCELLED_BY_USER',
+      errorMsg: '用户在 UI 删除',
+    });
+    this.logger.log(
+      `cancelTarget · campaign ${campaignId} · target ${targetId} · taskCancelled=${taskCancelled}`,
+    );
+    return { cancelled: true, taskCancelled };
+  }
+
   async cancel(tenantId: number, id: number): Promise<void> {
     const row = await this.findById(tenantId, id);
     row.status = CampaignStatus.Cancelled;

@@ -534,4 +534,35 @@ export const campaignsApi = {
     );
     return res.data;
   },
+  // 2026-04-28 · 删除单个 target (取消任务 + 标 skipped · 不物理删 row 保留审计)
+  async cancelTarget(
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ cancelled: boolean; taskCancelled: boolean }> {
+    const res = await api.delete<{ cancelled: boolean; taskCancelled: boolean }>(
+      `/campaigns/${campaignId}/targets/${targetId}`,
+    );
+    return res.data;
+  },
+};
+
+// ──────────────────────────────────────────────────────────────
+// Task logs (复用通用 /tasks/:id/logs)
+// ──────────────────────────────────────────────────────────────
+
+export interface TaskRunLog {
+  runId: number;
+  startedAt: string;
+  finishedAt: string | null;
+  status: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  logs: Array<{ at: string; step: string; ok: boolean; meta?: Record<string, unknown> }>;
+}
+
+export const tasksApi = {
+  async getLogs(taskId: number): Promise<TaskRunLog[]> {
+    const res = await api.get<TaskRunLog[]>(`/tasks/${taskId}/logs`);
+    return res.data;
+  },
 };
