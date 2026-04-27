@@ -113,10 +113,22 @@ export class CampaignsController {
     return this.service.resume(this.tenantOf(cur), id);
   }
 
-  // 2026-04-27 · 强推所有 pending task 立即执行 · 不等节流窗口
+  // 2026-04-27 · 强推所有 pending task 立即执行 · 不等节流窗口 (campaign 级)
   @Post(':id/run-now')
   runNow(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
     return this.service.runNow(this.tenantOf(cur), id);
+  }
+
+  // 2026-04-28 · 强推单个 target · 仅这一个 task 立即执行 (per-task)
+  // UI: 详情抽屉的"目标"表每行有按钮
+  // targetId 是 bigint · 用 string 透传 (避免 ParseIntPipe 精度限制)
+  @Post(':id/targets/:targetId/run-now')
+  runNowTarget(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Param('targetId') targetId: string,
+  ) {
+    return this.service.runNowTarget(this.tenantOf(cur), id, targetId);
   }
 
   @Delete(':id')

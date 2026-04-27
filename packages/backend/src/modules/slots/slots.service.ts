@@ -272,6 +272,44 @@ export class SlotsService {
     }
   }
 
+  // 2026-04-28 · auto-rehydrate · runtime ws 上线后, 已绑定号自动 startBind 进 chat-list
+  // 设计:
+  //   - runtime-process-manager auto-spawn 起 chromium → ws 连 backend → emit runtime-online
+  //   - 此监听捕获该事件 · 看 slot.account_id 是否已绑 · 是 → 触发 startBind (rehydrate 路径)
+  //   - 不绑 (account_id=null) → 跳, 等用户手动扫码
+  //   - 配合 runtime-process-manager 全 active 号常驻 · slot 起来即用
+  @OnEvent('runtime.bridge.runtime-online')
+  async onRuntimeOnline(evt: { slotId: number; tenantId: number }): Promise<void> {
+    try {
+      const slot = await this.slotRepo.findOne({ where: { id: evt.slotId } });
+      if (!slot) return;
+      if (!slot.accountId) {
+        this.logger.debug?.(
+          `slot ${evt.slotId} runtime-online · 未绑账号 · 跳 auto-rehydrate · 等用户扫码`,
+        );
+        return;
+      }
+      // 给 ws + integrity-checks 落地 1s · 防 startBind 跟 init 抢资源
+      await new Promise((r) => setTimeout(r, 1000));
+      this.logger.log(
+        `slot ${evt.slotId} runtime-online · account_id=${slot.accountId} · auto-rehydrate startBind`,
+      );
+      try {
+        await this.runtimes.runtimeFor(slot).startBind(evt.slotId);
+        this.logger.log(`slot ${evt.slotId} auto-rehydrate · startBind dispatched`);
+      } catch (err) {
+        // rehydrate 失败不致命 · 用户可手动 bringToFront 或重扫
+        this.logger.warn(
+          `slot ${evt.slotId} auto-rehydrate startBind 失败: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `slot ${evt.slotId} runtime-online handler 异常: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
   // 2026-04-25 · 测试冻结期 · chromium 心跳 → DB heartbeat 列
   // 缺漏 (T2.1 暴露): UI "心跳已 Infinity 分钟无响应" · 因 socket_last_heartbeat_at=null
   // baileys 路径在 sock keepalive 写 · chromium 路径要在 backend 收到 heartbeat 事件时写

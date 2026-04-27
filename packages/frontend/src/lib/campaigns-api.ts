@@ -524,4 +524,14 @@ export const campaignsApi = {
     const res = await api.post<{ pushed: number }>(`/campaigns/${id}/run-now`);
     return res.data;
   },
+  // 2026-04-28 · 强推单个 target 立即执行 (per-task · 跳过节流窗口)
+  async runNowTarget(
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ pushed: boolean; reason?: string }> {
+    const res = await api.post<{ pushed: boolean; reason?: string }>(
+      `/campaigns/${campaignId}/targets/${targetId}/run-now`,
+    );
+    return res.data;
+  },
 };

@@ -612,6 +612,50 @@ export class CampaignsService {
     return { pushed };
   }
 
+  /**
+   * 2026-04-28 · 强推单个 target · 把这一个 target 对应 task 的 scheduled_at 改成 NOW
+   * 跳过节流窗口 · 立即让 dispatcher 捡起来执行
+   * 仅作用于 task.status='pending' 的任务 · 已 done/failed/in-progress 的不动
+   * UI 设计: targets 表每行的"立即执行"按钮调这个 (per-task 不是 per-campaign)
+   */
+  async runNowTarget(
+    tenantId: number,
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ pushed: boolean; reason?: string }> {
+    await this.findById(tenantId, campaignId);
+    // 验 target 属于本 campaign 且状态是 dispatched
+    const target = await this.targetRepo.findOne({
+      where: { id: targetId, campaignId },
+    });
+    if (!target) {
+      throw new NotFoundException(`目标 ${targetId} 不存在或不属于该投放`);
+    }
+    if (target.taskId === null) {
+      return { pushed: false, reason: '该目标未派发任务 (尚未生成 task)' };
+    }
+    if (target.status !== 1) {
+      // 0=pending 1=dispatched 2=sent 3=failed 4=skipped
+      return {
+        pushed: false,
+        reason: `目标状态 ${target.status} · 仅 dispatched 可强推`,
+      };
+    }
+    const result = (await this.targetRepo.query(
+      `UPDATE task SET scheduled_at = NOW()
+       WHERE id = $1 AND status = 'pending'
+       RETURNING id as task_id`,
+      [target.taskId],
+    )) as Array<{ task_id: number }>;
+    if (result.length === 0) {
+      return { pushed: false, reason: 'task 状态已非 pending (可能已在执行或完成)' };
+    }
+    this.logger.log(
+      `runNowTarget · campaign ${campaignId} · target ${targetId} · task ${target.taskId} 强推 scheduled_at=NOW`,
+    );
+    return { pushed: true };
+  }
+
   async cancel(tenantId: number, id: number): Promise<void> {
     const row = await this.findById(tenantId, id);
     row.status = CampaignStatus.Cancelled;

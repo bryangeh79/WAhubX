@@ -32,7 +32,6 @@ import { DataSource } from 'typeorm';
 import { resolveRuntimeLaunchConfig, type RuntimeLaunchConfig } from '@wahubx/shared';
 import {
   AccountSlotEntity,
-  AccountSlotRole,
   AccountSlotStatus,
 } from '../slots/account-slot.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
@@ -95,8 +94,11 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
   private shouldAutoStart(slot: AccountSlotEntity): boolean {
     // 必须已绑账号
     if (!slot.accountId) return false;
-    // 必须 customer_service (always-on 角色 · broadcast 号 D11 走批跑 · 不在这里启)
-    if (slot.role !== AccountSlotRole.CustomerService) return false;
+    // 2026-04-28 · 用户决策: 所有绑定号都常驻 chromium runtime · 不再分角色
+    //   - 老规则: 只 customer_service 常驻 · broadcast 号 lazy-spawn
+    //   - 新规则: 任何 status=active/warmup 的绑定号都 backend 启动时 auto-spawn
+    //   - 代价: 内存 ×N 倍 (每号 ~600MB-1GB chromium) · 但用户明确接受
+    //   - 收益: 接管/广告/养号 都即点即用 · 不用等 lazy-spawn 5-15s
     // 状态必须在线集合 · empty/quarantine/suspended 排除
     if (
       slot.status !== AccountSlotStatus.Active &&

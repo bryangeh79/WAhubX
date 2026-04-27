@@ -244,46 +244,9 @@ export function AdsHomePage() {
             详情
           </Button>
           {row.status === CampaignStatus.Running && (
-            <Button
-              size="small"
-              type="link"
-              icon={<ThunderboltOutlined />}
-              style={{ color: '#fa8c16', padding: '0 4px' }}
-              onClick={() => {
-                modal.confirm({
-                  title: '立即执行',
-                  content: (
-                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-                      <div>
-                        将该投放下所有<strong>等待中</strong>的任务的执行时间改为<strong>现在</strong>,
-                        跳过节流窗口立即派发.
-                      </div>
-                      <div style={{ marginTop: 8, color: '#fa8c16' }}>
-                        ⚠️ 立即执行会使任务集中在短时间内发送, 可能增加封号风险. 仅建议测试或紧急投放使用.
-                      </div>
-                    </div>
-                  ),
-                  okText: '立即执行',
-                  okButtonProps: { style: { background: '#fa8c16', borderColor: '#fa8c16' } },
-                  cancelText: '取消',
-                  onOk: async () => {
-                    try {
-                      const res = await campaignsApi.runNow(row.id);
-                      if (res.pushed > 0) {
-                        message.success(`已强推 ${res.pushed} 个任务立即执行`);
-                      } else {
-                        message.info('当前没有等待中的任务可强推');
-                      }
-                      await reload();
-                    } catch (err) {
-                      message.error(extractErrorMessage(err, '强推失败'));
-                    }
-                  },
-                });
-              }}
-            >
-              立即执行
-            </Button>
+            // 2026-04-28 · 老的"全局立即执行"按钮删 · 改在详情抽屉每个 target 行 per-task 立即执行
+            // 列表只保留 详情 / 暂停 / 恢复 / 启动
+            null
           )}
           {row.status === CampaignStatus.Running && (
             <Button

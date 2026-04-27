@@ -344,20 +344,10 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                       <b style={{ color: '#fa8c16' }}>{fmt}</b>{' '}
                       <Typography.Text type="secondary">({relative})</Typography.Text>
                     </span>
-                    {campaign?.status === CampaignStatus.Running && (
-                      <Button
-                        size="small"
-                        icon={<ThunderboltOutlined />}
-                        onClick={doRunNow}
-                        style={{
-                          background: '#fa8c16',
-                          borderColor: '#fa8c16',
-                          color: '#fff',
-                        }}
-                      >
-                        立即执行
-                      </Button>
-                    )}
+                    {/* 2026-04-28 · 老的"全局立即执行"按钮删 · 改在下面"目标"表每行 per-task 立即执行 */}
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      → 切到"目标"标签 · 每行单独 [立即执行]
+                    </Typography.Text>
                   </div>
                 );
               })()}
@@ -508,6 +498,80 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                       dataIndex: 'errorMsg',
                       render: (v: string | null) => v ?? '—',
                       ellipsis: true,
+                    },
+                    {
+                      title: '操作',
+                      key: 'action',
+                      width: 110,
+                      render: (_: unknown, row: CampaignTarget) => {
+                        // 仅 status=1 dispatched 且 task pending 且 scheduledAt 在未来才显
+                        const isFuture =
+                          row.scheduledAt &&
+                          new Date(row.scheduledAt).getTime() > Date.now() + 30_000;
+                        if (
+                          row.status !== 1 ||
+                          row.taskStatus !== 'pending' ||
+                          !isFuture
+                        ) {
+                          return <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>;
+                        }
+                        return (
+                          <Button
+                            size="small"
+                            type="link"
+                            icon={<ThunderboltOutlined />}
+                            style={{ color: '#fa8c16', padding: '0 4px' }}
+                            onClick={() => {
+                              modal.confirm({
+                                title: '立即执行此任务',
+                                content: (
+                                  <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                                    <div>
+                                      号码 <strong>{row.phoneE164}</strong> · 槽位{' '}
+                                      <strong>{row.assignedSlotId !== null ? `#${row.assignedSlotId}` : '—'}</strong>
+                                    </div>
+                                    <div style={{ marginTop: 4 }}>
+                                      原计划:{' '}
+                                      <strong>
+                                        {row.scheduledAt
+                                          ? new Date(row.scheduledAt).toLocaleString('zh-CN', { hour12: false })
+                                          : '—'}
+                                      </strong>
+                                    </div>
+                                    <div style={{ marginTop: 8, color: '#fa8c16' }}>
+                                      ⚠ 仅这一个任务立即执行 · 跳过节流时段窗口.
+                                    </div>
+                                  </div>
+                                ),
+                                okText: '立即执行',
+                                okButtonProps: {
+                                  style: { background: '#fa8c16', borderColor: '#fa8c16' },
+                                },
+                                cancelText: '取消',
+                                onOk: async () => {
+                                  if (!campaignId) return;
+                                  try {
+                                    const res = await campaignsApi.runNowTarget(
+                                      campaignId,
+                                      row.id,
+                                    );
+                                    if (res.pushed) {
+                                      message.success(`已强推任务 → ${row.phoneE164}`);
+                                    } else {
+                                      message.warning(res.reason ?? '强推失败');
+                                    }
+                                    await fetchData(true);
+                                  } catch (err) {
+                                    message.error(extractErrorMessage(err, '强推失败'));
+                                  }
+                                },
+                              });
+                            }}
+                          >
+                            立即执行
+                          </Button>
+                        );
+                      },
                     },
                   ]}
                   pagination={{ pageSize: 20 }}

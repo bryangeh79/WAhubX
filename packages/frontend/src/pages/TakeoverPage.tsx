@@ -172,7 +172,9 @@ export function TakeoverPage() {
     return `${Math.round(ms / 3600_000)} 小时前`;
   })();
 
-  const canTakeover = !!activeSlot && activeSlot.online;
+  // 2026-04-28 · 软门控: online=true 直接进, online=false 也进 (chromium 进程可能仍活, ws 心跳暂时滞后)
+  // 真画面没出来用户自己看得见, 不需要前端硬拦
+  const canTakeover = !!activeSlot;
 
   return (
     <div>
@@ -249,14 +251,14 @@ export function TakeoverPage() {
         </Space>
       </Card>
 
-      {/* ── 块 B · 状态提示 ──────────────── */}
+      {/* ── 块 B · 状态提示 (软提示 · 不阻塞) ──────────────── */}
       {activeSlot && !activeSlot.online && (
         <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message="该号当前离线"
-          description='请到 "账号槽位" 重扫码 · 或等 chromium runtime rehydrate'
+          message="该号 backend 显离线"
+          description="可能是 ws 心跳滞后 · 仍尝试打开窗口 · 若画面长时间无响应再去 '账号槽位' 重扫"
         />
       )}
 
