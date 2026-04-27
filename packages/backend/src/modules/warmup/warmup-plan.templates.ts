@@ -22,7 +22,6 @@ export interface WarmupTaskSpec {
     | 'status_react'
     | 'auto_accept'
     | 'auto_reply'
-    | 'follow_channel'
     | 'join_group'
     | 'add_contact'
     | 'group_chat'
@@ -135,7 +134,7 @@ export const V1_14DAY_FULL_TEMPLATE: WarmupTemplate = {
       day: 9, phase: WarmupPhase.Mature, note: '运营热身 Day 2',
       windows: [
         { at: '09:30', durationMin: 25, tasks: [{ taskType: 'status_browse' }] },
-        { at: '11:30', durationMin: 30, tasks: [{ taskType: 'follow_channel', payload: { mode: 'random', count: 2 } }] },
+        { at: '11:30', durationMin: 30, tasks: [{ taskType: 'auto_reply' }] },
         { at: '14:00', durationMin: 30, tasks: [{ taskType: 'auto_reply' }] },
         { at: '16:00', durationMin: 40, tasks: [{ taskType: 'script_chat' }] },
         { at: '20:00', durationMin: 30, tasks: [{ taskType: 'status_post' }] },
@@ -165,7 +164,7 @@ export const V1_14DAY_FULL_TEMPLATE: WarmupTemplate = {
       day: 12, phase: WarmupPhase.Mature, note: '运营热身 Day 5',
       windows: [
         { at: '10:00', durationMin: 30, tasks: [{ taskType: 'status_browse' }] },
-        { at: '11:30', durationMin: 30, tasks: [{ taskType: 'follow_channel', payload: { mode: 'random', count: 2 } }] },
+        { at: '11:30', durationMin: 30, tasks: [{ taskType: 'status_react' }] },
         { at: '14:00', durationMin: 30, tasks: [{ taskType: 'auto_accept' }] },
         { at: '16:00', durationMin: 40, tasks: [{ taskType: 'script_chat' }] },
         { at: '20:00', durationMin: 30, tasks: [{ taskType: 'auto_reply' }] },

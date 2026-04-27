@@ -16,7 +16,6 @@ import { StatusPostExecutor } from '../warmup/status-post.executor';
 import { StatusBrowseExecutor } from '../warmup/status-browse.executor';
 // 2026-04-21 · 新增 5 个 executor (task-scheduler-tab.md)
 import { JoinGroupExecutor } from './executors/join-group.executor';
-import { FollowChannelExecutor } from './executors/follow-channel.executor';
 import { StatusReactExecutor } from './executors/status-react.executor';
 import { AutoAcceptExecutor } from './executors/auto-accept.executor';
 import { StatusBrowseBulkExecutor } from './executors/status-browse-bulk.executor';
@@ -57,7 +56,6 @@ import { SlotsModule } from '../slots/slots.module';
     ExecutorRegistry,
     ChatExecutor,
     JoinGroupExecutor,
-    FollowChannelExecutor,
     StatusReactExecutor,
     AutoAcceptExecutor,
     StatusBrowseBulkExecutor,
@@ -77,7 +75,6 @@ import { SlotsModule } from '../slots/slots.module';
         statusPost: StatusPostExecutor,
         statusBrowse: StatusBrowseExecutor,
         joinGroup: JoinGroupExecutor,
-        followChannel: FollowChannelExecutor,
         statusReact: StatusReactExecutor,
         autoAccept: AutoAcceptExecutor,
         statusBrowseBulk: StatusBrowseBulkExecutor,
@@ -96,7 +93,6 @@ import { SlotsModule } from '../slots/slots.module';
         statusPost,
         statusBrowse,
         joinGroup,
-        followChannel,
         statusReact,
         autoAccept,
         statusBrowseBulk,
@@ -116,7 +112,6 @@ import { SlotsModule } from '../slots/slots.module';
         StatusPostExecutor,
         StatusBrowseExecutor,
         JoinGroupExecutor,
-        FollowChannelExecutor,
         StatusReactExecutor,
         AutoAcceptExecutor,
         StatusBrowseBulkExecutor,
