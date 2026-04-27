@@ -196,9 +196,23 @@ export class CampaignsService {
 
   async listTargets(tenantId: number, campaignId: number, runId?: number) {
     await this.findById(tenantId, campaignId);
-    const where: Record<string, unknown> = { campaignId };
-    if (runId !== undefined) where.runId = runId;
-    return this.targetRepo.find({ where, order: { id: 'DESC' }, take: 500 });
+    // 2026-04-27 · 加 task.scheduled_at · 让 UI 显示 "等到 X 时执行" 不再让租户以为卡住
+    const qb = this.targetRepo
+      .createQueryBuilder('t')
+      .leftJoin('task', 'task', 'task.id = t.task_id')
+      .addSelect('task.scheduled_at', 't_scheduled_at')
+      .addSelect('task.status', 't_task_status')
+      .where('t.campaign_id = :campaignId', { campaignId })
+      .orderBy('t.id', 'DESC')
+      .take(500);
+    if (runId !== undefined) qb.andWhere('t.run_id = :runId', { runId });
+    const raw = await qb.getRawAndEntities();
+    return raw.entities.map((row, i) => ({
+      ...row,
+      // 附加字段 · 不破坏原 entity 结构
+      scheduledAt: raw.raw[i]?.t_scheduled_at ?? null,
+      taskStatus: raw.raw[i]?.t_task_status ?? null,
+    }));
   }
 
   // ──────────────────────────────────────────────────────────────
