@@ -6,7 +6,7 @@
 //   4. 启用智能模式 + 完成
 //
 // 设计原则: 每一步都是一口气 · 每步完成后自动 "下一步"
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   App,
   Button,
@@ -144,6 +144,9 @@ export function ReplySetupWizard({ open, onClose, onDone }: Props) {
   const [completed, setCompleted] = useState<KbBuild[]>([]);
   const [enablingMode, setEnablingMode] = useState(false);
 
+  // 2026-04-25 · 检测已存在的公司通用 KB · 有则跳过"建公司 KB"步骤
+  const [existingCompanyKb, setExistingCompanyKb] = useState<KnowledgeBase | null>(null);
+
   const currentKind = useRef<'company' | 'product'>('company');
 
   const reset = () => {
@@ -156,7 +159,41 @@ export function ReplySetupWizard({ open, onClose, onDone }: Props) {
     setRunningBuild(null);
     setCompleted([]);
     setEnablingMode(false);
+    setExistingCompanyKb(null);
   };
+
+  // 打开时检测 · 有 default KB 就预置到 completed · 跳过公司步骤
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const all = await kbApi.list();
+        const company = all.find((k) => k.isDefault) ?? null;
+        if (cancelled) return;
+        setExistingCompanyKb(company);
+        if (company) {
+          setCompleted([
+            {
+              name: company.name,
+              kind: 'company',
+              files: [],
+              goal: company.goalPrompt ?? '',
+              kbId: company.id,
+              status: 'done',
+            },
+          ]);
+          // 有已存在公司 KB 时默认按多产品流程处理 · 允许"加更多"
+          setMultiProduct(true);
+        }
+      } catch {
+        // 忽略 · 按空场景走原流程
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const handleClose = () => {
     if (runningBuild && runningBuild.status !== 'done' && runningBuild.status !== 'error') {
@@ -375,7 +412,7 @@ export function ReplySetupWizard({ open, onClose, onDone }: Props) {
           <RocketOutlined style={{ color: BRAND }} />
           <span>智能客服 · 引导设置</span>
           <Tag color="default" style={{ fontSize: 11 }}>
-            第 {getStepNumber(step, multiProduct, productIndex, productCount)} / {totalSteps(multiProduct ?? false)}
+            第 {getStepNumber(step, multiProduct, productIndex, productCount, !!existingCompanyKb)} / {totalSteps(multiProduct ?? false, !!existingCompanyKb)}
           </Tag>
         </Space>
       }
@@ -393,46 +430,66 @@ export function ReplySetupWizard({ open, onClose, onDone }: Props) {
             </Typography.Text>
           </div>
 
-          <div style={{ background: BRAND_SOFT, borderRadius: 10, padding: 14 }}>
-            <Typography.Text strong style={{ fontSize: 13 }}>
-              向导会帮你:
-            </Typography.Text>
-            <div style={{ fontSize: 13, lineHeight: 2, color: '#555', marginTop: 4 }}>
-              ① 建"公司通用"知识库 · 放公司介绍/联系方式<br />
-              ② 建"产品"知识库 · 每个产品一个 · 分别放介绍书<br />
-              ③ 每个 KB 自动生成 30 条 FAQ · 自动启用<br />
-              ④ 开启智能模式 · 客户回复自动处理
+          {existingCompanyKb ? (
+            <div style={{ background: BRAND_SOFT, borderRadius: 10, padding: 14 }}>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                <CheckCircleFilled style={{ color: BRAND, marginRight: 6 }} />
+                已检测到「{existingCompanyKb.name}」知识库
+              </Typography.Text>
+              <div style={{ fontSize: 13, lineHeight: 2, color: '#555', marginTop: 4 }}>
+                这次只用再添加产品知识库就行:<br />
+                ① 建"产品"知识库 · 放产品介绍书<br />
+                ② 自动生成 30 条 FAQ · 自动启用<br />
+                ③ 开启智能模式 · 客户回复自动处理
+              </div>
             </div>
-          </div>
+          ) : (
+            <div style={{ background: BRAND_SOFT, borderRadius: 10, padding: 14 }}>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                向导会帮你:
+              </Typography.Text>
+              <div style={{ fontSize: 13, lineHeight: 2, color: '#555', marginTop: 4 }}>
+                ① 建"公司通用"知识库 · 放公司介绍/联系方式<br />
+                ② 建"产品"知识库 · 每个产品一个 · 分别放介绍书<br />
+                ③ 每个 KB 自动生成 30 条 FAQ · 自动启用<br />
+                ④ 开启智能模式 · 客户回复自动处理
+              </div>
+            </div>
+          )}
 
-          <div>
-            <Typography.Text strong style={{ fontSize: 13 }}>
-              你卖几种产品?
-            </Typography.Text>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
-              <ChoiceCard
-                selected={multiProduct === false}
-                onClick={() => setMultiProduct(false)}
-                icon={<ShopOutlined />}
-                title="只有 1 个"
-                desc="单一产品/服务 · 建 1 个 KB 搞定"
-              />
-              <ChoiceCard
-                selected={multiProduct === true}
-                onClick={() => setMultiProduct(true)}
-                icon={<PlusOutlined />}
-                title="多个产品"
-                desc="2 个或以上 · 每个产品单独 KB · 回复精准不混"
-              />
+          {!existingCompanyKb && (
+            <div>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                你卖几种产品?
+              </Typography.Text>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
+                <ChoiceCard
+                  selected={multiProduct === false}
+                  onClick={() => setMultiProduct(false)}
+                  icon={<ShopOutlined />}
+                  title="只有 1 个"
+                  desc="单一产品/服务 · 建 1 个 KB 搞定"
+                />
+                <ChoiceCard
+                  selected={multiProduct === true}
+                  onClick={() => setMultiProduct(true)}
+                  icon={<PlusOutlined />}
+                  title="多个产品"
+                  desc="2 个或以上 · 每个产品单独 KB · 回复精准不混"
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 4 }}>
             <a onClick={handleClose} style={{ color: '#999' }}>
               稍后再说
             </a>
-            <PrimaryBtn disabled={multiProduct === null} onClick={startCompany}>
-              开始 · 建第 1 个 KB →
+            <PrimaryBtn
+              disabled={!existingCompanyKb && multiProduct === null}
+              onClick={existingCompanyKb ? startFirstProduct : startCompany}
+            >
+              {existingCompanyKb ? '开始 · 建产品 KB →' : '开始 · 建第 1 个 KB →'}
             </PrimaryBtn>
           </div>
         </Space>
@@ -1287,8 +1344,18 @@ function getStepNumber(
   multi: boolean | null,
   productIdx: number,
   productDone: number,
+  hasExistingCompany: boolean,
 ): number {
-  // welcome=1, company=2, product=2+idx, addMore=N, enableMode=N+1, done=N+2
+  // 无 existing: welcome=1, company=2, product=2+idx, addMore, enableMode, done
+  // 有 existing: welcome=1, product=1+idx (跳过 company), addMore, enableMode, done
+  if (hasExistingCompany) {
+    if (step === 'welcome') return 1;
+    if (step === 'product') return 1 + productIdx;
+    if (step === 'addMore') return 1 + Math.max(productDone, 1);
+    if (step === 'enableMode') return multi ? 4 : 3;
+    if (step === 'done') return multi ? 5 : 4;
+    return 1;
+  }
   if (step === 'welcome') return 1;
   if (step === 'company') return 2;
   if (step === 'product') return 2 + productIdx;
@@ -1298,8 +1365,10 @@ function getStepNumber(
   return 1;
 }
 
-function totalSteps(multi: boolean): number {
+function totalSteps(multi: boolean, hasExistingCompany: boolean): number {
   // 单: welcome + company + product + enable + done = 5
   // 多: welcome + company + 3 products (estimate) + enable + done = 7 (但我们用动态)
+  // 有 existing 时少一步 company
+  if (hasExistingCompany) return multi ? 5 : 4;
   return multi ? 6 : 5;
 }

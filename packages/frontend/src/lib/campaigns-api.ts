@@ -208,6 +208,8 @@ export interface CampaignTarget {
   sentAt: string | null;
   repliedAt: string | null;
   replyCount: number;
+  scheduledAt: string | null;  // 2026-04-27 · 任务计划执行时间 · 给 UI 显示 "等到 X 时" 用
+  taskStatus: string | null;
 }
 
 export interface CreateCampaignPayload {

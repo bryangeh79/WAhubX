@@ -263,6 +263,48 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                   </Typography.Text>
                 )}
               </div>
+
+              {/* 2026-04-27 · 待执行任务提示 · 让租户不以为卡住 */}
+              {(() => {
+                const pending = targets.filter(
+                  (t) =>
+                    t.taskStatus === 'pending' &&
+                    t.scheduledAt &&
+                    new Date(t.scheduledAt).getTime() > Date.now() + 60_000,
+                );
+                if (pending.length === 0) return null;
+                const earliest = pending.reduce((min, t) =>
+                  !min || (t.scheduledAt && t.scheduledAt < min.scheduledAt!) ? t : min,
+                );
+                const ts = new Date(earliest.scheduledAt!);
+                const diffMs = ts.getTime() - Date.now();
+                const diffH = Math.floor(diffMs / 3_600_000);
+                const diffM = Math.floor((diffMs % 3_600_000) / 60_000);
+                const fmt = ts.toLocaleString('zh-CN', { hour12: false });
+                const relative =
+                  diffH >= 1
+                    ? `${diffH} 小时${diffM > 0 ? ` ${diffM} 分钟` : ''}后`
+                    : `${diffM} 分钟后`;
+                return (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '8px 12px',
+                      background: '#fffbe6',
+                      border: '1px solid #ffe58f',
+                      borderRadius: 8,
+                      fontSize: 12,
+                      color: '#666',
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    <span style={{ marginRight: 6 }}>⏳</span>
+                    <b>{pending.length}</b> 个任务等待执行 · 系统按节流时段自动跑 · 下一次:{' '}
+                    <b style={{ color: '#fa8c16' }}>{fmt}</b>{' '}
+                    <Typography.Text type="secondary">({relative})</Typography.Text>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
