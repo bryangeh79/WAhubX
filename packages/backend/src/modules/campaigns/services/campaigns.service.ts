@@ -641,8 +641,12 @@ export class CampaignsService {
         reason: `目标状态 ${target.status} · 仅 dispatched 可强推`,
       };
     }
+    // 2026-04-28 · 立即执行 · 同时写 payload.forceRun=true · dispatcher 看到该 flag
+    // 跳过 night-window 检查 (用户已确认 modal 风险, 夜间窗口该让位给 user override)
     const result = (await this.targetRepo.query(
-      `UPDATE task SET scheduled_at = NOW()
+      `UPDATE task SET
+         scheduled_at = NOW(),
+         payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{forceRun}', 'true'::jsonb)
        WHERE id = $1 AND status = 'pending'
        RETURNING id as task_id`,
       [target.taskId],

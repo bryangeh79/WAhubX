@@ -200,7 +200,13 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     }
 
     // 夜间窗口 (02-06) 只放行 allowedInNightWindow=true 的 executor
-    if (this.isInNightWindow(now) && !this.registry.isAllowedInNightWindow(task.taskType)) {
+    // 2026-04-28 · payload.forceRun=true 跳过 (用户点 [立即执行] 显式覆盖 · runNowTarget 写)
+    const forceRun = !!(task.payload as { forceRun?: boolean } | null)?.forceRun;
+    if (
+      this.isInNightWindow(now) &&
+      !this.registry.isAllowedInNightWindow(task.taskType) &&
+      !forceRun
+    ) {
       return { action: 'skip-night-window' };
     }
 
