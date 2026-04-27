@@ -519,4 +519,9 @@ export const campaignsApi = {
     const res = await api.post<Campaign>(`/campaigns/${id}/clone`);
     return res.data;
   },
+  // 2026-04-27 · 强推该投放下所有 pending task 立即执行 (跳过节流窗口)
+  async runNow(id: number): Promise<{ pushed: number }> {
+    const res = await api.post<{ pushed: number }>(`/campaigns/${id}/run-now`);
+    return res.data;
+  },
 };

@@ -571,6 +571,39 @@ export class CampaignsService {
     return row;
   }
 
+  /**
+   * 2026-04-27 · 强推 · 把这个投放下所有 pending task 的 scheduled_at 改成 NOW
+   * 跳过节流窗口 · 立即让 dispatcher 捡起来执行
+   * 仅作用于 task.status='pending' 的任务 · 已 done/failed 的不动
+   */
+  async runNow(
+    tenantId: number,
+    campaignId: number,
+  ): Promise<{ pushed: number }> {
+    await this.findById(tenantId, campaignId);
+    // 找出该 campaign 下所有 dispatched 状态的 target 对应 task
+    const result = (await this.targetRepo.query(
+      `
+      UPDATE task
+      SET scheduled_at = NOW()
+      WHERE id IN (
+        SELECT ct.task_id::int FROM campaign_target ct
+        WHERE ct.campaign_id = $1
+          AND ct.task_id IS NOT NULL
+          AND ct.status = 1
+      )
+      AND status = 'pending'
+      RETURNING id as task_id
+      `,
+      [campaignId],
+    )) as Array<{ task_id: number }>;
+    const pushed = result.length;
+    this.logger.log(
+      `runNow · campaign ${campaignId} · 强推 ${pushed} 个 task scheduled_at=NOW`,
+    );
+    return { pushed };
+  }
+
   async cancel(tenantId: number, id: number): Promise<void> {
     const row = await this.findById(tenantId, id);
     row.status = CampaignStatus.Cancelled;
