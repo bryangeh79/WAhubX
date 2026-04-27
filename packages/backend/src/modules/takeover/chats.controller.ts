@@ -28,7 +28,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
 import { UserRole } from '../users/user.entity';
-import { BaileysService } from '../baileys/baileys.service';
+
 import { SlotsService } from '../slots/slots.service';
 import { TakeoverLockService } from './takeover-lock.service';
 import { TakeoverUploadService } from './takeover-upload.service';
@@ -41,8 +41,6 @@ import { TAKEOVER_MESSAGE_OUT, type TakeoverMessageEvent } from './takeover.even
 @Roles(UserRole.Admin)
 export class ChatsController {
   constructor(
-    // 2026-04-26 · Class A · listContacts/listMessages 仍走 baileys (DB 读)
-    private readonly baileys: BaileysService,
     // 2026-04-26 · Class A · 发文本/媒体走 SlotsService facade · chromium-aware
     private readonly slots: SlotsService,
     private readonly lock: TakeoverLockService,
@@ -52,7 +50,7 @@ export class ChatsController {
 
   @Get(':accountId/conversations')
   async conversations(@Param('accountId', ParseIntPipe) accountId: number) {
-    const contacts = await this.baileys.listContacts(accountId);
+    const contacts = await this.slots.listContacts(accountId);
     return { contacts };
   }
 
@@ -61,7 +59,7 @@ export class ChatsController {
     @Param('accountId', ParseIntPipe) accountId: number,
     @Query() q: ListMessagesQueryDto,
   ) {
-    const list = await this.baileys.listMessages(accountId, {
+    const list = await this.slots.listMessages(accountId, {
       contactId: q.contactId ? Number(q.contactId) : undefined,
       limit: q.limit ? Number(q.limit) : 50,
       beforeId: q.beforeId,

@@ -39,7 +39,6 @@
     "@nestjs/websockets": "^10.4.22",
     "@types/multer": "^2.1.0",
     "@wahubx/shared": "workspace:^",
-    "@whiskeysockets/baileys": "~6.7.0",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5",

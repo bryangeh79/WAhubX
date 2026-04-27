@@ -23,7 +23,6 @@ import { WarmupController } from './warmup.controller';
 import { GroupWarmupController } from './group-warmup.controller';
 import { StatusPostSeedsController } from './status-post-seeds.controller';
 import { AdminDebugController } from './admin-debug.controller';
-import { BaileysModule } from '../baileys/baileys.module';
 import { SlotsModule } from '../slots/slots.module';
 
 @Module({
@@ -40,8 +39,7 @@ import { SlotsModule } from '../slots/slots.module';
       ScriptPackEntity,
       AssetEntity,
     ]),
-    BaileysModule,
-    SlotsModule, // 2026-04-26 · Class B · status-post / status-browse 用 SlotsService.getCurrentMode 做 chromium guard
+    SlotsModule,
   ],
   controllers: [WarmupController, GroupWarmupController, StatusPostSeedsController, AdminDebugController],
   providers: [

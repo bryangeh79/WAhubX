@@ -15,10 +15,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { TaskEntity } from '../tasks/task.entity';
 import { TaskRunEntity } from '../tasks/task-run.entity';
-import { ChatMessageEntity } from '../baileys/chat-message.entity';
-import { WaContactEntity } from '../baileys/wa-contact.entity';
+import { ChatMessageEntity } from '../messaging/chat-message.entity';
+import { WaContactEntity } from '../messaging/wa-contact.entity';
 import { AuthModule } from '../auth/auth.module';
-import { BaileysModule } from '../baileys/baileys.module';
 import { SlotsModule } from '../slots/slots.module';
 import { TakeoverLockService } from './takeover-lock.service';
 import { TakeoverUploadService } from './takeover-upload.service';
@@ -33,8 +32,7 @@ import { TakeoverAlertRelay } from './takeover-alert.relay';
   imports: [
     TypeOrmModule.forFeature([AccountSlotEntity, TaskEntity, TaskRunEntity, ChatMessageEntity, WaContactEntity]),
     AuthModule,
-    BaileysModule,
-    SlotsModule, // 2026-04-26 · Class A · ChatsController 走 SlotsService.sendText/sendMedia facade
+    SlotsModule,
   ],
   controllers: [TakeoverController, ChatsController],
   providers: [TakeoverLockService, TakeoverUploadService, TakeoverGateway, TakeoverAlertRelay],

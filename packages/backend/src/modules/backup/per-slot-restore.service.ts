@@ -23,7 +23,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as yauzl from 'yauzl';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
-import { BaileysService } from '../baileys/baileys.service';
+import { RuntimeProcessManagerService } from '../runtime-process/runtime-process-manager.service';
 import { getSlotDir } from '../../common/storage';
 import { listDailyDates, listDailySlotZips } from './backup-paths';
 
@@ -33,7 +33,7 @@ export class PerSlotRestoreService {
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly baileys: BaileysService,
+    private readonly runtimeProcess: RuntimeProcessManagerService,
   ) {}
 
   /**
@@ -62,7 +62,7 @@ export class PerSlotRestoreService {
     }
 
     // evict 旧 socket (release 后 rehydrate 才重新 spawn)
-    await this.baileys.evictFromPool(slotId);
+    await this.runtimeProcess.stop(slotId, { graceful: true, timeoutMs: 5000 }).catch(() => {});
     this.logger.log(`per-slot-restore · slotId=${slotId} (idx=${slot.slotIndex}) date=${date}`);
 
     // 清当前 slot 目录的 wa-session + fingerprint.json

@@ -5,8 +5,8 @@ import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../e
 import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 import { WarmupPlanEntity, WarmupPhase } from '../../warmup/warmup-plan.entity';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
-import { ChatMessageEntity } from '../../baileys/chat-message.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
+import { ChatMessageEntity } from '../../messaging/chat-message.entity';
 
 // 2026-04-22 · auto_accept 真实装
 // WA 没 "好友请求" 概念 · 此 executor 实际语义:

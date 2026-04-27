@@ -18,7 +18,6 @@ import type { SlotResponseDto } from './dto/slot-response.dto';
 import { SendTextMessageDto } from './dto/send-message.dto';
 import { SendMediaMessageDto } from './dto/send-media.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
-import { BaileysService } from '../baileys/baileys.service';
 import {
   SimInfoService,
   type UpdateSimInfoDto,
@@ -32,7 +31,6 @@ import type { Response } from 'express';
 export class SlotsController {
   constructor(
     private readonly slots: SlotsService,
-    private readonly baileys: BaileysService,
     private readonly simInfo: SimInfoService,
     private readonly handover: HandoverService,
   ) {}
@@ -271,7 +269,7 @@ export class SlotsController {
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
     if (!slot.accountId) return [];
-    return this.baileys.listContacts(slot.accountId);
+    return this.slots.listContacts(slot.accountId);
   }
 
   @Get(':id/messages')
@@ -284,7 +282,7 @@ export class SlotsController {
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
     if (!slot.accountId) return [];
-    return this.baileys.listMessages(slot.accountId, {
+    return this.slots.listMessages(slot.accountId, {
       contactId: contactId || undefined,
       limit,
       beforeId,
@@ -297,7 +295,7 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ): Promise<{ online: boolean }> {
     await this.slots.findOne(id, cur.tenantId);
-    return { online: this.baileys.isInPool(id) };
+    return { online: this.slots.isInPool(id) };
   }
 
   // 2026-04-22 · 被封槽位手动重连 · 租户 UI 点按钮调
@@ -316,10 +314,10 @@ export class SlotsController {
     }
     // DB 置 active · 让后续 rehydrate 能跑 (markSlotSuspended 的逆操作)
     try {
-      await this.baileys.evictFromPool(id); // 先踢 · 清残留
+      await // 2026-04-28 · Phase D · runtime stop 由 reactivateAndRespawn 内部包
       await this.slots.findOne(id, cur.tenantId); // 确认还在
       // 直接 update (通过内部方法暴露)
-      await this.baileys.reactivateAndRespawn(id);
+      await this.slots.reactivateAndRespawn(id);
       return {
         ok: true,
         message: '已触发重连 · 请等 30 秒查看状态. 若仍封禁 · 点"诊断"看原因.',
@@ -339,6 +337,6 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.getConnectionDiagnosis(id, slot);
+    return this.slots.getConnectionDiagnosis(id, slot);
   }
 }

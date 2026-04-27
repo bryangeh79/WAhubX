@@ -23,7 +23,6 @@ import { KnowledgeBaseController } from './controllers/knowledge-base.controller
 import { TenantReplySettingsController } from './controllers/tenant-reply-settings.controller';
 import { ConversationsController } from './controllers/conversations.controller';
 
-import { BaileysModule } from '../baileys/baileys.module';
 import { SlotsModule } from '../slots/slots.module';
 import { AiModule } from '../ai/ai.module';
 
@@ -42,8 +41,7 @@ import { AiModule } from '../ai/ai.module';
       AiReplyAuditEntity,
       AccountSlotEntity,
     ]),
-    BaileysModule,
-    SlotsModule, // 2026-04-26 · R9-bis · ReplyExecutorService 注 SlotsService.sendText facade
+    SlotsModule,
     AiModule,
   ],
   controllers: [

@@ -2,8 +2,6 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  forwardRef,
-  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -17,8 +15,8 @@ import { WaAccountEntity } from './wa-account.entity';
 import { TenantEntity } from '../tenants/tenant.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
-import { BaileysService } from '../baileys/baileys.service';
-import { MessageDirection, MessageType } from '../baileys/chat-message.entity';
+import { MessageDirection, MessageType } from '../messaging/chat-message.entity';
+import { MessagingPersistenceService } from '../messaging/messaging-persistence.service';
 import { SlotRuntimeRegistry } from '../slot-runtime/slot-runtime.registry';
 import { RuntimeBridgeService } from '../runtime-bridge/runtime-bridge.service';
 import { RuntimeProcessManagerService } from '../runtime-process/runtime-process-manager.service';
@@ -66,8 +64,7 @@ export class SlotsService {
     private readonly accountRepo: Repository<WaAccountEntity>,
     @InjectRepository(ProxyEntity)
     private readonly proxyRepo: Repository<ProxyEntity>,
-    @Inject(forwardRef(() => BaileysService))
-    private readonly baileys: BaileysService,
+    private readonly persistence: MessagingPersistenceService,
     private readonly dataSource: DataSource,
     // 2026-04-25 · D9-4 · 通过 Registry 选 runtime 实装 · 替 D8-3 直接 inject
     private readonly runtimes: SlotRuntimeRegistry,
@@ -379,8 +376,8 @@ export class SlotsService {
   // 2026-04-26 · Class A · 暴露 runtime mode 给 executor 做 chromium-only / baileys-only 决策
   // 2026-04-27 · D11.5 · executor 保留这个全局值用 (broadcast 决策仍用全局)
   //   客服号 executor 已不依赖此值 · slot 路由经 SlotsService 内部 facade · 已 per-slot
-  getCurrentMode(): 'baileys' | 'chromium' {
-    return this.runtimes.getCurrentMode();
+  getCurrentMode(): 'chromium' {
+    return 'chromium';
   }
 
   // 2026-04-26 · Class A · 统一在线判定 facade
@@ -390,7 +387,6 @@ export class SlotsService {
   async isOnline(slotId: number): Promise<boolean> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) return false;
-    if (this.baileys.isOnlineSmooth(slotId)) return true;
     if (!this.runtimeBridge.hasConnection(slotId)) return false;
     const last = slot.socketLastHeartbeatAt;
     return !!last && Date.now() - last.getTime() < 90_000;
@@ -405,35 +401,20 @@ export class SlotsService {
     if (!slot?.accountId) {
       throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
     }
-    // 2026-04-27 · D11.5 · per-slot 路由 · 客服号永远 chromium
-    const mode = this.runtimes.getRuntimeFor(slot);
-    // chromium 路径: runtime 直接拿 phone (不要 @s.whatsapp.net 后缀)
-    // baileys 路径: 老逻辑期待 normalizeJid 后的 jid
-    const recipient = mode === 'chromium' ? to.replace(/[^\d+]/g, '') : this.baileys.normalizeJid(to);
+    // 2026-04-28 · Phase D · chromium-only · baileys 整体拔除
+    const recipient = to.replace(/[^\d+]/g, '');
     if (!recipient) {
       throw new BadRequestException(`收件人 "${to}" 无效`);
     }
 
-    let waMessageId: string | null;
-    if (mode === 'chromium') {
-      // ChromiumSlotRuntime.sendText · 错误用 throw 反映 (sendCommand ok=false → reject)
-      const r = await this.runtimes.runtimeFor(slot).sendText(slotId, recipient, text);
-      waMessageId = r.messageId ?? null;
-      this.logger.log(
-        `slot ${slotId} chromium sendText to=${recipient} → messageId=${waMessageId}`,
-      );
-    } else {
-      // baileys 老路径 · 复用 BaileysService.sendText (内含 typing 模拟 / pool / persist)
-      const r = await this.baileys.sendText(slotId, recipient, text);
-      // baileys 已自己 persist · 直接返
-      return { waMessageId: r.waMessageId };
-    }
+    const r = await this.runtimes.runtimeFor(slot).sendText(slotId, recipient, text);
+    const waMessageId = r.messageId ?? null;
+    this.logger.log(
+      `slot ${slotId} chromium sendText to=${recipient} → messageId=${waMessageId}`,
+    );
 
-    // chromium 路径: 自己 persist · jid 用 baileys 风格便于 takeover/dispatcher 兼容
-    const persistJid = recipient.includes('@')
-      ? recipient
-      : `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
-    await this.baileys.persistMessage({
+    const persistJid = `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+    await this.persistence.persistMessage({
       accountId: slot.accountId,
       remoteJid: persistJid,
       direction: MessageDirection.Out,
@@ -462,54 +443,38 @@ export class SlotsService {
     if (!slot?.accountId) {
       throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
     }
-    // 2026-04-27 · D11.5 · per-slot 路由
-    const mode = this.runtimes.getRuntimeFor(slot);
+    // 2026-04-28 · Phase D · chromium-only · video/voice/audio 已 B1+B2 解锁
+    const recipient = to.replace(/[^\d+]/g, '');
+    if (!recipient) throw new BadRequestException(`收件人 "${to}" 无效`);
 
-    if (mode === 'chromium') {
-      // chromium D10 · image/file ok · voice/video 直接拒 (留 D11+)
-      if (type === 'voice' || type === 'video') {
-        throw new BadRequestException(
-          `chromium runtime 当前不支持 ${type} 发送 · 请用文本 / 图片 / 文件 (留 D11+ 扩展)`,
-        );
-      }
-      const recipient = to.replace(/[^\d+]/g, '');
-      if (!recipient) throw new BadRequestException(`收件人 "${to}" 无效`);
+    const r = await this.runtimes.runtimeFor(slot).sendMedia(
+      slotId,
+      recipient,
+      type,
+      contentBase64,
+      { caption: options?.caption, fileName: options?.filename },
+    );
+    const waMessageId = r.messageId ?? null;
+    this.logger.log(
+      `slot ${slotId} chromium sendMedia type=${type} to=${recipient} → messageId=${waMessageId}`,
+    );
 
-      // 此处 type 已经收敛到 'image' | 'file' (voice/video 上面已抛)
-      const r = await this.runtimes.runtimeFor(slot).sendMedia(
-        slotId,
-        recipient,
-        type as 'image' | 'file',
-        contentBase64,
-        { caption: options?.caption, fileName: options?.filename },
-      );
-      const waMessageId = r.messageId ?? null;
-      this.logger.log(
-        `slot ${slotId} chromium sendMedia type=${type} to=${recipient} → messageId=${waMessageId}`,
-      );
-
-      const persistJid = `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
-      // type 'voice' 在上面已抛 · 这里只剩 'image' | 'file'
-      const msgType = type === 'image' ? MessageType.Image : MessageType.File;
-      await this.baileys.persistMessage({
-        accountId: slot.accountId,
-        remoteJid: persistJid,
-        direction: MessageDirection.Out,
-        msgType,
-        content: options?.caption ?? null,
-        sentAt: new Date(),
-        waMessageId,
-      });
-      // chromium path · runtime 不暴露磁盘路径 · mediaPath 为 null (前端用其它 API 取媒体)
-      return { waMessageId, mediaPath: null };
-    }
-
-    // baileys 老路径
-    return this.baileys.sendMedia(slotId, this.baileys.normalizeJid(to), type, contentBase64, {
-      mimeType: options?.mimeType,
-      filename: options?.filename,
-      caption: options?.caption,
+    const persistJid = `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+    const msgType =
+      type === 'image' ? MessageType.Image
+      : type === 'video' ? MessageType.Video
+      : type === 'voice' ? MessageType.Voice
+      : MessageType.File;
+    await this.persistence.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: persistJid,
+      direction: MessageDirection.Out,
+      msgType,
+      content: options?.caption ?? null,
+      sentAt: new Date(),
+      waMessageId,
     });
+    return { waMessageId, mediaPath: null };
   }
 
   // ═══ 2026-04-26 · D11 · WA Status / Profile facade ════════════════
@@ -519,22 +484,16 @@ export class SlotsService {
   // 2026-04-27 · D11.5 · 5 个 status/profile facade · 全部走 per-slot 路由
   // 客服号 → chromium · 其他号 → baileys · 跟全局 env 不再相关
 
-  /** 发文字 status (动态/Story) */
+  /** 2026-04-28 · Phase D · chromium-only */
   async postStatusText(slotId: number, text: string): Promise<{ waMessageId: string | null }> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
-    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
-      const rt = this.runtimes.runtimeFor(slot);
-      if (!rt.postStatusText) throw new BadRequestException('chromium runtime postStatusText 未实现');
-      const r = await rt.postStatusText(slotId, text);
-      return { waMessageId: r.messageId ?? null };
-    }
-    // baileys: sendStatusText 返 { waMessageId } 形态对齐
-    const r = await this.baileys.sendStatusText(slotId, text);
-    return { waMessageId: r.waMessageId };
+    const rt = this.runtimes.runtimeFor(slot);
+    if (!rt.postStatusText) throw new BadRequestException('runtime postStatusText 未实现');
+    const r = await rt.postStatusText(slotId, text);
+    return { waMessageId: r.messageId ?? null };
   }
 
-  /** 发图/视频 status (动态/Story) */
   async postStatusMedia(
     slotId: number,
     mediaType: 'image' | 'video',
@@ -543,70 +502,43 @@ export class SlotsService {
   ): Promise<{ waMessageId: string | null }> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
-    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
-      const rt = this.runtimes.runtimeFor(slot);
-      if (!rt.postStatusMedia) throw new BadRequestException('chromium runtime postStatusMedia 未实现');
-      const r = await rt.postStatusMedia(slotId, mediaType, mediaBase64, {
-        caption: options?.caption,
-        fileName: options?.fileName,
-      });
-      return { waMessageId: r.messageId ?? null };
-    }
-    // baileys: sendStatusMedia 签名: (slotId, type, base64, options{mimeType,caption,filename})
-    const r = await this.baileys.sendStatusMedia(slotId, mediaType, mediaBase64, {
-      mimeType: options?.mimeType,
+    const rt = this.runtimes.runtimeFor(slot);
+    if (!rt.postStatusMedia) throw new BadRequestException('runtime postStatusMedia 未实现');
+    const r = await rt.postStatusMedia(slotId, mediaType, mediaBase64, {
       caption: options?.caption,
-      filename: options?.fileName,
+      fileName: options?.fileName,
     });
-    return { waMessageId: r.waMessageId };
+    return { waMessageId: r.messageId ?? null };
   }
 
-  /** 浏览未读他人 status (chromium 真 DOM 走;  baileys 用 StatusCache + readMessages) */
   async browseStatuses(
     slotId: number,
     options: { maxItems: number; dwellMs: number },
   ): Promise<{ viewed: number }> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
-    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
-      const rt = this.runtimes.runtimeFor(slot);
-      if (!rt.browseStatuses) throw new BadRequestException('chromium runtime browseStatuses 未实现');
-      return rt.browseStatuses(slotId, options);
-    }
-    // baileys 路径不在 facade 里实现 (现 StatusBrowseExecutor 直接用 baileys.getSocket/getStatusCache)
-    // facade 仅 chromium · baileys 模式 executor 仍走老逻辑 (返"facade 不适用 baileys" hint)
-    throw new BadRequestException(
-      'baileys 模式 browseStatuses 不通过 facade · executor 直接用 baileys.getStatusCache + sock.readMessages',
-    );
+    const rt = this.runtimes.runtimeFor(slot);
+    if (!rt.browseStatuses) throw new BadRequestException('runtime browseStatuses 未实现');
+    return rt.browseStatuses(slotId, options);
   }
 
-  /** 给 N 条 status 点赞 */
   async reactStatuses(
     slotId: number,
     options: { maxItems: number; emoji: string },
   ): Promise<{ reacted: number }> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
-    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
-      const rt = this.runtimes.runtimeFor(slot);
-      if (!rt.reactStatuses) throw new BadRequestException('chromium runtime reactStatuses 未实现');
-      return rt.reactStatuses(slotId, options);
-    }
-    throw new BadRequestException(
-      'baileys 模式 reactStatuses 不通过 facade · executor 直接用 baileys.sendReact + StatusCache',
-    );
+    const rt = this.runtimes.runtimeFor(slot);
+    if (!rt.reactStatuses) throw new BadRequestException('runtime reactStatuses 未实现');
+    return rt.reactStatuses(slotId, options);
   }
 
-  /** 改个人签名 */
   async updateProfileAbout(slotId: number, text: string): Promise<void> {
     const slot = await this.slotRepo.findOne({ where: { id: slotId } });
     if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
-    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
-      const rt = this.runtimes.runtimeFor(slot);
-      if (!rt.updateProfileAbout) throw new BadRequestException('chromium runtime updateProfileAbout 未实现');
-      return rt.updateProfileAbout(slotId, text);
-    }
-    await this.baileys.updateProfileStatus(slotId, text);
+    const rt = this.runtimes.runtimeFor(slot);
+    if (!rt.updateProfileAbout) throw new BadRequestException('runtime updateProfileAbout 未实现');
+    return rt.updateProfileAbout(slotId, text);
   }
 
   /**
@@ -688,7 +620,7 @@ export class SlotsService {
           } catch {
             /* 查不到也继续 INSERT · DB unique 兜底 */
           }
-          await this.baileys.persistMessage({
+          await this.persistence.persistMessage({
             accountId: slot.accountId,
             remoteJid,
             direction: MessageDirection.In,
@@ -755,7 +687,7 @@ export class SlotsService {
         const content = hint.lastMessagePreview ?? hint.preview ?? '';
         const sentAt = new Date(hint.detectedAt ?? evt.ts ?? Date.now());
 
-        await this.baileys.persistMessage({
+        await this.persistence.persistMessage({
           accountId: slot.accountId,
           remoteJid,
           direction: MessageDirection.In,
@@ -1047,11 +979,7 @@ export class SlotsService {
     if (!slot) throw new NotFoundException(`槽位 ${id} 不存在`);
     this.assertCanAccess(slot, requesterTenantId);
 
-    // 1. 踢出 pool socket (如果在线)
-    await this.baileys.evictFromPool(id);
-
-    // 2026-04-26 · 1.5 · 停 Chromium runtime 子进程 (修僵尸: clear 后 D12-3 还在 spawn loop 里)
-    //   不阻塞 clear 主流程 · 失败只 warn · graceful=true 让它优雅退出 (8s 超时 force kill)
+    // 2026-04-28 · Phase D · chromium-only · 直接停 runtime 子进程
     try {
       await this.runtimeProcess.stop(id, { graceful: true, timeoutMs: 8_000 });
       this.logger.log(`slot ${id} runtime 子进程已停止 (clear 触发)`);
@@ -1099,8 +1027,10 @@ export class SlotsService {
       if (requesterTenantId !== null && proxy.tenantId !== requesterTenantId) {
         throw new ForbiddenException('无权限使用该代理');
       }
-      // 代理切换会断开现有 socket, 下次 bind/rehydrate 走新代理
-      await this.baileys.evictFromPool(slot.id);
+      // 2026-04-28 · 代理切换 · 停 runtime 子进程 · 下次 spawn 走新代理
+      try {
+        await this.runtimeProcess.stop(slot.id, { graceful: true, timeoutMs: 5_000 });
+      } catch { /* 没在跑就 ok */ }
 
       const desc: ProxyDescriptor = {
         type: proxy.proxyType as ProxyDescriptor['type'],
@@ -1112,7 +1042,9 @@ export class SlotsService {
       writeProxyConf(slot.slotIndex, desc);
     } else {
       writeProxyConf(slot.slotIndex, null);
-      await this.baileys.evictFromPool(slot.id);
+      try {
+        await this.runtimeProcess.stop(slot.id, { graceful: true, timeoutMs: 5_000 });
+      } catch { /* 没在跑就 ok */ }
     }
 
     slot.proxyId = proxyId;
@@ -1136,12 +1068,12 @@ export class SlotsService {
     // 2026-04-22 · 实际 socket 是否在 pool · 用平滑版本 (60s 内开过就算 online)
     // 2026-04-25 · D12+ · Chromium 路径: bridge 有 WS 连接且 heartbeat < 90s → online
     //   (baileys 路径在 RUNTIME_MODE=chromium 时 pool 永远空 · 只看 baileys 会一直误报"正在同步连接")
-    const baileysOnline = this.baileys.isOnlineSmooth(slot.id);
+    // 2026-04-28 · Phase D · chromium-only online 判定
     const bridgeConnected = this.runtimeBridge.hasConnection(slot.id);
     const heartbeatFresh =
       slot.socketLastHeartbeatAt &&
       Date.now() - slot.socketLastHeartbeatAt.getTime() < 90_000;
-    const online = baileysOnline || (bridgeConnected && Boolean(heartbeatFresh));
+    const online = bridgeConnected && Boolean(heartbeatFresh);
     return {
       id: slot.id,
       tenantId: slot.tenantId,
@@ -1177,6 +1109,109 @@ export class SlotsService {
       groupsCount: stats?.groupsCount ?? 0,
       simInfo: stats?.simInfo ?? null,
     };
+  }
+
+  // ═══ 2026-04-28 · Phase D · 收编原 BaileysService 公开方法 ═══════════
+  // 这些只查 DB / 控 runtime · 不依赖 baileys 协议
+
+  async listContacts(accountId: number): Promise<unknown[]> {
+    return this.dataSource.query(
+      `SELECT id, account_id AS "accountId", remote_jid AS "remoteJid",
+              display_name AS "displayName", is_internal AS "isInternal",
+              added_at AS "addedAt", last_message_at AS "lastMessageAt"
+         FROM wa_contact
+        WHERE account_id = $1
+        ORDER BY last_message_at DESC NULLS LAST`,
+      [accountId],
+    );
+  }
+
+  async listMessages(
+    accountId: number,
+    opts: { contactId?: number; limit?: number; beforeId?: string },
+  ): Promise<unknown[]> {
+    const conds: string[] = ['account_id = $1'];
+    const params: unknown[] = [accountId];
+    if (opts.contactId) {
+      conds.push(`contact_id = $${params.length + 1}`);
+      params.push(opts.contactId);
+    }
+    if (opts.beforeId) {
+      conds.push(`id < $${params.length + 1}`);
+      params.push(opts.beforeId);
+    }
+    const limit = Math.min(200, Math.max(1, opts.limit ?? 50));
+    return this.dataSource.query(
+      `SELECT id, account_id AS "accountId", contact_id AS "contactId",
+              direction, msg_type AS "msgType", content,
+              media_path AS "mediaPath", sent_at AS "sentAt",
+              wa_message_id AS "waMessageId", created_at AS "createdAt"
+         FROM chat_message
+        WHERE ${conds.join(' AND ')}
+        ORDER BY id DESC
+        LIMIT ${limit}`,
+      params,
+    );
+  }
+
+  /** 2026-04-28 · Phase D · 替代老 baileys.reactivateAndRespawn · 重启 chromium runtime 子进程 */
+  async reactivateAndRespawn(slotId: number): Promise<void> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (!slot.accountId) throw new BadRequestException(`槽位 ${slotId} 未绑号`);
+    if (slot.status === AccountSlotStatus.Quarantine) {
+      throw new BadRequestException(
+        `槽位 ${slotId} 已被 quarantine (疑似 WA 限制) · 请原厂重置后换新号重新绑定`,
+      );
+    }
+    try {
+      await this.runtimeProcess.stop(slotId, { graceful: true, timeoutMs: 5_000 });
+    } catch { /* 没在跑就忽略 */ }
+    await this.slotRepo.update(slotId, {
+      status: AccountSlotStatus.Active,
+      suspendedUntil: null,
+    });
+    await this.runtimeProcess.start(slotId);
+    this.logger.log(`slot ${slotId} 手动重连触发 · stop+start runtime`);
+  }
+
+  /** 2026-04-28 · Phase D · 简化诊断 · chromium-only */
+  async getConnectionDiagnosis(
+    slotId: number,
+    slot: SlotResponseDto,
+  ): Promise<{ kind: string; summary: string; advice: string }> {
+    const bridgeConnected = this.runtimeBridge.hasConnection(slotId);
+    if (slot.status === AccountSlotStatus.Quarantine) {
+      return {
+        kind: 'quarantine',
+        summary: '该槽位被 quarantine · 疑似 WA 协议侧限制',
+        advice: '原厂重置后换新号重绑',
+      };
+    }
+    if (!bridgeConnected) {
+      return {
+        kind: 'offline',
+        summary: 'runtime 子进程未连 WS 桥',
+        advice: '点重连 · 或重启 backend · 仍不行查看后端日志 runtime spawn-failed',
+      };
+    }
+    if (!slot.online) {
+      return {
+        kind: 'heartbeat-stale',
+        summary: 'runtime 已连但 90s 内无 heartbeat',
+        advice: '可能 chromium 已假死 · 点重连让它 respawn',
+      };
+    }
+    return {
+      kind: 'ok',
+      summary: '在线 · runtime + heartbeat 正常',
+      advice: '',
+    };
+  }
+
+  /** 2026-04-28 · Phase D · 老 isInPool 的对应 · runtime 子进程是否在 */
+  isInPool(slotId: number): boolean {
+    return this.runtimeBridge.hasConnection(slotId);
   }
 }
 

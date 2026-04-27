@@ -4,8 +4,8 @@ import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
 import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
-import { ChatMessageEntity, MessageDirection } from '../../baileys/chat-message.entity';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
+import { ChatMessageEntity, MessageDirection } from '../../messaging/chat-message.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
 
 // 2026-04-22 · A7 · 自动回复 (被动)
 // 扫最近 N 小时内 · 有入境消息 · 我方没回过的 contact

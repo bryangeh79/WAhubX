@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
 import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
 
 // 2026-04-22 · 群内冒泡 · 每 3-5 天在加的群里说一句 · 避免"潜水号"
 // payload: {

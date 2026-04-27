@@ -1,7 +1,4 @@
-// Stub baileys.service (transitively imports ESM @whiskeysockets/baileys — jest/ts-jest can't parse)
-jest.mock('../baileys/baileys.service', () => ({
-  BaileysService: class {},
-}));
+// 2026-04-28 · Phase D · baileys 已拔 · 旧 mock 移除
 // 2026-04-26 · R9 · script-runner 改走 SlotsService.sendText facade · 同样 stub
 jest.mock('../slots/slots.service', () => ({
   SlotsService: class {},

@@ -18,7 +18,7 @@ import {
   UpdateCustomerGroupDto,
 } from '../dto/customer-group.dto';
 import { jidToPhone, normalizePhone, parsePhoneBlob } from '../utils/phone';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
 
 export interface ImportResult {
   added: number;

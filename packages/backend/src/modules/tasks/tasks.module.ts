@@ -27,7 +27,7 @@ import { SendVoiceExecutor } from './executors/send-voice.executor';
 import { SendImageExecutor } from './executors/send-image.executor';
 import { SendVideoExecutor } from './executors/send-video.executor';
 import { AssetsModule } from '../assets/assets.module';
-import { BaileysModule } from '../baileys/baileys.module';
+import { MessagingModule } from '../messaging/messaging.module';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WarmupPlanEntity } from '../warmup/warmup-plan.entity';
 import { ChannelItemsModule } from '../channel-items/channel-items.module';
@@ -43,7 +43,7 @@ import { SlotsModule } from '../slots/slots.module';
     TypeOrmModule.forFeature([TaskEntity, TaskRunEntity, AccountSlotEntity, WarmupPlanEntity, ChannelItemEntity]),
     ScriptsModule,
     WarmupModule,
-    BaileysModule,
+    MessagingModule, // 2026-04-28 · Phase D · 取代 BaileysModule (entity + persistMessage)
     ChannelItemsModule,
     AssetsModule,
     CampaignsModule,
