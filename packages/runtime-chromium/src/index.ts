@@ -428,6 +428,7 @@ async function main() {
     if (connectionCloseEmitted) return;
     connectionCloseEmitted = true;
     g_state = 'closed';
+    stopHeartbeatKeepalive();
     log.warn({ reason, category }, 'D8-3 connection-close');
     if (!wsClient) return;
     const evt: Omit<ConnectionCloseEvent, 'kind'> & { kind: 'event' } = {
@@ -640,6 +641,50 @@ async function main() {
     }, 30_000);
   };
 
+  // ─── 2026-04-28 · C2 · heartbeat keep-alive · 防 WA idle-purge ─────
+  // 每 60s 触发一次 chat-list scroll · WA Web 重发 presence 订阅 · 服务端看到流量
+  // 每 5min 触发一次 page.evaluate · 强制刷新一次 active chat (无副作用)
+  // 配合 chat-list watchdog · 共同维持 always-on 心跳
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatTickCount = 0;
+  const startHeartbeatKeepalive = (): void => {
+    if (heartbeatTimer) return;
+    log.info('C2 heartbeat keep-alive STARTED · 60s scroll + 5min refresh · 绕过 idle-purge');
+    heartbeatTimer = setInterval(() => {
+      void (async () => {
+        if (g_state !== 'chat-list') return;
+        heartbeatTickCount += 1;
+        try {
+          await page.evaluate(() => {
+            const pane = document.querySelector('#pane-side');
+            if (pane) {
+              pane.scrollTop += 1;
+              setTimeout(() => {
+                pane.scrollTop = Math.max(0, pane.scrollTop - 1);
+              }, 50);
+            }
+          });
+          if (heartbeatTickCount % 5 === 0) {
+            await page.evaluate(() => {
+              window.dispatchEvent(new Event('focus'));
+              document.dispatchEvent(new Event('visibilitychange'));
+            });
+            log.debug({ heartbeatTickCount }, 'C2 heartbeat · 5min focus/visibility refresh');
+          }
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : err }, 'C2 heartbeat tick failed');
+        }
+      })();
+    }, 60_000);
+  };
+  const stopHeartbeatKeepalive = (): void => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+      log.info('C2 heartbeat keep-alive STOPPED');
+    }
+  };
+
   // ─── D8-2 · 取消 controller (cancel-bind 触发) ───────────────────
   let bindAbortController: AbortController | null = null;
   let qrLiveServerStarted = false;
@@ -685,6 +730,7 @@ async function main() {
       // 2026-04-25 · P1.5 · 普通模式也启 watchdog · 用户测试期间也要能看到 WA 踢号
       // (老逻辑只在 SOAK_MODE · 单次绑测 / T2.x 必无掉线感知)
       startChatListWatchdog();
+      startHeartbeatKeepalive();
       return { outcome: 'rehydrated' };
     }
 
@@ -748,6 +794,7 @@ async function main() {
       // 真用户被踢: chat-list 消失 · 出现 unsupported / qr / loading splash · 任一都不是 chat-list
       // 2026-04-25 · P1.5 · 解除 SOAK_MODE 门槛 · 普通模式也启 · 让用户看到 "号被踢"
       startChatListWatchdog();
+      startHeartbeatKeepalive();
       return { outcome: 'connected' };
     }
 
