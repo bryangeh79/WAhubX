@@ -4,9 +4,46 @@
 
 ---
 
+## ⚠ 紧急修正 (2026-04-25 加 · 必读)
+
+**Session 3 起草 HANDOVER 时犯了一个判断错误**:
+- 我**误读** `goofy-mendel-3f5881/.env` 里 `RUNTIME_MODE=baileys` 就下结论 "系统跑在 Baileys 协议上"
+- **实际真相**: 系统真实运行的是 **Chromium runtime** (D8-D12 已实装) · 每 slot 起独立 headless chrome 进程 · `--user-data-dir=C:\Users\MSI\AppData\Roaming\wahubx\slots\<idx>\profile`
+- 验证方法: `wmic process where "name='chrome.exe'" get CommandLine` · 看到 `wahubx/slots/.../profile` 才是真相
+- env 里 `RUNTIME_MODE=baileys` 不代表运行时一定 baileys · 可能历史遗留 · 实际 spawn 由 `slot-runtime.registry.ts` + 启动时 env 决定
+
+### 由此引发的 §A.6 / §A.10 / §6 错归因
+
+**WA 440 死循环**问题 · 我归咎"WA 协议层 / 用户手机 cleanup linked devices" — **不一定对**.
+
+实际可能是:
+- Chromium profile 跨长期闲置 · WA 服务端踢 web companion
+- 代理 IP 风控 / 反检测三件套漏指纹
+- D7 / D8 / D9 某个环节 bug
+
+**没有真正定位过根因 · 我说"换新 SIM"是绕过不是修复**.
+
+### 影响 §1.1 广告投放模块
+
+我做的 `send-ad.executor.ts` 直接调 `baileys.sendText` · 在 chromium runtime 下:
+- `slot-runtime.registry.ts` 路由到 RuntimeBridge · 而不是 baileys
+- 老路径 baileys.pool 永远空 → 必失败
+- **必须把 `baileys.sendText` 换成 `slotRuntime.send` 抽象层调用** · 否则广告发不出
+
+合并 main 进 goofy-mendel 时 · 这是必须解决的 adapter 层问题.
+
+### 教训 (新 agent 谨记)
+- **静态文件读完不等于运行时真相** · 必查 `tasklist / netstat / wmic` 验证 runtime
+- 看 `--user-data-dir` 路径是判断 chromium runtime 是否激活的最直接证据
+- 不要根据 .env 单方面下结论
+
+---
+
 ## 0 · 一句话定位
 
 **WAhubX** = WhatsApp 多账号自动化运营 SaaS · 马来西亚本土 + 东南亚华人圈 · 本地桌面部署 · License VPS 验证.
+
+**runtime 实际状态**: Chromium per-slot · 不是 Baileys (Session 3 起草 HANDOVER 时误判已修正 · 见上).
 
 ---
 
