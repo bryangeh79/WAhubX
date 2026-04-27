@@ -1960,7 +1960,9 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async persistMessage(params: {
+  // 2026-04-25 · P0 集中补洞 · persistMessage 公开 · 让 SlotsService chromium send/inbound 路径复用
+  // (内含: contact upsert + chat_message INSERT + eventBus emit takeover.message.in)
+  async persistMessage(params: {
     accountId: number;
     remoteJid: string;
     direction: MessageDirection;
@@ -2058,7 +2060,8 @@ export class BaileysService implements OnModuleInit, OnModuleDestroy {
     return MessageType.Other;
   }
 
-  private normalizeJid(input: string): string {
+  // 2026-04-25 · P0 · 公开 · 让 SlotsService chromium 路径复用
+  normalizeJid(input: string): string {
     const trimmed = input.trim();
     if (trimmed.includes('@')) return trimmed;
     const digits = trimmed.replace(/[^0-9]/g, '');

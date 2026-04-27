@@ -11,6 +11,8 @@ import { HandoverService } from './handover.service';
 import { SlotsController } from './slots.controller';
 import { BaileysModule } from '../baileys/baileys.module';
 import { SlotRuntimeModule } from '../slot-runtime/slot-runtime.module';
+import { RuntimeBridgeModule } from '../runtime-bridge/runtime-bridge.module';
+import { RuntimeProcessModule } from '../runtime-process/runtime-process.module';
 
 @Module({
   imports: [
@@ -23,6 +25,8 @@ import { SlotRuntimeModule } from '../slot-runtime/slot-runtime.module';
     ]),
     forwardRef(() => BaileysModule),
     SlotRuntimeModule,
+    RuntimeBridgeModule, // 2026-04-25 · SlotsService 用 sendCommand 调 fetch-account-info
+    RuntimeProcessModule, // 2026-04-26 · P0.10 · bringToFront 自愈需要 stop runtime
   ],
   controllers: [SlotsController],
   providers: [SlotsService, SimInfoService, HandoverService],

@@ -19,6 +19,7 @@ import { ChatMessageEntity } from '../baileys/chat-message.entity';
 import { WaContactEntity } from '../baileys/wa-contact.entity';
 import { AuthModule } from '../auth/auth.module';
 import { BaileysModule } from '../baileys/baileys.module';
+import { SlotsModule } from '../slots/slots.module';
 import { TakeoverLockService } from './takeover-lock.service';
 import { TakeoverUploadService } from './takeover-upload.service';
 import { TakeoverController } from './takeover.controller';
@@ -33,6 +34,7 @@ import { TakeoverAlertRelay } from './takeover-alert.relay';
     TypeOrmModule.forFeature([AccountSlotEntity, TaskEntity, TaskRunEntity, ChatMessageEntity, WaContactEntity]),
     AuthModule,
     BaileysModule,
+    SlotsModule, // 2026-04-26 · Class A · ChatsController 走 SlotsService.sendText/sendMedia facade
   ],
   controllers: [TakeoverController, ChatsController],
   providers: [TakeoverLockService, TakeoverUploadService, TakeoverGateway, TakeoverAlertRelay],

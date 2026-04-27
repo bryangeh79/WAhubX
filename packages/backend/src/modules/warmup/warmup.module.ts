@@ -24,6 +24,7 @@ import { GroupWarmupController } from './group-warmup.controller';
 import { StatusPostSeedsController } from './status-post-seeds.controller';
 import { AdminDebugController } from './admin-debug.controller';
 import { BaileysModule } from '../baileys/baileys.module';
+import { SlotsModule } from '../slots/slots.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { BaileysModule } from '../baileys/baileys.module';
       AssetEntity,
     ]),
     BaileysModule,
+    SlotsModule, // 2026-04-26 · Class B · status-post / status-browse 用 SlotsService.getCurrentMode 做 chromium guard
   ],
   controllers: [WarmupController, GroupWarmupController, StatusPostSeedsController, AdminDebugController],
   providers: [

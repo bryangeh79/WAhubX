@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
 // 2026-04-22 · 头像 / 签名低频更新 · 模拟真人会变
@@ -19,7 +19,8 @@ export class ProfileRefreshExecutor implements TaskExecutor {
   private readonly logger = new Logger(ProfileRefreshExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · D11 · 走 SlotsService.updateProfileAbout facade · 双 mode 兼容
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -41,14 +42,14 @@ export class ProfileRefreshExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    if (!(await this.slots.isOnline(slot.id))) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
 
     let actions = 0;
     if (mode === 'signature' || mode === 'both') {
       const sig = signatures[Math.floor(Math.random() * signatures.length)];
       try {
-        // 2026-04-25 · Phase 2 · 通过 baileys.updateProfileStatus facade
-        await this.baileys.updateProfileStatus(slot.id, sig);
+        // 2026-04-26 · D11 · 走 SlotsService.updateProfileAbout facade · chromium-aware
+        await this.slots.updateProfileAbout(slot.id, sig);
         actions++;
         ctx.log('signature-updated', true, { sig });
       } catch (err) {

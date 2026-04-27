@@ -6,7 +6,7 @@ import type {
   TaskExecutorContext,
   TaskExecutorResult,
 } from '../../tasks/executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 import { AdvertisementEntity } from '../entities/advertisement.entity';
 import { OpeningLineEntity } from '../entities/opening-line.entity';
@@ -53,7 +53,8 @@ export class SendAdExecutor implements TaskExecutor {
   private readonly logger = new Logger(SendAdExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · R9-bis · 改走 SlotsService.sendText facade · chromium 路径不撞 baileys pool
+    private readonly slots: SlotsService,
     private readonly throttle: ThrottleProfileService,
     private readonly ads: AdvertisementsService,
     private readonly openings: OpeningLinesService,
@@ -135,7 +136,8 @@ export class SendAdExecutor implements TaskExecutor {
     // 6. 发
     const jid = phoneToJid(target.phoneE164);
     try {
-      await this.baileys.sendText(slot.id, jid, body);
+      // 2026-04-26 · R9-bis · 走 SlotsService facade · chromium-aware
+      await this.slots.sendText(slot.id, jid, body);
       ctx.throwIfPaused?.();
 
       await this.markTarget(target, CampaignTargetStatus.Sent, null, null, new Date());

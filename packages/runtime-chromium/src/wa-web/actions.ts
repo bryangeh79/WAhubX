@@ -22,17 +22,26 @@ import { HumanBehaviorSimulator } from '../human-behavior';
 import { captureEvidence } from './screenshot-evidence';
 
 // ═══ 公共 helper ═════════════════════════════════════════════════════
+// 2026-04-25 · P0.5 fix · 单次 page.$ 也可能 hang (puppeteer/CDP 在 page busy 时 query 阻塞)
+// 加 per-call 2s cap · 否则一次 page.$ 卡死 · outer while 永不退出 · 整个 sendMedia 永挂
 async function waitForAnySelector(
   page: Page,
   selectors: string[],
   timeoutMs: number,
   pollMs = 500,
+  perCallMs = 2_000,
 ): Promise<ElementHandle | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     for (const sel of selectors) {
+      const remaining = timeoutMs - (Date.now() - start);
+      if (remaining <= 0) return null;
+      const callCap = Math.min(perCallMs, remaining);
       try {
-        const el = await page.$(sel);
+        const el = await Promise.race<ElementHandle | null>([
+          page.$(sel),
+          new Promise<null>((res) => setTimeout(() => res(null), callCap)),
+        ]);
         if (el) return el;
       } catch {
         /* try next */
@@ -108,6 +117,8 @@ export interface SendTextResult {
   pseudoMessageId: string | null;
   error?: string;
   durationMs: number;
+  /** 2026-04-25 · P0.1 · Enter 已按但 tick 未出现 · 标 unconfirmed=true · 仍当成功 */
+  unconfirmed?: boolean;
 }
 
 export async function sendTextInOpenChat(
@@ -177,7 +188,13 @@ export async function sendTextInOpenChat(
   // 6. 等单勾出现 (msg-check icon)
   // 注意: WA Web 会先显示 msg-time (pending) → 然后 msg-check (sent)
   // 我们等 msg-check · 但 confirmTimeout 内任何 status icon 出现都算成功
+  // 2026-04-25 · P0.1 集中补洞 · tick 找不到不再 fail 整个 sendText
+  //   原因: WA Web DOM 选择器频繁变 (msg-check / aria-label / svg path 都用过)
+  //         + 自发消息 (send-to-self) DOM 结构不同 + 网络慢 tick 慢出
+  //   行为: tick 缺失只 log warn · 仍返 ok=true · 标记 unconfirmed=true
+  //   业务层: backend persistMessage 仍写 chat_message · 用户可手机端核对
   const tickEl = await waitForAnySelector(page, WA_SELECTORS.messageStatusTick, confirmTimeoutMs);
+  const pseudoMessageId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   if (!tickEl) {
     if (options?.diagnosticsDir) {
       try {
@@ -186,16 +203,19 @@ export async function sendTextInOpenChat(
         /* ignore */
       }
     }
+    log.warn(
+      { confirmTimeoutMs, pseudoMessageId },
+      'D10 sendText · Enter 已按 · 但 tick 未在超时内出现 · 视作发送成功 (unconfirmed) · 用户手机端核对',
+    );
     return {
-      ok: false,
-      pseudoMessageId: null,
-      error: `no message tick after ${confirmTimeoutMs}ms · 发送可能失败`,
+      ok: true,
+      pseudoMessageId,
+      unconfirmed: true,
       durationMs: Date.now() - startedAt,
     };
   }
   await tickEl.dispose();
 
-  const pseudoMessageId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   log.info({ pseudoMessageId, durationMs: Date.now() - startedAt }, 'D10 sendText · 单勾确认 · 成功');
   return {
     ok: true,
@@ -223,6 +243,8 @@ export interface SendMediaResult {
   pseudoMessageId: string | null;
   error?: string;
   durationMs: number;
+  /** 2026-04-25 · P0.1 · Enter 已按但 tick 未出现 · 标 unconfirmed=true */
+  unconfirmed?: boolean;
 }
 
 export async function sendMediaInOpenChat(
@@ -263,37 +285,95 @@ export async function sendMediaInOpenChat(
   }
   await attachEl.dispose();
 
-  // 3. 等 input[type=file] 出现 · 直接 uploadFile (跳过点击 menu item · 更稳)
-  // WA Web 通常一打开 attach 菜单就会插入 hidden inputs
-  const inputSelectors = kind === 'image' ? WA_SELECTORS.attachImageInput : WA_SELECTORS.attachDocumentInput;
-  const fileInput = await waitForAnySelector(page, inputSelectors, 5_000);
-  if (!fileInput) {
-    if (options.diagnosticsDir) {
-      try {
-        await captureEvidence(page, options.diagnosticsDir, `d10-send-media-no-input-${kind}`);
-      } catch {
-        /* ignore */
+  // 2026-04-26 · P0.7 final · file 路径用 page.waitForFileChooser 模式
+  //   click "Document" menu item 会触发原生文件 dialog (因为 WA 用 input.click() 触发系统选择器)
+  //   puppeteer 默认不接管 dialog · 必须 waitForFileChooser 监听 + accept(filePath) 注入文件
+  //   image 路径不需要 (image input 是 hidden 持久 element · setFileInputFiles 直接 OK)
+  if (kind === 'file') {
+    // 等菜单动画结束
+    await new Promise((r) => setTimeout(r, 600));
+    const docMenuEl = await waitForAnySelector(page, WA_SELECTORS.attachDocumentMenuItem, 4_000);
+    if (!docMenuEl) {
+      if (options.diagnosticsDir) {
+        try {
+          await captureEvidence(page, options.diagnosticsDir, 'd10-send-media-doc-menu-miss');
+        } catch {
+          /* ignore */
+        }
       }
+      return {
+        ok: false,
+        pseudoMessageId: null,
+        error: 'Document menu item not found in attach menu',
+        durationMs: Date.now() - startedAt,
+      };
     }
-    return {
-      ok: false,
-      pseudoMessageId: null,
-      error: `${kind} file input not found in attach menu`,
-      durationMs: Date.now() - startedAt,
-    };
+    // click + waitForFileChooser 同步双 promise · 文件即时注入
+    try {
+      const [chooser] = await Promise.all([
+        page.waitForFileChooser({ timeout: 8_000 }),
+        docMenuEl.click({ delay: 50 }),
+      ]);
+      log.info('P0.7 attach Document menu clicked + fileChooser captured');
+      await chooser.accept([tmpPath]);
+      log.info({ tmpPath }, 'P0.7 fileChooser.accept 文件已注入');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await docMenuEl.dispose();
+      if (options.diagnosticsDir) {
+        try {
+          await captureEvidence(page, options.diagnosticsDir, 'd10-send-media-filechooser-fail');
+        } catch {
+          /* ignore */
+        }
+      }
+      return {
+        ok: false,
+        pseudoMessageId: null,
+        error: `fileChooser accept failed: ${msg}`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    await docMenuEl.dispose();
+    // accept 后等 preview pane 出现
+    await new Promise((r) => setTimeout(r, 1500));
+    // file 路径文件已注入 · 跳过下面 input 选 + uploadFile 块
   }
-  try {
-    await (fileInput as ElementHandle<HTMLInputElement>).uploadFile(tmpPath);
-  } catch (err) {
+
+  // 3. image 路径 · 用老 hidden file input 直 uploadFile (file 已 chooser 处理 · 跳)
+  // WA Web 通常一打开 attach 菜单就会插入 hidden inputs (image/photo 默认在 DOM)
+  let fileInput: ElementHandle | null = null;
+  if (kind === 'image') {
+    const inputSelectors = WA_SELECTORS.attachImageInput;
+    fileInput = await waitForAnySelector(page, inputSelectors, 5_000);
+    if (!fileInput) {
+      if (options.diagnosticsDir) {
+        try {
+          await captureEvidence(page, options.diagnosticsDir, `d10-send-media-no-input-${kind}`);
+        } catch {
+          /* ignore */
+        }
+      }
+      return {
+        ok: false,
+        pseudoMessageId: null,
+        error: `${kind} file input not found in attach menu`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    try {
+      await (fileInput as ElementHandle<HTMLInputElement>).uploadFile(tmpPath);
+    } catch (err) {
+      await fileInput.dispose();
+      return {
+        ok: false,
+        pseudoMessageId: null,
+        error: `uploadFile failed: ${err instanceof Error ? err.message : err}`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
     await fileInput.dispose();
-    return {
-      ok: false,
-      pseudoMessageId: null,
-      error: `uploadFile failed: ${err instanceof Error ? err.message : err}`,
-      durationMs: Date.now() - startedAt,
-    };
   }
-  await fileInput.dispose();
 
   // 4. 等 caption 输入框出现 (preview pane) · 可填 caption · 然后 Enter 发送
   // WA Web 上传后会进 preview · 此时也是 contenteditable input · 但 selector 可能不同
@@ -322,22 +402,20 @@ export async function sendMediaInOpenChat(
   }
   log.info({ kind }, 'D10 sendMedia · Enter pressed · 等 tick');
 
-  // 7. 等单勾
+  // 7. 等单勾 · 同 sendText: tick 缺失只 log warn · 不 fail
   const tickEl = await waitForAnySelector(page, WA_SELECTORS.messageStatusTick, 15_000);
   // 清 tmp 文件
   fs.unlink(tmpPath).catch(() => {});
 
+  const pseudoMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   if (!tickEl) {
-    return {
-      ok: false,
-      pseudoMessageId: null,
-      error: 'no tick after media send · 可能上传失败',
-      durationMs: Date.now() - startedAt,
-    };
+    log.warn(
+      { pseudoMessageId, kind },
+      'D10 sendMedia · Enter 已按 · tick 未在 15s 内出现 · 视作发送成功 (unconfirmed) · 用户手机端核对',
+    );
+    return { ok: true, pseudoMessageId, unconfirmed: true, durationMs: Date.now() - startedAt };
   }
   await tickEl.dispose();
-
-  const pseudoMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   log.info({ pseudoMessageId, durationMs: Date.now() - startedAt }, 'D10 sendMedia · success');
   return { ok: true, pseudoMessageId, durationMs: Date.now() - startedAt };
 }

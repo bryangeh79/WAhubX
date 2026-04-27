@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
 // 2026-04-22 · 主动"加好友" (WA 概念: 主动发第一条消息给未互动过的号)
@@ -20,7 +20,8 @@ export class AddContactExecutor implements TaskExecutor {
   private readonly logger = new Logger(AddContactExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · Class A · SlotsService.sendText facade · chromium-aware
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -50,7 +51,7 @@ export class AddContactExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker (若 WA_WORKER_MODE)
+    // 2026-04-26 · Class A · 通过 SlotsService.sendText facade · chromium-aware
 
     let added = 0;
     for (const num of numbers.slice(0, maxCount)) {
@@ -58,7 +59,7 @@ export class AddContactExecutor implements TaskExecutor {
       const jid = `${num}@s.whatsapp.net`;
       const text = openings[Math.floor(Math.random() * openings.length)];
       try {
-        await this.baileys.sendText(slot.id, jid, text);
+        await this.slots.sendText(slot.id, jid, text);
         added++;
         ctx.log('contact-added', true, { jid });
       } catch (err) {

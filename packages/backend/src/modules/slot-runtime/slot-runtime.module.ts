@@ -6,12 +6,17 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { BaileysModule } from '../baileys/baileys.module';
 import { RuntimeBridgeModule } from '../runtime-bridge/runtime-bridge.module';
+import { RuntimeProcessModule } from '../runtime-process/runtime-process.module';
 import { BaileysSlotRuntime } from './baileys-slot-runtime';
 import { ChromiumSlotRuntime } from './chromium-slot-runtime';
 import { SlotRuntimeRegistry } from './slot-runtime.registry';
 
 @Module({
-  imports: [forwardRef(() => BaileysModule), RuntimeBridgeModule],
+  imports: [
+    forwardRef(() => BaileysModule),
+    RuntimeBridgeModule,
+    RuntimeProcessModule, // 2026-04-25 · ChromiumSlotRuntime lazy-start 用
+  ],
   providers: [BaileysSlotRuntime, ChromiumSlotRuntime, SlotRuntimeRegistry],
   exports: [SlotRuntimeRegistry],
 })

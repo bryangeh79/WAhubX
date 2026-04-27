@@ -36,6 +36,8 @@ import { ChannelItemEntity } from '../channel-items/channel-item.entity';
 // 2026-04-23 · 广告投放 send-ad executor 需要注册到 TASK_EXECUTORS · dispatcher 才能捡 task_type='send_ad'
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
+// 2026-04-26 · R9-bis · ChatExecutor 改走 SlotsService.sendText facade
+import { SlotsModule } from '../slots/slots.module';
 
 @Module({
   imports: [
@@ -46,6 +48,7 @@ import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
     ChannelItemsModule,
     AssetsModule,
     CampaignsModule,
+    SlotsModule, // R9-bis · ChatExecutor 注 SlotsService
   ],
   controllers: [TasksController],
   providers: [

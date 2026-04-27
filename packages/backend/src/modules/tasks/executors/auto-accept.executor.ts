@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 import { WarmupPlanEntity, WarmupPhase } from '../../warmup/warmup-plan.entity';
 import { WaContactEntity } from '../../baileys/wa-contact.entity';
@@ -27,7 +27,8 @@ export class AutoAcceptExecutor implements TaskExecutor {
   private readonly logger = new Logger(AutoAcceptExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · Class A · SlotsService.sendText facade · chromium-aware
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WarmupPlanEntity)
@@ -47,7 +48,7 @@ export class AutoAcceptExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    // 2026-04-25 · Phase 2 · 通过 baileys.sendText facade · 自动走 worker
+    // 2026-04-26 · Class A · 通过 SlotsService.sendText facade · chromium-aware
 
     // Phase 裁剪
     const plan = await this.warmupRepo.findOne({ where: { accountId: ctx.accountId } });
@@ -92,7 +93,7 @@ export class AutoAcceptExecutor implements TaskExecutor {
       if (accepted >= cap) break;
       const text = texts[Math.floor(Math.random() * texts.length)];
       try {
-        await this.baileys.sendText(slot.id, contact.remoteJid, text);
+        await this.slots.sendText(slot.id, contact.remoteJid, text);
         await this.contactRepo.update(contact.id, {
           lastMessageAt: new Date(),
         });

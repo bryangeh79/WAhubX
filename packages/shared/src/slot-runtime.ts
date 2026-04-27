@@ -141,6 +141,43 @@ export interface ISlotRuntime {
     options?: SendMediaOptions,
   ): Promise<SendResult>;
 
+  // ─── 2026-04-26 · D11 · WA Status / Profile ────────
+  /**
+   * 发文字 status · chromium 用 wa-web · baileys 用 sendStatusText
+   */
+  postStatusText?(slotId: number, text: string, bgColor?: string): Promise<SendResult>;
+
+  /**
+   * 发图/视频 status · chromium 用 wa-web · baileys 用 sendStatusMedia
+   */
+  postStatusMedia?(
+    slotId: number,
+    mediaType: 'image' | 'video',
+    mediaBase64: string,
+    options?: { caption?: string; fileName?: string },
+  ): Promise<SendResult>;
+
+  /**
+   * 浏览未读他人 status · 模拟看动态 · 留 view 痕给作者
+   */
+  browseStatuses?(
+    slotId: number,
+    options: { maxItems: number; dwellMs: number },
+  ): Promise<{ viewed: number }>;
+
+  /**
+   * 给最前 N 条 status 点赞 · 防风控硬上限 5
+   */
+  reactStatuses?(
+    slotId: number,
+    options: { maxItems: number; emoji: string },
+  ): Promise<{ reacted: number }>;
+
+  /**
+   * 改个人"关于"/签名
+   */
+  updateProfileAbout?(slotId: number, text: string): Promise<void>;
+
   // ─── 事件订阅 ────────────────────────────────────
   /**
    * 订阅 runtime 事件 · 全部 RuntimeEvent 类型 · 业务模块按 type 自筛

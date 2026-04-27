@@ -1,6 +1,7 @@
 // 2026-04-21 · 方案 C Dashboard 式重构
 // · 顶部进度条 + 执行组区 + WhatsApp 风格 Logo + 信息齐全 + 空槽默认折叠
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import {
   Alert,
   Badge,
@@ -25,6 +26,15 @@ import {
   Typography,
 } from 'antd';
 import type { MenuProps } from 'antd';
+import {
+  RocketOutlined,
+  EditOutlined,
+  FolderOutlined,
+  MessageOutlined,
+  ExportOutlined,
+  UndoOutlined,
+  PlusOutlined,
+} from '@ant-design/icons';
 import { api, extractErrorMessage } from '@/lib/api';
 import { useAuth } from '@/auth/AuthContext';
 import { BindExistingModal } from './bind/BindExistingModal';
@@ -48,6 +58,8 @@ interface SlotItem {
   status: SlotStatus;
   role?: SlotRole; // D11-1 加 · 老数据 fallback broadcast
   online?: boolean;
+  // 2026-04-25 · P1.6 · runtime 路径 · 决定哪些字段可信 (chromium 路径下 warmup/stats/nickname 暂未接)
+  runtime?: 'baileys' | 'chromium';
   // 2026-04-25 · 稳定性 · 真实状态三指标
   suspendedUntil?: string | null;
   socketLastHeartbeatAt?: string | null;
@@ -113,6 +125,11 @@ const STATUS_META: Record<
 // 🟢 healthy (心跳 < 90s · status=active/warmup)
 // 🟡 degraded (心跳 90s-3min · 或 status=suspended 冷却中)
 // 🔴 dead (心跳 > 3min · 或 status=quarantine/suspended 超冷却)
+// ⚪ idle (空槽 · 或广告号 idle 待命)
+//
+// 2026-04-26 · 角色感知健康判定:
+//   D12-3 设计: 客服号 always-on (auto-spawn) · 广告号 lazy-spawn (按需起 Chromium)
+//   广告号 idle 时离线是预期行为 · 不应误报"红 dead" · 改成 idle 灰色"待命中"
 function computeHealth(slot: SlotItem): { level: 'healthy' | 'degraded' | 'dead' | 'idle'; hint: string } {
   if (slot.status === 'empty') return { level: 'idle', hint: '空槽' };
   if (slot.status === 'quarantine') return { level: 'dead', hint: '号疑似被 WA 限制 · 需换号' };
@@ -127,7 +144,13 @@ function computeHealth(slot: SlotItem): { level: 'healthy' | 'degraded' | 'dead'
   // active / warmup
   if (age < 90_000) return { level: 'healthy', hint: `心跳正常 (${Math.round(age / 1000)}s 前)` };
   if (age < 3 * 60_000) return { level: 'degraded', hint: `心跳延迟 ${Math.round(age / 1000)}s · 请关注` };
-  return { level: 'dead', hint: `心跳已 ${Math.round(age / 60000)} 分钟无响应 · socket 可能已挂` };
+  // 心跳老 / 无心跳 — 按角色区分:
+  //   广告号: 设计就是 idle 时不连 · 显灰色"待命中"不报警
+  //   客服号: always-on 设计 · 真离线是真问题 · 显红
+  if (slot.role !== 'customer_service') {
+    return { level: 'idle', hint: '广告号 · 按需待命中 (跑任务时才连 Chromium · 节省内存)' };
+  }
+  return { level: 'dead', hint: `客服号心跳已 ${Math.round(age / 60000)} 分钟无响应 · 需排查` };
 }
 
 const HEALTH_COLOR = {
@@ -574,31 +597,7 @@ export function SlotsPage() {
         <Empty description="还没有槽位 — 请联系管理员重新激活 License" />
       ) : (
         <>
-          {/* 活跃槽位 · 详细卡 */}
-          {activeSlots.length > 0 && (
-            <Card
-              size="small"
-              title={<Text strong>活跃槽位 · {activeSlots.length} 个</Text>}
-              style={{ marginBottom: 12 }}
-            >
-              <Row gutter={[12, 12]}>
-                {activeSlots.map((slot) => (
-                  <Col key={slot.id} xs={24} sm={12} md={8} xl={6}>
-                    <ActiveSlotCard
-                      slot={slot}
-                      groups={groups}
-                      activeSlots={activeSlots}
-                      onManage={() => setChatTarget(slot)}
-                      onFactoryReset={() => void handleFactoryReset(slot, load)}
-                      onReload={() => void load()}
-                    />
-                  </Col>
-                ))}
-              </Row>
-            </Card>
-          )}
-
-          {/* 空槽 · 折叠 */}
+          {/* 2026-04-26 · 空槽 · 置顶 (用户令: 号越多空槽越往下沉 · 租户看不到绑号入口) */}
           {emptySlots.length > 0 && (
             <Card
               size="small"
@@ -613,6 +612,12 @@ export function SlotsPage() {
                   {emptyExpanded ? '收起 ▲' : '展开 ▼'}
                 </Button>
               }
+              style={{
+                marginBottom: 12,
+                // 高亮: 浅绿底 + 品牌绿左 border · 让租户一眼看到绑号入口
+                background: '#f0faf4',
+                borderLeft: '4px solid #25d366',
+              }}
             >
               {!emptyExpanded ? (
                 <Paragraph type="secondary" style={{ margin: 0, fontSize: 13 }}>
@@ -661,6 +666,30 @@ export function SlotsPage() {
               )}
             </Card>
           )}
+
+          {/* 活跃槽位 · 详细卡 */}
+          {activeSlots.length > 0 && (
+            <Card
+              size="small"
+              title={<Text strong>活跃槽位 · {activeSlots.length} 个</Text>}
+              style={{ marginBottom: 12 }}
+            >
+              <Row gutter={[12, 12]}>
+                {activeSlots.map((slot) => (
+                  <Col key={slot.id} xs={24} sm={12} md={8} xl={6}>
+                    <ActiveSlotCard
+                      slot={slot}
+                      groups={groups}
+                      activeSlots={activeSlots}
+                      onManage={() => setChatTarget(slot)}
+                      onFactoryReset={() => void handleFactoryReset(slot, load)}
+                      onReload={() => void load()}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </Card>
+          )}
         </>
       )}
 
@@ -686,7 +715,11 @@ export function SlotsPage() {
           onClose={() => setBindTarget(null)}
           onSuccess={() => {
             setBindTarget(null);
+            // R5 修 · 第一次 reload 拿到的可能是 placeholder phone (pending-XX-timestamp)
+            // backend 在 connected 后 2-3s 异步 fetch-account-info 替换真号
+            // 5s 后再 reload 一次 · UI 直接显真号 · 用户不必 F5
             void load();
+            setTimeout(() => void load(), 5000);
           }}
         />
       )}
@@ -747,11 +780,18 @@ function ActiveSlotCard({
 }) {
   // 2026-04-22 · 区分 "待养号" (status=warmup 但无 plan) vs "养号中" (有 plan)
   const hasWarmupPlan = !!slot.warmupStartedAt;
-  const meta =
+  // 2026-04-26 · 角色感知 meta: 广告号 idle 时显"待命中" 蓝灰 · 不显"运营中"绿
+  //   D12-3 设计: 广告号 lazy-spawn · idle = 节省内存 · 不是离线
+  const baseMeta =
     slot.status === 'warmup' && !hasWarmupPlan
       ? { label: '待养号', color: 'default', bar: '#d9d9d9', pct: 'warmup' }
       : STATUS_META[slot.status];
-  // 2026-04-25 · 稳定性 · 健康度 · 显示三色灯
+  const isAdIdle =
+    slot.status === 'active' && slot.role !== 'customer_service' && slot.online === false;
+  const meta = isAdIdle
+    ? { label: '待命中', color: 'blue', bar: '#1677ff', pct: baseMeta.pct }
+    : baseMeta;
+  // 2026-04-25 · 稳定性 · 健康度 · 显示三色灯 (2026-04-26 · 改成角色感知)
   const health = computeHealth(slot);
   const memberGroups = groups.filter((g) => g.slotIds.includes(slot.id));
   const [warmupWizardOpen, setWarmupWizardOpen] = useState(false);
@@ -779,24 +819,45 @@ function ActiveSlotCard({
   };
 
   const menu: MenuProps['items'] = [
-    { key: 'warmup', label: '🚀 一键养号', onClick: () => setWarmupWizardOpen(true) },
+    {
+      key: 'warmup',
+      icon: <RocketOutlined style={{ color: '#f5222d' }} />,
+      label: '一键养号',
+      onClick: () => setWarmupWizardOpen(true),
+    },
     { type: 'divider' },
     {
       key: 'sim-info',
-      label: slot.simInfo?.displayCarrier ? '✏ 编辑 SIM 信息' : '➕ 填 SIM 信息',
+      icon: slot.simInfo?.displayCarrier
+        ? <EditOutlined style={{ color: '#fa8c16' }} />
+        : <PlusOutlined style={{ color: '#fa8c16' }} />,
+      label: slot.simInfo?.displayCarrier ? '编辑 SIM 信息' : '填 SIM 信息',
       onClick: () => setSimModalOpen(true),
     },
     {
       key: 'group-membership',
-      label: memberGroups.length > 0 ? `📁 管理执行组 (${memberGroups.length})` : '➕ 加入执行组',
+      icon: memberGroups.length > 0
+        ? <FolderOutlined style={{ color: '#faad14' }} />
+        : <PlusOutlined style={{ color: '#faad14' }} />,
+      label: memberGroups.length > 0 ? `管理执行组 (${memberGroups.length})` : '加入执行组',
       onClick: () => setGroupMembershipOpen(true),
     },
     { type: 'divider' },
-    { key: 'manage', label: '管理 / 聊天', onClick: onManage },
     {
-      key: 'handover',
-      label: '📤 转出到手机 (导出 + 解绑)',
-      onClick: () => {
+      type: 'group',
+      label: '管理 / 聊天',
+      children: [
+        {
+          key: 'manage',
+          icon: <MessageOutlined style={{ color: '#25d366' }} />,
+          label: '管理 / 聊天',
+          onClick: onManage,
+        },
+        {
+          key: 'handover',
+          icon: <ExportOutlined style={{ color: '#1677ff' }} />,
+          label: '转出到手机 (导出 + 解绑)',
+          onClick: () => {
         Modal.confirm({
           title: `📤 转出 #${slot.slotIndex} 到手机`,
           width: 560,
@@ -829,19 +890,39 @@ function ActiveSlotCard({
           onOk: onFactoryReset,
         });
       },
+        },
+      ],
     },
     { type: 'divider' },
-    { key: 'factory-reset', label: '原厂重置', danger: true, onClick: onFactoryReset },
+    {
+      key: 'factory-reset',
+      icon: <UndoOutlined />,
+      label: '原厂重置',
+      danger: true,
+      onClick: onFactoryReset,
+    },
   ];
+
+  // 2026-04-26 · R-UI · 完全依照参考图重写卡片 · 大字号手机号 / 分隔线 / 整齐排列
+  const phoneReady = slot.phoneNumber && !slot.phoneNumber.startsWith('pending-');
+  const dividerStyle: CSSProperties = {
+    borderTop: '1px solid #f0f0f0',
+    margin: '12px 0',
+  };
+  const labelStyle: CSSProperties = { color: '#8c8c8c', fontSize: 12, fontWeight: 400 };
+  const valueStyle: CSSProperties = { color: '#262626', fontSize: 13 };
 
   return (
     <Card
       size="small"
-      style={{ borderLeft: `3px solid ${meta.bar}` }}
+      style={{ borderLeft: `4px solid ${meta.bar}`, borderRadius: 8 }}
+      styles={{ body: { padding: '14px 16px' } }}
       title={
-        <Space size={4} wrap>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <WaLogo n={slot.slotIndex} size={36} />
-          <Tag color={meta.color} style={{ marginLeft: 4 }}>{meta.label}</Tag>
+          <Tag color={meta.color} style={{ margin: 0, fontSize: 12, padding: '2px 10px', borderRadius: 12, fontWeight: 500 }}>
+            {meta.label}
+          </Tag>
           {slot.accountId && (
             <Tooltip title={health.hint}>
               <span
@@ -852,7 +933,6 @@ function ActiveSlotCard({
                   borderRadius: '50%',
                   background: HEALTH_COLOR[health.level],
                   boxShadow: `0 0 4px ${HEALTH_COLOR[health.level]}`,
-                  marginLeft: 2,
                 }}
               />
             </Tooltip>
@@ -862,7 +942,7 @@ function ActiveSlotCard({
               key={g.id}
               color="blue"
               closable
-              style={{ margin: 0 }}
+              style={{ margin: 0, fontSize: 12, padding: '1px 8px', borderRadius: 10 }}
               onClose={async (e) => {
                 e.preventDefault();
                 try {
@@ -882,180 +962,205 @@ function ActiveSlotCard({
               📁 {g.name}
             </Tag>
           ))}
-        </Space>
+        </div>
       }
       extra={
-        <Dropdown menu={{ items: menu }} trigger={['click']}>
-          <Button size="small" type="link">操作 ▾</Button>
+        <Dropdown
+          menu={{ items: menu, style: { fontSize: 13, minWidth: 200 } }}
+          trigger={['click']}
+        >
+          <Button size="small" type="link" style={{ fontSize: 13, fontWeight: 500 }}>操作 ▾</Button>
         </Dropdown>
       }
     >
-      <Space direction="vertical" size={4} style={{ width: '100%', fontSize: 12 }}>
-        {slot.status === 'suspended' && (
-          <Alert
-            type="error"
-            showIcon
-            style={{ padding: '4px 8px', fontSize: 11 }}
-            message={
-              <Space size={4} wrap>
-                <Text style={{ fontSize: 11 }}>⚠ 连接被 WA 拒绝</Text>
-                <Button
-                  type="link"
-                  size="small"
-                  loading={reconnecting}
-                  onClick={handleReconnect}
-                  style={{ padding: 0, fontSize: 11, height: 'auto' }}
-                >
-                  🔄 重连
-                </Button>
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => setDiagnosisOpen(true)}
-                  style={{ padding: 0, fontSize: 11, height: 'auto' }}
-                >
-                  💡 诊断
-                </Button>
-              </Space>
-            }
-          />
-        )}
-        {/* 2026-04-22 · 连接不稳提示 (非错误 · 正常重连中) */}
-        {(slot.status === 'active' || slot.status === 'warmup') && slot.online === false && (
+      {/* 状态告警 (suspended / 同步中) */}
+      {slot.status === 'suspended' && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ padding: '6px 10px', fontSize: 12, marginBottom: 10 }}
+          message={
+            <Space size={6} wrap>
+              <Text style={{ fontSize: 12 }}>⚠ 连接被 WA 拒绝</Text>
+              <Button type="link" size="small" loading={reconnecting} onClick={handleReconnect} style={{ padding: 0, fontSize: 12, height: 'auto' }}>
+                🔄 重连
+              </Button>
+              <Button type="link" size="small" onClick={() => setDiagnosisOpen(true)} style={{ padding: 0, fontSize: 12, height: 'auto' }}>
+                💡 诊断
+              </Button>
+            </Space>
+          }
+        />
+      )}
+      {/* 2026-04-26 · 角色感知"同步中"警告:
+            - 客服号 always-on 离线 → 真问题 · 显警告
+            - 广告号 idle 离线 → 预期行为 · 不显警告 (不打扰租户)
+            - 广告号有 active task 但离线 → 显警告 (跑任务时该连)
+       */}
+      {(slot.status === 'active' || slot.status === 'warmup') &&
+        slot.online === false &&
+        slot.role === 'customer_service' && (
           <Alert
             type="info"
             showIcon
-            style={{ padding: '4px 8px', fontSize: 11 }}
+            style={{ padding: '6px 10px', fontSize: 12, marginBottom: 10 }}
             message={
-              <Space size={4} wrap>
-                <Text style={{ fontSize: 11 }}>🔄 正在同步连接...</Text>
-                <Button
-                  type="link"
-                  size="small"
-                  loading={reconnecting}
-                  onClick={handleReconnect}
-                  style={{ padding: 0, fontSize: 11, height: 'auto' }}
-                >
+              <Space size={6} wrap>
+                <Text style={{ fontSize: 12 }}>🔄 客服号离线 · 正在同步连接...</Text>
+                <Button type="link" size="small" loading={reconnecting} onClick={handleReconnect} style={{ padding: 0, fontSize: 12, height: 'auto' }}>
                   立刻刷新
                 </Button>
               </Space>
             }
           />
         )}
-        <div>📞 {slot.phoneNumber ?? '—'}</div>
-        <div>👤 {slot.waNickname ?? <Text type="secondary">未设置昵称</Text>}</div>
-        {slot.simInfo?.displayCarrier ? (
-          <div>
-            📶 {slot.simInfo.displayCarrier}
-            {slot.simInfo.iccidSuffix && (
-              <Text type="secondary"> · ...{slot.simInfo.iccidSuffix.slice(-6)}</Text>
-            )}
-            {slot.simInfo.displayCountry && (
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {' · '}
-                {slot.simInfo.displayCountry}
-              </Text>
-            )}
-            <Button
-              type="link"
-              size="small"
-              style={{ padding: 0, fontSize: 11, marginLeft: 4 }}
-              onClick={() => setSimModalOpen(true)}
-            >
-              ✏
-            </Button>
-          </div>
-        ) : (
-          <div>
-            <Text type="secondary">📶 未填 SIM 信息</Text>{' '}
-            <Button
-              type="link"
-              size="small"
-              style={{ padding: 0, fontSize: 11 }}
-              onClick={() => setSimModalOpen(true)}
-            >
-              ➕ 填写
-            </Button>
-          </div>
-        )}
-        <div>
-          🌐{' '}
-          {slot.proxyId === null ? (
-            <Text type="secondary">直连 (本机 IP)</Text>
-          ) : (
-            <span>代理 #{slot.proxyId}</span>
-          )}
-        </div>
 
-        {/* 2026-04-25 · D11-2 · 角色 badge + 切换 (Codex 锁: 一 badge + 一 button · 不复杂) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
-          {slot.role === 'customer_service' ? (
-            <Tag color="green" style={{ fontSize: 11, margin: 0 }}>
-              🛎️ 客服号 · always-on
-            </Tag>
-          ) : (
-            <Tag color="blue" style={{ fontSize: 11, margin: 0 }}>
-              📢 广告号
-            </Tag>
+      {/* ── 主信息块 ────────────────── */}
+      {/* 📞 手机号 (大字号 · 主焦点) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 18 }}>📞</span>
+        {phoneReady ? (
+          <span style={{ fontSize: 22, fontWeight: 600, color: '#262626', letterSpacing: 0.3 }}>
+            {slot.phoneNumber}
+          </span>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 14 }}>拉取真号中...</Text>
+        )}
+      </div>
+
+      {/* chromium 路径 nickname 暂未接 · hide */}
+      {slot.runtime !== 'chromium' && slot.waNickname && (
+        <div style={{ ...valueStyle, marginBottom: 6, paddingLeft: 26 }}>
+          👤 {slot.waNickname}
+        </div>
+      )}
+
+      {/* 📶 SIM 信息行 */}
+      {slot.simInfo?.displayCarrier ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, ...valueStyle }}>
+          <span>📶</span>
+          <span style={{ fontWeight: 500 }}>{slot.simInfo.displayCarrier}</span>
+          {slot.simInfo.iccidSuffix && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              · ...{slot.simInfo.iccidSuffix.slice(-6)}
+            </Text>
+          )}
+          {slot.simInfo.displayCountry && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              · {slot.simInfo.displayCountry}
+            </Text>
           )}
           <Button
             type="link"
             size="small"
-            style={{ padding: 0, fontSize: 11 }}
-            onClick={() => void handleToggleRole(slot)}
+            style={{ padding: 0, fontSize: 12, marginLeft: 'auto', color: '#8c8c8c' }}
+            onClick={() => setSimModalOpen(true)}
           >
-            切换
+            ✏
           </Button>
         </div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>📶 未填 SIM 信息</Text>
+          <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => setSimModalOpen(true)}>
+            ➕ 填写
+          </Button>
+        </div>
+      )}
 
-        {/* 养号进度 14 天 */}
-        {slot.warmupStartedAt && (
-          <div style={{ marginTop: 4 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
-              <span>🌱 养号 Day {slot.warmupCurrentDay ?? 0} / {slot.warmupTotalDays ?? 14}</span>
-              <span>Phase {slot.warmupPhase ?? 0}</span>
+      {/* 🌐 网络出口 */}
+      <div style={{ ...valueStyle, marginBottom: 10 }}>
+        🌐{' '}
+        {slot.proxyId === null ? (
+          <Text type="secondary" style={{ fontSize: 13 }}>直连 (本机 IP)</Text>
+        ) : (
+          <span>代理 #{slot.proxyId}</span>
+        )}
+      </div>
+
+      {/* 角色 pill + 切换 button (并列两个 pill) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        {slot.role === 'customer_service' ? (
+          <Tag color="green" style={{ margin: 0, fontSize: 12, padding: '3px 12px', borderRadius: 14, fontWeight: 500 }}>
+            🛎️ 客服号 · always-on
+          </Tag>
+        ) : (
+          <Tag color="blue" style={{ margin: 0, fontSize: 12, padding: '3px 12px', borderRadius: 14, fontWeight: 500 }}>
+            📢 广告号
+          </Tag>
+        )}
+        <Button
+          size="small"
+          onClick={() => void handleToggleRole(slot)}
+          style={{ fontSize: 12, padding: '0 10px', height: 24, borderRadius: 12 }}
+        >
+          ⇄ 切换
+        </Button>
+      </div>
+
+      {/* ── 养号进度区 (有 plan 才显) ────────────────── */}
+      {slot.warmupStartedAt && (slot.warmupCurrentDay ?? 0) > 0 && (
+        <>
+          <div style={dividerStyle} />
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 500, color: '#262626' }}>
+                🌱 养号 Day {slot.warmupCurrentDay ?? 0} / {slot.warmupTotalDays ?? 14}
+              </span>
+              <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+                Phase {slot.warmupPhase ?? 0}
+              </span>
             </div>
             <Progress
               percent={slot.warmupProgressPct ?? 0}
               size="small"
               strokeColor={{ from: '#25d366', to: '#128c7e' }}
               showInfo={false}
+              style={{ marginBottom: 4 }}
             />
-            <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: '#bfbfbf' }}>
               起于 {new Date(slot.warmupStartedAt).toLocaleDateString('zh-CN')}
             </div>
           </div>
-        )}
+        </>
+      )}
 
-        {/* 统计 */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, padding: '4px 0', borderTop: '1px dashed #eee' }}>
-          <Tooltip title="任务 run 数 + 发消息数 (含剧本 B 角色参与)">
-            <div style={{ fontSize: 11 }}>
-              <div style={{ color: '#666' }}>任务</div>
-              <strong style={{ color: '#1677ff', fontSize: 14 }}>{slot.tasksExecuted ?? 0}</strong>
+      {/* ── 统计区 (4 列等宽) ────────────────── */}
+      <div style={dividerStyle} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+        <Tooltip title={slot.runtime === 'chromium' ? '该统计在 Chromium 路径暂未接通 · 跑通后恢复' : '任务 run 数 + 发消息数'}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={labelStyle}>任务</div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: slot.runtime === 'chromium' ? '#bfbfbf' : '#1677ff', marginTop: 2 }}>
+              {slot.runtime === 'chromium' ? '—' : (slot.tasksExecuted ?? 0)}
             </div>
-          </Tooltip>
-          <Tooltip title="联系人数">
-            <div style={{ fontSize: 11 }}>
-              <div style={{ color: '#666' }}>联系人</div>
-              <strong style={{ color: '#52c41a', fontSize: 14 }}>{slot.contactsCount ?? 0}</strong>
+          </div>
+        </Tooltip>
+        <Tooltip title={slot.runtime === 'chromium' ? '该统计在 Chromium 路径暂未接通' : '联系人数'}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={labelStyle}>联系人</div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: slot.runtime === 'chromium' ? '#bfbfbf' : '#52c41a', marginTop: 2 }}>
+              {slot.runtime === 'chromium' ? '—' : (slot.contactsCount ?? 0)}
             </div>
-          </Tooltip>
-          <Tooltip title="已加群数">
-            <div style={{ fontSize: 11 }}>
-              <div style={{ color: '#666' }}>群</div>
-              <strong style={{ color: '#722ed1', fontSize: 14 }}>{slot.groupsCount ?? 0}</strong>
+          </div>
+        </Tooltip>
+        <Tooltip title={slot.runtime === 'chromium' ? '该统计在 Chromium 路径暂未接通' : '已加群数'}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={labelStyle}>群</div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: slot.runtime === 'chromium' ? '#bfbfbf' : '#722ed1', marginTop: 2 }}>
+              {slot.runtime === 'chromium' ? '—' : (slot.groupsCount ?? 0)}
             </div>
-          </Tooltip>
-          <Tooltip title="已 Follow 频道数">
-            <div style={{ fontSize: 11 }}>
-              <div style={{ color: '#666' }}>频道</div>
-              <strong style={{ color: '#fa541c', fontSize: 14 }}>{slot.channelsCount ?? 0}</strong>
+          </div>
+        </Tooltip>
+        <Tooltip title={slot.runtime === 'chromium' ? '该统计在 Chromium 路径暂未接通' : '已 Follow 频道数'}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={labelStyle}>频道</div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: slot.runtime === 'chromium' ? '#bfbfbf' : '#fa541c', marginTop: 2 }}>
+              {slot.runtime === 'chromium' ? '—' : (slot.channelsCount ?? 0)}
             </div>
-          </Tooltip>
-        </div>
-
-      </Space>
+          </div>
+        </Tooltip>
+      </div>
 
       <WarmupWizardModal
         slot={slot}

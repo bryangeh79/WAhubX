@@ -11,7 +11,7 @@ import { KnowledgeBaseEntity } from '../entities/knowledge-base.entity';
 import { AiReplyAuditEntity, AuditMode } from '../entities/ai-reply-audit.entity';
 import { PlatformAiService } from './platform-ai.service';
 import { TenantReplySettingsService } from './tenant-reply-settings.service';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 import { AiTextService } from '../../ai/ai-text.service';
 
@@ -39,7 +39,8 @@ export class ReplyExecutorService {
     private readonly slotRepo: Repository<AccountSlotEntity>,
     private readonly platformAi: PlatformAiService,
     private readonly settings: TenantReplySettingsService,
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · R9-bis · 改走 SlotsService.sendText facade · chromium-aware
+    private readonly slots: SlotsService,
     private readonly tenantAi: AiTextService,
   ) {}
 
@@ -336,7 +337,8 @@ ${context.slice(0, 4000)}
         const slot = await this.slotRepo.findOne({ where: { id: conv.slotId } });
         if (!slot) throw new Error('slot 不存在');
         const jid = `${conv.phoneE164}@s.whatsapp.net`;
-        const sendRes = await this.baileys.sendText(conv.slotId, jid, replyText);
+        // 2026-04-26 · R9-bis · 走 SlotsService facade · chromium-aware
+        const sendRes = await this.slots.sendText(conv.slotId, jid, replyText);
         sentMessageId = sendRes.waMessageId;
         // 更新 conversation 计数
         conv.lastAiReplyAt = new Date();

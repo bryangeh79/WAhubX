@@ -97,6 +97,21 @@ export function startQrLiveServer(opts: QrLiveServerOptions): http.Server {
     res.end('not found');
   });
 
+  // 2026-04-26 · multi-slot 防御 · listen 失败 (EADDRINUSE) 只 warn · 不抛 uncaughtException
+  // QR live server 是辅助调试工具 · 真 QR 走 WS 桥 → backend → frontend BindExistingModal
+  // 端口冲突时静默放弃 · 不影响 bind 主链路
+  server.on('error', (err) => {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EADDRINUSE') {
+      opts.log.warn(
+        { port: opts.port, code },
+        'QR live server 端口被占 · 跳过启动 (不影响 bind 主链路 · 真 QR 走 WS)',
+      );
+      return;
+    }
+    opts.log.error({ port: opts.port, err: err.message }, 'QR live server 失败 · 跳过启动');
+  });
+
   server.listen(opts.port, '0.0.0.0', () => {
     opts.log.info({ port: opts.port }, 'QR live server listening · open http://localhost:' + opts.port + '/ on host');
   });

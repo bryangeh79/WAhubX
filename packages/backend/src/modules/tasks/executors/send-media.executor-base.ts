@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import * as fs from 'node:fs';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
 import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 import { WaContactEntity } from '../../baileys/wa-contact.entity';
 import { AssetPoolService } from '../../assets/asset-pool.service';
@@ -41,7 +42,10 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
   protected readonly logger = new Logger(this.constructor.name);
 
   constructor(
+    // 2026-04-26 · Class A · sendMedia 走 SlotsService facade · isOnline 也走
+    // baileys 仅留 reactivateAndRespawn (baileys session 自愈 · 仅 baileys 模式有效)
     protected readonly baileys: BaileysService,
+    protected readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     protected readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WaContactEntity)
@@ -57,18 +61,31 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    // 2026-04-22 · 在线时直接走 baileys.sendMedia facade · 否则尝试 respawn 一次
-    // 2026-04-25 · Phase 2 · isSlotOnline 兼容 worker mode
-    if (!this.baileys.isSlotOnline(slot.id)) {
-      ctx.log('sock-missing-respawn', true, {});
-      try {
-        await this.baileys.reactivateAndRespawn(slot.id);
-        await new Promise((r) => setTimeout(r, 3000));
-      } catch (err) {
-        ctx.log('respawn-failed', false, { err: err instanceof Error ? err.message : String(err) });
+
+    // 2026-04-26 · Class A · chromium 路径 video 暂不支持 · 早 skip 不死任务 (留 D11+)
+    if (this.slots.getCurrentMode() === 'chromium' && this.mediaType === 'video') {
+      ctx.log('skip-chromium-video-not-supported', true, {});
+      return {
+        success: false,
+        errorCode: 'NOT_SUPPORTED',
+        errorMessage: '当前 RUNTIME_MODE=chromium · video 发送暂未实现 (留 D11+)',
+      };
+    }
+
+    // 2026-04-26 · Class A · isOnline 走 facade · chromium-aware
+    // baileys 模式离线时尝试 reactivateAndRespawn 一次 · chromium 模式让用户手动 reconnect
+    if (!(await this.slots.isOnline(slot.id))) {
+      if (this.slots.getCurrentMode() === 'baileys') {
+        ctx.log('sock-missing-respawn', true, {});
+        try {
+          await this.baileys.reactivateAndRespawn(slot.id);
+          await new Promise((r) => setTimeout(r, 3000));
+        } catch (err) {
+          ctx.log('respawn-failed', false, { err: err instanceof Error ? err.message : String(err) });
+        }
       }
     }
-    if (!this.baileys.isSlotOnline(slot.id)) {
+    if (!(await this.slots.isOnline(slot.id))) {
       return {
         success: false,
         errorCode: 'NOT_ONLINE',
@@ -128,7 +145,9 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
       try {
         const buf = fs.readFileSync(absPath);
         const base64 = buf.toString('base64');
-        await this.baileys.sendMedia(slot.id, jid, this.mediaType, base64, {
+        // 2026-04-26 · Class A · 走 SlotsService.sendMedia facade · chromium-aware
+        // 注: chromium 模式下 voice/video 已在顶部 / facade 内部统一抛错
+        await this.slots.sendMedia(slot.id, jid, this.mediaType, base64, {
           caption: payload.caption,
         });
         sent++;

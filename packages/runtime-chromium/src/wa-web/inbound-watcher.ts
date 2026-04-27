@@ -30,8 +30,18 @@ export interface IncomingMessageHint {
   unreadCount: number;
   /** 探测到的本地时间 ms */
   detectedAt: number;
-  /** 内部 dedupe key (preview + lastMessagePreview hash · 60s 内同 key 视为同条) */
+  /** 内部 dedupe key */
   dedupeKey: string;
+  // 2026-04-25 · B 路线 · 最小可用 inbound · 标识来源
+  // - phone:       从 aria-label / data-id 抽到的真手机号
+  // - jid-attr:    从 data-id JID 形态 (XXXX@c.us / @s.whatsapp.net) 抽
+  // - displayName: 退化方案 · 用 contact 显示名当 synthetic key
+  // - unknown:     都失败 (前端不该用这条 · backend 也会丢)
+  identitySource?: 'phone' | 'jid-attr' | 'displayName' | 'unknown';
+  /** 显示名 (saved contact 名 / 推送名 / phone) · synthetic JID 用 */
+  displayName?: string | null;
+  // 2026-04-26 · P0.11 · row 上抓到的 jid (e.g. "60186888168@c.us") · runtime worker 用此 click row 进 chat 拿真消息
+  rowDataId?: string | null;
 }
 
 export interface InboundWatcherOptions {
@@ -42,7 +52,11 @@ export interface InboundWatcherOptions {
   log: Logger;
 }
 
-const DEFAULT_DEDUPE_WINDOW_MS = 60_000;
+// 2026-04-25 · B 路线 · 默认 dedupe 窗 60s → 5s
+// 老逻辑: 同 chat / 同 unread count 60s 内全丢 → 用户连发多条 / 同号两条都漏
+// 新逻辑: 5s 内同 key 丢 (只压 MutationObserver 单帧多次 fire) · 5s 后视作新事件
+// 真业务级去重 (waMessageId) 留 D11+ 进 chat 拿原文时做
+const DEFAULT_DEDUPE_WINDOW_MS = 5_000;
 
 /**
  * 安装 inbound watcher · 必须在 chat-list 状态调
@@ -98,6 +112,8 @@ export async function installInboundWatcher(
     };
 
     /** 从 chat row 抽取 hint */
+    // 2026-04-25 · B 路线 · 多策略抽身份 + identitySource 打标
+    // 2026-04-26 · P0.11 · 加 rowDataId 字段 (chat-reader 进 chat 用)
     const extractHint = (row: Element): {
       preview: string;
       phoneE164: string | null;
@@ -105,6 +121,9 @@ export async function installInboundWatcher(
       unreadCount: number;
       detectedAt: number;
       dedupeKey: string;
+      identitySource: 'phone' | 'jid-attr' | 'displayName' | 'unknown';
+      displayName: string | null;
+      rowDataId: string | null;
     } | null => {
       // chat row 通常在 aria-label / title / [tabindex] · 不同 WA 版本不一样
       // 简化: 取 row.textContent 前 80 字符作 preview
@@ -124,13 +143,109 @@ export async function installInboundWatcher(
       }
       if (unread <= 0) return null; // 没未读 = 不上报
 
-      // phone: WA Web row 通常没直接 phone · 我们从 aria-label / data-id 试拉
+      // ─── 多策略身份提取 (B 路线 · 优先级: phone > jid-attr > displayName) ───
       let phone: string | null = null;
+      let identitySource: 'phone' | 'jid-attr' | 'displayName' | 'unknown' = 'unknown';
+      // 2026-04-26 · P0.11 · row 上完整 jid (含 server) · runtime chat-reader 用此 click row
+      let rowDataId: string | null = null;
+
       const ariaLabel =
         row.getAttribute('aria-label') ||
         (row.querySelector('[aria-label]')?.getAttribute('aria-label') ?? '');
+
+      // 策略 1: aria-label 直接含 + 国家码数字串
       const phoneMatch = ariaLabel.match(/(\+?\d[\d\s-]{6,15}\d)/);
-      if (phoneMatch) phone = phoneMatch[1].replace(/[^\d+]/g, '');
+      if (phoneMatch) {
+        phone = phoneMatch[1].replace(/[^\d+]/g, '');
+        identitySource = 'phone';
+      }
+
+      // 策略 2: 扫 row 内任何 attribute / data-id 含 JID 形态 (`<phone>@c.us` / `@s.whatsapp.net` / `@lid`)
+      // WA Web row 常带 data-id="false_60186888168@c.us_3EB0..."  · 拆 _ 后第二段就是 jid
+      // chat-list row 的 data-id 通常直接是 jid (无 _ 前缀)
+      if (!phone || !rowDataId) {
+        const allEls = [row, ...Array.from(row.querySelectorAll('*'))];
+        const JID_RE = /(\d{8,15})(?::\d+)?@(c\.us|s\.whatsapp\.net|lid)/;
+        for (const el of allEls) {
+          // 全 attribute 扫
+          for (const attr of Array.from(el.attributes ?? [])) {
+            const m = attr.value.match(JID_RE);
+            if (m) {
+              if (!phone) {
+                phone = m[1];
+                identitySource = 'jid-attr';
+              }
+              if (!rowDataId) {
+                // 整段 jid (含 server) · 用作 chat-reader.enterChat 的 key
+                rowDataId = `${m[1]}@${m[2]}`;
+              }
+              break;
+            }
+          }
+          if (phone && rowDataId) break;
+        }
+      }
+
+      // 策略 3: 退化 · 拿 displayName (saved contact 名)
+      // 2026-04-25 · B 路线 · iter 2 · 修 "抓到 unread badge 文本/typing/时间" bug
+      //
+      // WA Web chat-list row aria-label 形如 (区域顺序不稳):
+      //   "X unread messages. ContactName. Yesterday. ..."
+      // 我们必须**剔除状态片段** (unread badge / typing / time)
+      // 然后优先用 [title] / span[dir="auto"][title] (DOM 上 contact 名最干净处)
+      let displayName: string | null = null;
+
+      // 状态片段过滤器 · 命中 → 跳
+      const isStatusText = (t: string): boolean => {
+        const lc = t.trim().toLowerCase();
+        if (!lc) return true;
+        if (/^\d+\s*unread\b/i.test(lc)) return true;          // "2 unread messages"
+        if (/^typing[\s.…]*$/i.test(lc)) return true;          // "typing…"
+        if (/^(yesterday|today|now|just now)$/i.test(lc)) return true;
+        if (/^\d{1,2}[:.]\d{2}(\s*(am|pm))?$/i.test(lc)) return true; // "10:23" / "10:23 pm"
+        if (/^\d+\s*(min|hour|day|week)s?\s*ago$/i.test(lc)) return true;
+        if (/^(mon|tue|wed|thu|fri|sat|sun)/i.test(lc)) return true;
+        return false;
+      };
+
+      // 优先级 A: 找 row 内 [title] 属性 (typical contact name 位置)
+      const titleEls = row.querySelectorAll('[title]');
+      for (let i = 0; i < titleEls.length; i++) {
+        const t = titleEls[i].getAttribute('title')?.trim() ?? '';
+        if (t && !isStatusText(t)) {
+          displayName = t.slice(0, 80);
+          break;
+        }
+      }
+
+      // 优先级 B: span[dir="auto"] 的 textContent (chat-list contact 名常用)
+      if (!displayName) {
+        const dirAutoEls = row.querySelectorAll('span[dir="auto"]');
+        for (let i = 0; i < dirAutoEls.length; i++) {
+          const t = (dirAutoEls[i].textContent ?? '').trim();
+          if (t && !isStatusText(t) && t.length <= 80) {
+            displayName = t;
+            break;
+          }
+        }
+      }
+
+      // 优先级 C: aria-label 拆段 + 过滤
+      if (!displayName && ariaLabel) {
+        const segs = ariaLabel.split(/[·.]/).map((s) => s.trim()).filter((s) => s);
+        for (const seg of segs) {
+          if (!isStatusText(seg) && seg.length <= 80) {
+            displayName = seg;
+            break;
+          }
+        }
+      }
+
+      if (!phone && displayName) {
+        identitySource = 'displayName';
+      } else if (!phone && !displayName) {
+        identitySource = 'unknown';
+      }
 
       // 最后一条消息预览 (row 里通常有 [data-testid="last-msg-content"] 或最后一个 span)
       let lastMsg: string | null = null;
@@ -140,8 +255,10 @@ export async function installInboundWatcher(
         row.querySelector('div > span:last-of-type');
       if (lastEl) lastMsg = (lastEl.textContent ?? '').trim().slice(0, 200);
 
-      // dedupe key · preview + lastMsg 简单 hash
-      const dedupeKey = `${text.slice(0, 50)}|${lastMsg ?? ''}|${unread}`;
+      // 2026-04-25 · B 路线 · dedupeKey 加 30s 时间桶 · 同 chat 30s+ 来新消息视作新事件
+      // 5s 窗口内 + 同 bucket = 真重复 (DOM 同帧多 fire); 30s 后 bucket 翻 = 同内容也算新
+      const timeBucket = Math.floor(Date.now() / 30_000);
+      const dedupeKey = `${text.slice(0, 50)}|${lastMsg ?? ''}|${unread}|${timeBucket}`;
 
       return {
         preview: text.slice(0, 80),
@@ -150,6 +267,9 @@ export async function installInboundWatcher(
         unreadCount: unread,
         detectedAt: Date.now(),
         dedupeKey,
+        identitySource,
+        displayName,
+        rowDataId, // P0.11
       };
     };
 

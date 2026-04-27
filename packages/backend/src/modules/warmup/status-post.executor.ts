@@ -7,7 +7,7 @@ import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../t
 import { AssetEntity, AssetKind } from '../scripts/asset.entity';
 import { ScriptEntity } from '../scripts/script.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
-import { BaileysService } from '../baileys/baileys.service';
+import { SlotsService } from '../slots/slots.service';
 import { WarmupPlanEntity, WarmupPhase } from './warmup-plan.entity';
 import { getDataDir } from '../../common/storage';
 
@@ -27,7 +27,9 @@ export class StatusPostExecutor implements TaskExecutor {
   private readonly logger = new Logger(StatusPostExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · D11 · 走 SlotsService.postStatusText/postStatusMedia facade
+    // chromium 模式 → wa-web DOM · baileys 模式 → 老 sendStatus*
+    private readonly slots: SlotsService,
     @InjectRepository(AssetEntity) private readonly assetRepo: Repository<AssetEntity>,
     @InjectRepository(ScriptEntity) private readonly scriptRepo: Repository<ScriptEntity>,
     @InjectRepository(AccountSlotEntity) private readonly slotRepo: Repository<AccountSlotEntity>,
@@ -35,6 +37,7 @@ export class StatusPostExecutor implements TaskExecutor {
   ) {}
 
   async execute(ctx: TaskExecutorContext): Promise<TaskExecutorResult> {
+    // 2026-04-26 · D11 · 现已支持 chromium 模式 (走 SlotsService.postStatusText/Media facade)
     const plan = await this.planRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!plan) {
       return { success: false, errorCode: 'NO_PLAN', errorMessage: `account ${ctx.accountId} 无 warmup_plan` };
@@ -78,7 +81,8 @@ export class StatusPostExecutor implements TaskExecutor {
     const text = await this.pickStatusPostText();
     if (text) {
       try {
-        const res = await this.baileys.sendStatusText(slot.id, text);
+        // 2026-04-26 · D11 · 走 SlotsService.postStatusText facade · chromium-aware
+        const res = await this.slots.postStatusText(slot.id, text);
         ctx.log('layer3-text-sent', true, { len: text.length, waMessageId: res.waMessageId });
         return { success: true };
       } catch (err) {
@@ -126,7 +130,8 @@ export class StatusPostExecutor implements TaskExecutor {
       }
       const buf = fs.readFileSync(abs);
       const base64 = buf.toString('base64');
-      const res = await this.baileys.sendStatusMedia(slotId, 'image', base64, {
+      // 2026-04-26 · D11 · 走 SlotsService.postStatusMedia facade · chromium-aware
+      const res = await this.slots.postStatusMedia(slotId, 'image', base64, {
         mimeType: 'image/jpeg',
       });
       ctx.log(`${stage}-image-sent`, true, {

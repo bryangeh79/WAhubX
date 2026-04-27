@@ -130,6 +130,15 @@ export function BindExistingModal({ slotId, slotIndex, open, onClose, onSuccess,
       setQrDataUrl(null);
       return;
     }
+    // 2026-04-25 · 测试冻结期 · 修字段格式分流 (D8-3 留的洞 · D14 真收敛)
+    // Chromium 路径 · runtime 直接传完整 PNG data URL · 已经是渲好的图 · 不需再编码
+    // Baileys 路径 · 传 short QR token 字符串 · 用 QRCode lib 渲染成图
+    if (status.qr.startsWith('data:image/')) {
+      // 已经是渲染好的图 (Chromium 路径) · 直接用
+      setQrDataUrl(status.qr);
+      setBootError(null);
+      return;
+    }
     let cancelled = false;
     QRCode.toDataURL(status.qr, { margin: 1, width: 280 })
       .then((url) => { if (!cancelled) setQrDataUrl(url); })

@@ -23,8 +23,19 @@ export type RuntimeCommandType =
   | 'start-bind'
   | 'cancel-bind'
   | 'fetch-status'
+  | 'fetch-account-info'  // 2026-04-25 · 读 page 上 WA 账号信息 (phone/JID)
+  | 'bring-to-front'      // 2026-04-26 · P0.10 · 把 Chromium page 提到桌面前台 (人工接管入口)
+  | 'start-screencast'    // 2026-04-26 · P0.10++ · 启 CDP Page.startScreencast · 帧推 backend → 5173 canvas
+  | 'stop-screencast'     // 停 screencast · 释放 CDP 资源
+  | 'screencast-input'    // 反向输入事件 (mouse/key) · backend forward 到 runtime · CDP dispatch
   | 'send-text'
   | 'send-media'
+  // 2026-04-26 · D11 · WA Status / Profile 真功能 (chromium 路径)
+  | 'post-status-text'      // 发文字 status
+  | 'post-status-media'     // 发图/视频 status (caption 可选)
+  | 'browse-statuses'       // 浏览未读他人 status · runtime 直接 DOM 自驱
+  | 'react-status'          // 给某条 status 表情反应
+  | 'update-profile-about'  // 改个人签名/关于
   | 'shutdown';
 
 export interface RuntimeCommandBase {
@@ -51,6 +62,36 @@ export interface FetchStatusCommand extends RuntimeCommandBase {
   type: 'fetch-status';
 }
 
+export interface FetchAccountInfoCommand extends RuntimeCommandBase {
+  type: 'fetch-account-info';
+}
+
+// 2026-04-26 · P0.10 · bring page to foreground (人工接管入口)
+export interface BringToFrontCommand extends RuntimeCommandBase {
+  type: 'bring-to-front';
+}
+
+// 2026-04-26 · P0.10++ · CDP screencast 嵌入 5173
+export interface StartScreencastCommand extends RuntimeCommandBase {
+  type: 'start-screencast';
+  // 可选: 帧率 (fps) · webp 质量 · 默认 5 fps · 60% quality
+  fps?: number;
+  quality?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+}
+export interface StopScreencastCommand extends RuntimeCommandBase {
+  type: 'stop-screencast';
+}
+
+// 反向输入事件 · 5173 canvas mouse/key → backend → runtime → CDP Input.dispatch*
+export interface ScreencastInputCommand extends RuntimeCommandBase {
+  type: 'screencast-input';
+  event:
+    | { kind: 'mouse'; type: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel'; x: number; y: number; button?: 'left' | 'middle' | 'right' | 'none'; deltaX?: number; deltaY?: number; clickCount?: number }
+    | { kind: 'key'; type: 'keyDown' | 'keyUp' | 'char'; text?: string; key?: string; code?: string; modifiers?: number };
+}
+
 export interface SendTextCommand extends RuntimeCommandBase {
   type: 'send-text';
   to: string;
@@ -66,6 +107,45 @@ export interface SendMediaCommand extends RuntimeCommandBase {
   fileName?: string;
 }
 
+// ═══ 2026-04-26 · D11 · Status / Profile cmd 定义 ═══
+
+export interface PostStatusTextCommand extends RuntimeCommandBase {
+  type: 'post-status-text';
+  text: string;
+  /** 可选: 文字 status 背景色 (WA 提供色板 · 默认随机) */
+  bgColor?: string;
+}
+
+export interface PostStatusMediaCommand extends RuntimeCommandBase {
+  type: 'post-status-media';
+  /** 'image' | 'video' (voice/file 不能发 status) */
+  mediaType: 'image' | 'video';
+  mediaBase64: string;
+  caption?: string;
+  fileName?: string;
+}
+
+export interface BrowseStatusesCommand extends RuntimeCommandBase {
+  type: 'browse-statuses';
+  /** 最多看几条 (硬上限 50) */
+  maxItems: number;
+  /** 每条停留 (默认 3000ms · 模拟阅读) */
+  dwellMs: number;
+}
+
+export interface ReactStatusCommand extends RuntimeCommandBase {
+  type: 'react-status';
+  /** 最多对几条 status 点赞 (硬上限 5 · 防风控) */
+  maxItems: number;
+  /** emoji · 默认 '👍' */
+  emoji: string;
+}
+
+export interface UpdateProfileAboutCommand extends RuntimeCommandBase {
+  type: 'update-profile-about';
+  text: string;
+}
+
 export interface ShutdownCommand extends RuntimeCommandBase {
   type: 'shutdown';
 }
@@ -75,8 +155,18 @@ export type RuntimeCommand =
   | StartBindCommand
   | CancelBindCommand
   | FetchStatusCommand
+  | FetchAccountInfoCommand
+  | BringToFrontCommand
+  | StartScreencastCommand
+  | StopScreencastCommand
+  | ScreencastInputCommand
   | SendTextCommand
   | SendMediaCommand
+  | PostStatusTextCommand
+  | PostStatusMediaCommand
+  | BrowseStatusesCommand
+  | ReactStatusCommand
+  | UpdateProfileAboutCommand
   | ShutdownCommand;
 
 export interface RuntimeAck {
@@ -95,7 +185,8 @@ export type RuntimeEventType =
   | 'message-upsert'
   | 'heartbeat'
   | 'runtime-log'
-  | 'runtime-error';
+  | 'runtime-error'
+  | 'screencast-frame';     // 2026-04-26 · P0.10++ · 一帧 webp base64 · runtime 推 backend forward 5173
 
 export interface RuntimeEventBase {
   kind: 'event';
@@ -151,6 +242,20 @@ export interface RuntimeErrorEvent extends RuntimeEventBase {
   fatal: boolean;
 }
 
+// 2026-04-26 · P0.10++ · 一帧 webp base64 · 高频事件 (5 fps default)
+export interface ScreencastFrameEvent extends RuntimeEventBase {
+  type: 'screencast-frame';
+  /** webp / jpeg base64 (无 'data:image/...;base64,' 前缀) */
+  data: string;
+  /** mime · 'image/webp' or 'image/jpeg' */
+  mime: 'image/webp' | 'image/jpeg' | 'image/png';
+  /** 宽高 */
+  width: number;
+  height: number;
+  /** session id (sequence number for ack) */
+  sessionId: number;
+}
+
 export type RuntimeEvent =
   | QrEvent
   | BindStateEvent
@@ -159,7 +264,8 @@ export type RuntimeEvent =
   | MessageUpsertEvent
   | HeartbeatEvent
   | RuntimeLogEvent
-  | RuntimeErrorEvent;
+  | RuntimeErrorEvent
+  | ScreencastFrameEvent;
 
 export type RuntimeMessage = RuntimeCommand | RuntimeAck | RuntimeEvent;
 

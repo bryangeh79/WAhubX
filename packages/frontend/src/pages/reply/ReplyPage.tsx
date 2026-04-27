@@ -43,6 +43,14 @@ const CARD_STYLE = {
   border: '1px solid #eaeaea',
 };
 
+// 2026-04-26 · P0.9 · 只读 CS slot 信息 · 让用户清楚智能客服作用在哪个 slot
+interface CsSlotInfo {
+  slotIndex: number;
+  phoneNumber: string | null;
+  status: string;
+  online: boolean;
+}
+
 export function ReplyPage() {
   const { message, modal } = App.useApp();
   const navigate = useNavigate();
@@ -52,16 +60,31 @@ export function ReplyPage() {
   const [settings, setSettings] = useState<TenantReplySettings | null>(null);
   const [tab, setTab] = useState('overview');
   const [wizardOpen, setWizardOpen] = useState(false);
+  // 2026-04-26 · P0.9 · 当前 tenant 的 CS slot (智能客服硬绑这一个 · 后端 D11-3 锁)
+  const [csSlot, setCsSlot] = useState<CsSlotInfo | null>(null);
 
   const reload = async () => {
     setLoading(true);
     try {
-      const [listRes, settingsRes] = await Promise.all([
+      const [listRes, settingsRes, slotsRes] = await Promise.all([
         kbApi.list(),
         replySettingsApi.get(),
+        api.get<Array<{ slotIndex: number; status: string; role: string; phoneNumber: string | null; online?: boolean }>>('/slots'),
       ]);
       setKbs(listRes);
       setSettings(settingsRes);
+      // P0.9 · 找当前 tenant 的 customer_service slot
+      const cs = slotsRes.data.find((s) => s.role === 'customer_service');
+      setCsSlot(
+        cs
+          ? {
+              slotIndex: cs.slotIndex,
+              phoneNumber: cs.phoneNumber,
+              status: cs.status,
+              online: !!cs.online,
+            }
+          : null,
+      );
       // 选默认 KB · 没有就选第一个
       const defaultKb = listRes.find((k) => k.isDefault) ?? listRes[0] ?? null;
       if (defaultKb && activeKbId === null) setActiveKbId(defaultKb.id);
@@ -221,6 +244,32 @@ export function ReplyPage() {
           </Button>
         )}
       </div>
+
+      {/* 2026-04-26 · P0.9 · 强制绑 CS slot 的只读说明 · 防止用户以为可选 */}
+      <Alert
+        type={csSlot ? 'info' : 'warning'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={
+          csSlot ? (
+            <span>
+              <Text strong>智能客服适用槽位:</Text>{' '}
+              <Text code>客服号 #{csSlot.slotIndex}</Text>{' '}
+              · {csSlot.phoneNumber ?? <Text type="secondary">未拉到号</Text>}{' '}
+              · {csSlot.online ? <Text type="success">在线</Text> : <Text type="warning">离线</Text>}
+              {' · '}
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                所有 KB / FAQ / AI / 兜底设置均自动作用于此槽位 · 切换客服号请到"账号槽位"页改 role
+              </Text>
+            </span>
+          ) : (
+            <span>
+              <Text strong>当前租户没有客服号 (customer_service)</Text> ·
+              智能客服无法激活. 请到 "账号槽位" 把某 slot 的角色切为 客服号.
+            </span>
+          )
+        }
+      />
 
       {/* 无 KB · 引导创建 */}
       {noKbYet && !loading && (

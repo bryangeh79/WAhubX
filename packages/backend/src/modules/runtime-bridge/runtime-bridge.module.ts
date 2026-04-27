@@ -5,13 +5,15 @@
 
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
 import { RuntimeBridgeService } from './runtime-bridge.service';
 import { RuntimeBridgeController } from './runtime-bridge.controller';
+import { ScreencastGateway } from './screencast.gateway';
 
 @Module({
-  imports: [ConfigModule],
+  imports: [ConfigModule, JwtModule.register({})],
   controllers: [RuntimeBridgeController],
-  providers: [RuntimeBridgeService],
+  providers: [RuntimeBridgeService, ScreencastGateway],
   exports: [RuntimeBridgeService],
 })
 export class RuntimeBridgeModule {}

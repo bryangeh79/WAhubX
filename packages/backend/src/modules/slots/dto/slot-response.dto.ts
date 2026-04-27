@@ -20,6 +20,11 @@ export class SlotResponseDto {
   profilePath!: string | null;
   createdAt!: Date;
 
+  // 2026-04-25 · P1.6 · 当前 runtime 模式 (前端用来判断哪些字段可信 · 哪些 chromium 路径还没接 · 应 hide)
+  // 'baileys' · 老路径 · 全部字段可信
+  // 'chromium' · 新路径 · warmup* / tasksExecuted / contactsCount / channelsCount / groupsCount / waNickname 暂未接 · 前端 hide
+  runtime!: 'baileys' | 'chromium';
+
   // 2026-04-21 · 卡片信息增强
   // Warmup 进度
   warmupStartedAt!: string | null;  // 养号开始时间 ISO

@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
 import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
 // 2026-04-22 · 批量刷 status · 真实装 · 从 StatusCache 捞 · 快速 readMessages
@@ -16,7 +17,9 @@ export class StatusBrowseBulkExecutor implements TaskExecutor {
   private readonly logger = new Logger(StatusBrowseBulkExecutor.name);
 
   constructor(
+    // 2026-04-26 · Class A · readMessages 是 baileys-only · isOnline 走 facade · chromium 早 skip
     private readonly baileys: BaileysService,
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -33,7 +36,21 @@ export class StatusBrowseBulkExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    if (!(await this.slots.isOnline(slot.id))) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+
+    // 2026-04-26 · D11 · chromium 模式走 wa-web facade · 一气浏览 N 条 (跟 StatusBrowseExecutor 对齐)
+    if (this.slots.getCurrentMode() === 'chromium') {
+      const dwellMs = Math.max(dwellMinMs, 2000);
+      try {
+        const r = await this.slots.browseStatuses(slot.id, { maxItems, dwellMs });
+        ctx.log('chromium-bulk-browse-done', true, { viewed: r.viewed, total: maxItems });
+        return { success: true, errorMessage: `批量浏览 ${r.viewed} 条` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.log('chromium-bulk-browse-failed', false, { error: msg });
+        return { success: false, errorCode: 'BROWSE_FAILED', errorMessage: msg };
+      }
+    }
 
     const cache = this.baileys.getStatusCache();
     if (!cache) {

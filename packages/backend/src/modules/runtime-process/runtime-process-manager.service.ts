@@ -228,6 +228,9 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
 
     // 构造 env (Codex 实现建议: executable + args 分开 · 不拼 command string)
     const childEnv = this.buildChildEnv(cfg);
+    // 2026-04-26 · P0.10++ ship · 全 slot headless (无桌面 chrome 窗口)
+    // 接管走 P0.10++ CDP screencast · canvas in 5173 · 不再依赖 bringToFront 外部窗口
+    // 用户不会再误关桌面 chrome (因为根本不显示)
 
     const handle = this.upsertHandle(slotId);
     handle.state.status = 'starting';
@@ -492,7 +495,11 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
     if (cfg.soakMode) env.SOAK_MODE = 'true';
     if (!cfg.humanBehaviorEnabled) env.HUMAN_BEHAVIOR_ENABLED = 'false';
     if (!cfg.qrLiveServerEnabled) env.QR_LIVE_SERVER = 'false';
-    env.QR_LIVE_PORT = String(cfg.qrLiveServerPort);
+    // 2026-04-26 · multi-slot 修 EADDRINUSE 9701 · QR live server 端口按 slotIndex 偏移
+    // base port = cfg.qrLiveServerPort (默认 9701) · slotIndex=1→9701, 2→9702, 3→9703...
+    // 不动 cfg.qrLiveServerPort 字段 (那是 base port · 用户可全局覆盖)
+    const perSlotQrPort = cfg.qrLiveServerPort + Math.max(0, cfg.slotIndex - 1);
+    env.QR_LIVE_PORT = String(perSlotQrPort);
     return env;
   }
 

@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../tasks/executor.interface';
 import { BaileysService } from '../baileys/baileys.service';
+import { SlotsService } from '../slots/slots.service';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 
 // 2026-04-22 · status_browse 真实装
@@ -16,7 +17,9 @@ export class StatusBrowseExecutor implements TaskExecutor {
   private readonly logger = new Logger(StatusBrowseExecutor.name);
 
   constructor(
+    // 2026-04-26 · Class B · getSocket / getStatusCache 是 baileys-only · chromium 早 skip
     private readonly baileys: BaileysService,
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -27,13 +30,28 @@ export class StatusBrowseExecutor implements TaskExecutor {
       perItemDwellSec?: number;
       maxItems?: number;
     };
+    const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
+    if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
+
+    // 2026-04-26 · D11 · chromium 模式走 wa-web facade · 一气浏览 N 条
+    if (this.slots.getCurrentMode() === 'chromium') {
+      const maxItems = Math.min(payload.maxItems ?? 50, 100);
+      const dwellMs = Math.max((payload.perItemDwellSec ?? 8) * 1000, 2000);
+      try {
+        const r = await this.slots.browseStatuses(slot.id, { maxItems, dwellMs });
+        ctx.log('chromium-status-browse-done', true, { viewed: r.viewed, total: maxItems });
+        return { success: true, errorMessage: `浏览 ${r.viewed} 条 status` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.log('chromium-status-browse-failed', false, { error: msg });
+        return { success: false, errorCode: 'BROWSE_FAILED', errorMessage: msg };
+      }
+    }
+    // baileys 老路径 ↓
     const durationMs = Math.min(payload.durationMinutes ?? 10, 60) * 60_000;
     const dwellMinMs = Math.max((payload.perItemDwellSec ?? 8) * 1000, 2000);
     const dwellMaxMs = dwellMinMs * 2;
     const maxItems = Math.min(payload.maxItems ?? 50, 100);
-
-    const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
-    if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
     const sock = this.baileys.getSocket(slot.id);
     if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
 

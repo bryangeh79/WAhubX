@@ -32,6 +32,10 @@ import {
   sendMediaInOpenChat,
 } from './wa-web/actions';
 import { installInboundWatcher } from './wa-web/inbound-watcher';
+import { enterChat, readLatestMessages, exitChat, type HighFidelityMessage } from './wa-web/chat-reader';
+// 2026-04-26 · D11 · WA Status / Profile actions
+import { postStatusText, postStatusMedia, browseStatuses, reactStatuses } from './wa-web/status';
+import { updateAbout } from './wa-web/profile';
 import type {
   RuntimeCommand,
   QrEvent,
@@ -200,11 +204,16 @@ async function main() {
     }
   }
 
-  log.info({ launchArgs, userDataDir: profileDir }, 'launching chromium');
+  // 2026-04-26 · P0.10 · CS slot 用 headed (有桌面窗口) · 让 bringToFront 真生效
+  // RUNTIME_HEADED env 由 backend buildChildEnv 按 slot.role 设
+  // CS (always-on · 操作员人工接管) → headed
+  // broadcast (批跑 · 无人值守) → headless 节省资源
+  const headed = process.env.RUNTIME_HEADED === 'true';
+  log.info({ launchArgs, userDataDir: profileDir, headed }, 'launching chromium');
 
   const browser = await puppeteer.launch({
     executablePath: PUPPETEER_EXECUTABLE_PATH,
-    headless: true,
+    headless: !headed,
     args: launchArgs,
     userDataDir: profileDir, // ← 必须顶层传 · args 里加 --user-data-dir 会被 puppeteer 忽略
     defaultViewport: { width: 1280, height: 800 },
@@ -463,27 +472,132 @@ async function main() {
   });
 
   // 2026-04-25 · D10 · inbound watcher · 监听新消息推 message-upsert event
-  // 仅 connected 后启 · uninstall 在 shutdown
+  // 2026-04-26 · P0.11 · onIncoming 不再直接 emit hint · 改塞 candidate queue · worker 进 chat 拿真消息
   let inboundUninstall: (() => Promise<void>) | null = null;
+
+  // P0.11 · candidate queue + worker · 串行进 chat 读真消息
+  // dedupe by waMessageId (60s 窗口) · 防同消息多次入库
+  const candidateQueue: Array<{
+    rowDataId: string;
+    fallbackHint: unknown; // 老 hint · chat-reader 失败时退化用
+    enqueuedAt: number;
+  }> = [];
+  const recentSeenMessageIds = new Map<string, number>(); // wa_message_id → ts
+  let chatReaderBusy = false;
+  // 节流: 同 chat 30s 内只进 1 次 (dedupe row data-id)
+  const recentEnteredChats = new Map<string, number>();
+
+  const drainCandidateQueue = async (): Promise<void> => {
+    if (chatReaderBusy) return;
+    chatReaderBusy = true;
+    try {
+      while (candidateQueue.length > 0) {
+        const cand = candidateQueue.shift()!;
+        // 节流检查: 同 chat 30s 内 skip
+        const lastEnter = recentEnteredChats.get(cand.rowDataId) ?? 0;
+        if (Date.now() - lastEnter < 30_000) {
+          log.debug?.({ rowDataId: cand.rowDataId }, 'P0.11 同 chat 30s 内 skip');
+          continue;
+        }
+        recentEnteredChats.set(cand.rowDataId, Date.now());
+
+        // P0.11-4 · 接管中的 chat 跳过 (避免 puppeteer 抢操作员的鼠标)
+        // 简化: 跳过判断 · 用 page.evaluate 看 chat-list row 是否当前被打开 (但不够精准)
+        // 实际方案: 通过 backend 查 takeover-lock · 但这要 cmd 双向 · 暂留 P0.11-4 完整版
+        // 先粗暴: P0.11-3 阶段直接进 · P0.11-4 再加 backend 互斥查询
+
+        // 进 chat
+        const enter = await enterChat(page, cand.rowDataId, log);
+        if (!enter.ok) {
+          log.warn(
+            { rowDataId: cand.rowDataId, err: enter.error },
+            'P0.11 enterChat 失败 · fallback 用老 hint emit (低保真)',
+          );
+          // fallback: emit 老 hint (保留兼容)
+          if (wsClient) {
+            wsClient.emitEvent({
+              kind: 'event',
+              type: 'message-upsert',
+              slotId: slotIdNum,
+              ts: Date.now(),
+              messages: [cand.fallbackHint],
+            } as Parameters<typeof wsClient.emitEvent>[0]);
+          }
+          continue;
+        }
+        // 读真消息
+        let messages: HighFidelityMessage[] = [];
+        try {
+          messages = await readLatestMessages(page, log, { count: 5 });
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : err }, 'P0.11 readLatestMessages 失败');
+        }
+        // dedupe 已见过的 messageId
+        const fresh = messages.filter((m) => {
+          const seen = recentSeenMessageIds.get(m.waMessageId);
+          if (seen && Date.now() - seen < 60_000) return false;
+          recentSeenMessageIds.set(m.waMessageId, Date.now());
+          return true;
+        });
+        // GC seen map
+        if (recentSeenMessageIds.size > 500) {
+          const cutoff = Date.now() - 5 * 60_000;
+          for (const [k, t] of recentSeenMessageIds.entries()) {
+            if (t < cutoff) recentSeenMessageIds.delete(k);
+          }
+        }
+        // 退 chat
+        await exitChat(page, log);
+
+        // emit 真消息 (即使空也 emit · 让 backend 知道处理过)
+        if (fresh.length > 0 && wsClient) {
+          // 加 schemaVersion 让 backend 区分老 hint vs 高保真
+          const payload = fresh.map((m) => ({ ...m, schemaVersion: 'p0.11-hifi' }));
+          wsClient.emitEvent({
+            kind: 'event',
+            type: 'message-upsert',
+            slotId: slotIdNum,
+            ts: Date.now(),
+            messages: payload as unknown[],
+          } as Parameters<typeof wsClient.emitEvent>[0]);
+          log.info({ count: fresh.length, rowDataId: cand.rowDataId }, 'P0.11 emit 高保真 messages');
+        }
+      }
+    } finally {
+      chatReaderBusy = false;
+    }
+  };
+
   const installInboundWatcherIfNeeded = async (): Promise<void> => {
     if (inboundUninstall) return; // 已装
     try {
       const { uninstall } = await installInboundWatcher(page, {
         log,
         onIncoming: (hint) => {
-          // 推 message-upsert event · backend 转给业务模块
+          // P0.11 · 不再直接 emit · 改塞 queue · worker 进 chat 拿真消息
           if (!wsClient) return;
-          wsClient.emitEvent({
-            kind: 'event',
-            type: 'message-upsert',
-            slotId: slotIdNum,
-            ts: Date.now(),
-            messages: [hint as unknown],
-          } as Parameters<typeof wsClient.emitEvent>[0]);
+          const h = hint as { rowDataId?: string | null };
+          if (h.rowDataId) {
+            candidateQueue.push({
+              rowDataId: h.rowDataId,
+              fallbackHint: hint,
+              enqueuedAt: Date.now(),
+            });
+            void drainCandidateQueue();
+          } else {
+            // 没 rowDataId · 直接走老 hint emit fallback
+            wsClient.emitEvent({
+              kind: 'event',
+              type: 'message-upsert',
+              slotId: slotIdNum,
+              ts: Date.now(),
+              messages: [hint as unknown],
+            } as Parameters<typeof wsClient.emitEvent>[0]);
+          }
         },
       });
       inboundUninstall = uninstall;
-      log.info('D10 inbound watcher installed');
+      log.info('D10 inbound watcher installed · P0.11 高保真 enabled');
     } catch (err) {
       log.warn(
         { err: err instanceof Error ? err.message : err },
@@ -568,6 +682,9 @@ async function main() {
       emitConnectionOpen(detectResult.selector ?? '[data-testid="chat-list"]');
       startIdleSchedulerIfNeeded();
       void installInboundWatcherIfNeeded();
+      // 2026-04-25 · P1.5 · 普通模式也启 watchdog · 用户测试期间也要能看到 WA 踢号
+      // (老逻辑只在 SOAK_MODE · 单次绑测 / T2.x 必无掉线感知)
+      startChatListWatchdog();
       return { outcome: 'rehydrated' };
     }
 
@@ -629,10 +746,8 @@ async function main() {
       void installInboundWatcherIfNeeded();
       // 2026-04-25 · D8-3 · WA logged-out 监测 · 周期检查 chat-list 在不在
       // 真用户被踢: chat-list 消失 · 出现 unsupported / qr / loading splash · 任一都不是 chat-list
-      // SOAK_MODE 下才启 (D6 一次性测不需要 · 跑完即关)
-      if (SOAK_MODE) {
-        startChatListWatchdog();
-      }
+      // 2026-04-25 · P1.5 · 解除 SOAK_MODE 门槛 · 普通模式也启 · 让用户看到 "号被踢"
+      startChatListWatchdog();
       return { outcome: 'connected' };
     }
 
@@ -641,6 +756,107 @@ async function main() {
   }
 
   // ─── D8-2 · WS 命令 handler (WS 模式才生效) ─────────────────────
+
+  // 2026-04-25 · P0.5 + P0.6 · 合并实现 · per-slot send-* 串行 + 全链路硬超时
+  //
+  // 关键 (上轮经验):
+  //   1. mutex 只能在 inner promise 真 settle 后才释放 · 否则 hard-timeout 返 fail 后 inner 在背景跑
+  //      跟下一个 cmd 在 page 上互殴 → render crash
+  //   2. hard-timeout 提早返调用方 (let backend 拿到 ack) · 但 mutex 保持锁 · 等 inner settle 再放
+  //   3. inner settle 等待也加 cap (90s) · 防真 hung 卡死所有后续 cmd
+  //
+  // 范围: send-text / send-media · 同 slot 内串行 · 进程内 (runtime per-slot 一个 process)
+
+  let sendMutex: Promise<void> = Promise.resolve();
+  const SEND_HARD_TIMEOUT_MS = 25_000;
+  const SEND_INNER_SETTLE_MAX_MS = 90_000; // inner truly hung 时 mutex 等多久强放
+
+  const withSendMutexAndHardTimeout = async <T extends { ok: boolean; error?: string }>(
+    label: string,
+    inner: () => Promise<T>,
+    failResult: () => T,
+  ): Promise<T> => {
+    // ── 排队 ────────────────────────────
+    const prev = sendMutex;
+    let release: () => void = () => {};
+    sendMutex = new Promise<void>((res) => {
+      release = res;
+    });
+    const waitedSince = Date.now();
+    await prev.catch(() => {});
+    const queueWaitMs = Date.now() - waitedSince;
+    if (queueWaitMs > 100) {
+      log.info({ label, queueWaitMs }, 'P0.6 mutex · 排队等到 · 进 page');
+    }
+
+    // ── 启动 inner + 硬超时 race ────────
+    const innerP: Promise<T> = inner().catch((err): T => {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ label, err: msg }, 'P0.5 inner 抛异常 · 转为 ok=false');
+      return { ok: false, error: `${label} threw: ${msg}` } as T;
+    });
+    let raceResolved = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const timeoutSignal = new Promise<{ kind: 'timeout' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), SEND_HARD_TIMEOUT_MS);
+    });
+    const innerSignal = innerP.then((r) => ({ kind: 'inner' as const, result: r }));
+
+    const winner = await Promise.race([innerSignal, timeoutSignal]);
+    if (timer) clearTimeout(timer);
+
+    if (winner.kind === 'inner') {
+      raceResolved = true;
+      release();
+      return winner.result;
+    }
+
+    // ── 硬超时分支 ───────────────────────
+    log.error(
+      { label, timeoutMs: SEND_HARD_TIMEOUT_MS },
+      `P0.5 全链路硬超时 (${label.toUpperCase().replace(/-/g, '_')}_TIMEOUT) · 调用方先收 fail · mutex 等 inner settle 再放 (max ${SEND_INNER_SETTLE_MAX_MS}ms)`,
+    );
+    // page 恢复 · 不阻塞 · Escape 关 modal · stop 拦载入
+    void (async () => {
+      try {
+        await page.keyboard.press('Escape').catch(() => {});
+      } catch {
+        /* ignore */
+      }
+      try {
+        await page.evaluate(() => (window as Window).stop?.()).catch(() => {});
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    // ── 关键: mutex 不立即放 · 等 inner settle (有 cap) 再放 ──
+    // 这一步异步跑 · 不阻塞调用方拿到 fail
+    void (async () => {
+      try {
+        await Promise.race([
+          innerP.then(
+            (r) => {
+              if (!raceResolved) {
+                log.warn(
+                  { label, succeededAfterTimeout: r.ok, error: r.error },
+                  'P0.5 inner 在硬超时后 settle · mutex 释放',
+                );
+              }
+            },
+            () => {},
+          ),
+          new Promise<void>((res) => setTimeout(res, SEND_INNER_SETTLE_MAX_MS)),
+        ]);
+      } finally {
+        release();
+      }
+    })();
+
+    return failResult();
+  };
+
   if (wsClient) {
     let runningPromise: Promise<unknown> | null = null;
     wsClient.setOnCommand(async (cmd: RuntimeCommand) => {
@@ -655,6 +871,8 @@ async function main() {
           return { ok: false, error: `bind already in progress · current=${fsm.state}` };
         }
         fsm.resetIfTerminal();
+        // 2026-04-25 · P0.4 · 上轮 abortController 清掉 · 防止"上次取消信号"穿越本轮
+        bindAbortController = null;
         // 异步启动 · 立即 ACK · 流程通过事件流回报
         runningPromise = runBindFlow()
           .then((r) => {
@@ -662,6 +880,8 @@ async function main() {
             // terminal state 让 fsm 准备下一轮
             fsm.resetIfTerminal();
             runningPromise = null;
+            // P0.4 · 本轮结束 · 清 controller (任何 outcome)
+            bindAbortController = null;
           })
           .catch((err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -669,12 +889,14 @@ async function main() {
             emitBindState('failed', msg);
             fsm.resetIfTerminal();
             runningPromise = null;
+            bindAbortController = null;
           });
         return { ok: true, data: { state: 'starting' } };
       }
       if (cmd.type === 'cancel-bind') {
         if (!fsm.isInProgress()) {
-          return { ok: false, error: 'no bind in progress' };
+          // 2026-04-25 · P0.3 · 没在跑也不抛 · 业务层视作幂等返
+          return { ok: true, data: { wasInState: fsm.state, noop: true } };
         }
         bindAbortController?.abort();
         return { ok: true, data: { wasInState: fsm.state } };
@@ -689,76 +911,333 @@ async function main() {
           },
         };
       }
+      // 2026-04-25 · 测试冻结期 · fetch-account-info · 读 WA Web page 上的真 phone/JID
+      if (cmd.type === 'fetch-account-info') {
+        if (g_state !== 'chat-list') {
+          return { ok: false, error: `not in chat-list (current: ${g_state})` };
+        }
+        try {
+          const info = await page.evaluate(() => {
+            // 多策略读 phone
+            const result: { phone: string | null; source: string; rawWid?: string } = {
+              phone: null,
+              source: 'none',
+            };
+            // WA wid 格式: <phone>:<deviceId>@<server>
+            // 例: "60186888168:9@c.us" · phone=60186888168 · device=9 · server=c.us
+            // device 部分可能没 (主设备 wid 无 :)
+            const WID_RE = /(\d{8,15})(?::\d+)?@(c\.us|s\.whatsapp\.net|lid)/;
+            // 策略 1: localStorage 'last-wid' (modern WA Web)
+            try {
+              const lastWid = localStorage.getItem('last-wid') || localStorage.getItem('last-wid-md');
+              if (lastWid) {
+                result.rawWid = lastWid;
+                const cleaned = lastWid.replace(/^"|"$/g, '');
+                const m = cleaned.match(WID_RE);
+                if (m) {
+                  result.phone = m[1];
+                  result.source = 'last-wid';
+                  return result;
+                }
+              }
+            } catch {
+              /* ignore */
+            }
+            // 策略 2: 扫所有 localStorage key · 找含 phone-like 数字 + @c.us/@s.whatsapp.net
+            try {
+              for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k) continue;
+                const v = localStorage.getItem(k) || '';
+                const m = v.match(WID_RE);
+                if (m) {
+                  result.phone = m[1];
+                  result.source = `localStorage:${k}`;
+                  result.rawWid = m[0];
+                  return result;
+                }
+              }
+            } catch {
+              /* ignore */
+            }
+            return result;
+          });
+          log.info(info, 'D-fetch-account-info result');
+          return { ok: true, data: info };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      // 2026-04-26 · P0.10++ · CDP screencast 嵌入 5173
+      if (cmd.type === 'start-screencast') {
+        try {
+          const cdp = await page.target().createCDPSession();
+          // attach frame ack handler
+          cdp.on('Page.screencastFrame', async (params: {
+            data: string;
+            metadata: { offsetTop: number; pageScaleFactor: number; deviceWidth: number; deviceHeight: number; scrollOffsetX: number; scrollOffsetY: number; timestamp: number };
+            sessionId: number;
+          }) => {
+            // emit frame
+            if (wsClient) {
+              wsClient.emitEvent({
+                kind: 'event',
+                type: 'screencast-frame',
+                slotId: slotIdNum,
+                ts: Date.now(),
+                data: params.data,
+                mime: 'image/jpeg',
+                width: params.metadata.deviceWidth,
+                height: params.metadata.deviceHeight,
+                sessionId: params.sessionId,
+              } as Parameters<typeof wsClient.emitEvent>[0]);
+            }
+            // ack frame · 让 CDP 继续推
+            try {
+              await cdp.send('Page.screencastFrameAck', { sessionId: params.sessionId });
+            } catch {
+              /* CDP closed · 静默 */
+            }
+          });
+          // 2026-04-26 · P0.10++ fix 模糊
+          //   quality 60 → 85 · maxW/H 1024×768 → 1280×800 (= defaultViewport · 1:1 不缩)
+          //   maxWidth 0 表示不缩 · 用 chromium viewport 自然尺寸
+          await cdp.send('Page.startScreencast', {
+            format: 'jpeg',
+            quality: cmd.quality ?? 85,
+            maxWidth: cmd.maxWidth ?? 1280,
+            maxHeight: cmd.maxHeight ?? 800,
+            everyNthFrame: 1,
+          });
+          // 存 cdp 供 stop 用
+          (globalThis as { __screencastCdp?: unknown }).__screencastCdp = cdp;
+          log.info('P0.10++ Page.startScreencast 已启');
+          return { ok: true, data: { started: true } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error({ err: msg }, 'P0.10++ start-screencast 失败');
+          return { ok: false, error: msg };
+        }
+      }
+      if (cmd.type === 'stop-screencast') {
+        try {
+          const cdp = (globalThis as { __screencastCdp?: { send: (m: string) => Promise<unknown>; detach: () => Promise<void> } }).__screencastCdp;
+          if (cdp) {
+            await cdp.send('Page.stopScreencast').catch(() => {});
+            await cdp.detach().catch(() => {});
+            (globalThis as { __screencastCdp?: unknown }).__screencastCdp = undefined;
+          }
+          log.info('P0.10++ stop-screencast 已停');
+          return { ok: true, data: { stopped: true } };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (cmd.type === 'screencast-input') {
+        try {
+          const cdp = (globalThis as { __screencastCdp?: { send: (m: string, p?: unknown) => Promise<unknown> } }).__screencastCdp;
+          if (!cdp) return { ok: false, error: 'screencast not started' };
+          const e = cmd.event;
+          if (e.kind === 'mouse') {
+            await cdp.send('Input.dispatchMouseEvent', {
+              type: e.type,
+              x: e.x,
+              y: e.y,
+              button: e.button ?? 'left',
+              deltaX: e.deltaX ?? 0,
+              deltaY: e.deltaY ?? 0,
+              clickCount: e.clickCount ?? 1,
+            });
+          } else if (e.kind === 'key') {
+            await cdp.send('Input.dispatchKeyEvent', {
+              type: e.type,
+              text: e.text,
+              key: e.key,
+              code: e.code,
+              modifiers: e.modifiers ?? 0,
+            });
+          }
+          return { ok: true, data: { dispatched: true } };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      // 2026-04-26 · P0.10 · 人工接管入口 · 把 Chromium page 提到桌面前台
+      if (cmd.type === 'bring-to-front') {
+        try {
+          await page.bringToFront();
+          log.info('P0.10 page.bringToFront · 接管窗口已提前台');
+          return { ok: true, data: { broughtToFront: true } };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn({ err: msg }, 'P0.10 bringToFront 失败');
+          return { ok: false, error: `bringToFront failed: ${msg}` };
+        }
+      }
       if (cmd.type === 'shutdown') {
         // 优雅关 · 不立刻死 · 等 ACK 发出去再退
         setTimeout(() => void shutdown('cmd-shutdown'), 200);
         return { ok: true, data: { willShutdown: true } };
       }
       // 2026-04-25 · D10 W2 · sendText 实装
+      // 2026-04-25 · P0.5/P0.6 · 包 mutex+硬超时 · 调用方 25s 拿 fail · 但 inner 跑完才放 mutex
       if (cmd.type === 'send-text') {
-        if (g_state !== 'chat-list') {
-          return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
-        }
-        try {
-          const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
-          if (!openR.ok) {
-            return { ok: false, error: `open chat failed: ${openR.error}` };
-          }
-          const sim = new HumanBehaviorSimulator(page);
-          const sendR = await sendTextInOpenChat(page, cmd.text, log, {
-            simulator: sim,
-            diagnosticsDir,
-          });
-          if (!sendR.ok) {
-            return { ok: false, error: sendR.error };
-          }
-          return { ok: true, data: { messageId: sendR.pseudoMessageId } };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return { ok: false, error: `send-text threw: ${msg}` };
-        }
+        return withSendMutexAndHardTimeout(
+          'send-text',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
+            }
+            const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
+            if (!openR.ok) {
+              return { ok: false, error: `open chat failed: ${openR.error}` };
+            }
+            const sim = new HumanBehaviorSimulator(page);
+            const sendR = await sendTextInOpenChat(page, cmd.text, log, {
+              simulator: sim,
+              diagnosticsDir,
+            });
+            if (!sendR.ok) return { ok: false, error: sendR.error };
+            return { ok: true, data: { messageId: sendR.pseudoMessageId } };
+          },
+          () => ({
+            ok: false,
+            error: `SEND_TEXT_TIMEOUT (entire send-text flow > ${SEND_HARD_TIMEOUT_MS}ms · runtime 强制 abort)`,
+          }),
+        );
       }
       // 2026-04-25 · D10 W2 · sendMedia 实装 (image/file)
       if (cmd.type === 'send-media') {
-        if (g_state !== 'chat-list') {
-          return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
-        }
-        const supported = cmd.mediaType === 'image' || cmd.mediaType === 'file';
-        if (!supported) {
-          return {
+        return withSendMutexAndHardTimeout(
+          'send-media',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
+            }
+            const supported = cmd.mediaType === 'image' || cmd.mediaType === 'file';
+            if (!supported) {
+              return {
+                ok: false,
+                error: `D10 only supports image/file · got: ${cmd.mediaType}`,
+              };
+            }
+            const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
+            if (!openR.ok) {
+              return { ok: false, error: `open chat failed: ${openR.error}` };
+            }
+            const sendR = await sendMediaInOpenChat(
+              page,
+              cmd.mediaBase64,
+              {
+                caption: cmd.caption,
+                fileName: cmd.fileName,
+                kind: cmd.mediaType === 'image' ? 'image' : 'file',
+                diagnosticsDir,
+              },
+              log,
+            );
+            if (!sendR.ok) return { ok: false, error: sendR.error };
+            return { ok: true, data: { messageId: sendR.pseudoMessageId } };
+          },
+          () => ({
             ok: false,
-            error: `D10 only supports image/file · got: ${cmd.mediaType} (W2+ extends video/voice)`,
-          };
-        }
-        try {
-          const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
-          if (!openR.ok) {
-            return { ok: false, error: `open chat failed: ${openR.error}` };
-          }
-          const sendR = await sendMediaInOpenChat(
-            page,
-            cmd.mediaBase64,
-            {
-              caption: cmd.caption,
-              fileName: cmd.fileName,
-              kind: cmd.mediaType === 'image' ? 'image' : 'file',
-              diagnosticsDir,
-            },
-            log,
-          );
-          if (!sendR.ok) {
-            return { ok: false, error: sendR.error };
-          }
-          return { ok: true, data: { messageId: sendR.pseudoMessageId } };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return { ok: false, error: `send-media threw: ${msg}` };
-        }
+            error: `SEND_MEDIA_TIMEOUT (entire send-media flow > ${SEND_HARD_TIMEOUT_MS}ms · runtime 强制 abort)`,
+          }),
+        );
+      }
+      // 2026-04-26 · D11 · post-status-text · 发文字 status
+      if (cmd.type === 'post-status-text') {
+        return withSendMutexAndHardTimeout(
+          'post-status-text',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot post status · not in chat-list (current: ${g_state})` };
+            }
+            const r = await postStatusText(page, cmd.text, log, diagnosticsDir);
+            if (!r.ok) return { ok: false, error: r.error };
+            return { ok: true, data: { messageId: r.pseudoMessageId } };
+          },
+          () => ({ ok: false, error: `POST_STATUS_TEXT_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+        );
+      }
+      // 2026-04-26 · D11 · post-status-media · 发图/视频 status
+      if (cmd.type === 'post-status-media') {
+        return withSendMutexAndHardTimeout(
+          'post-status-media',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot post status media · not in chat-list (current: ${g_state})` };
+            }
+            const r = await postStatusMedia(
+              page,
+              cmd.mediaBase64,
+              cmd.mediaType,
+              { caption: cmd.caption, fileName: cmd.fileName, diagnosticsDir },
+              log,
+            );
+            if (!r.ok) return { ok: false, error: r.error };
+            return { ok: true, data: { messageId: r.pseudoMessageId } };
+          },
+          () => ({ ok: false, error: `POST_STATUS_MEDIA_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+        );
+      }
+      // 2026-04-26 · D11 · browse-statuses · 浏览未读他人 status
+      if (cmd.type === 'browse-statuses') {
+        return withSendMutexAndHardTimeout(
+          'browse-statuses',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot browse status · not in chat-list (current: ${g_state})` };
+            }
+            const r = await browseStatuses(
+              page,
+              { maxItems: cmd.maxItems, dwellMs: cmd.dwellMs, diagnosticsDir },
+              log,
+            );
+            if (!r.ok) return { ok: false, error: r.error };
+            return { ok: true, data: { viewed: r.viewed } };
+          },
+          () => ({ ok: false, error: `BROWSE_STATUSES_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+        );
+      }
+      // 2026-04-26 · D11 · react-status · 给 N 条 status 点赞
+      if (cmd.type === 'react-status') {
+        return withSendMutexAndHardTimeout(
+          'react-status',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot react status · not in chat-list (current: ${g_state})` };
+            }
+            const r = await reactStatuses(
+              page,
+              { maxItems: cmd.maxItems, emoji: cmd.emoji, diagnosticsDir },
+              log,
+            );
+            if (!r.ok) return { ok: false, error: r.error };
+            return { ok: true, data: { reacted: r.reacted } };
+          },
+          () => ({ ok: false, error: `REACT_STATUS_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+        );
+      }
+      // 2026-04-26 · D11 · update-profile-about · 改个人签名
+      if (cmd.type === 'update-profile-about') {
+        return withSendMutexAndHardTimeout(
+          'update-profile-about',
+          async () => {
+            if (g_state !== 'chat-list') {
+              return { ok: false, error: `cannot update profile · not in chat-list (current: ${g_state})` };
+            }
+            const r = await updateAbout(page, cmd.text, log, diagnosticsDir);
+            if (!r.ok) return { ok: false, error: r.error };
+            return { ok: true };
+          },
+          () => ({ ok: false, error: `UPDATE_PROFILE_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+        );
       }
       // 所有合法分支都覆盖 · 这里仅防御性兜底
       return { ok: false, error: `cmd type "${(cmd as { type?: string }).type ?? 'unknown'}" not implemented` };
     });
-    log.info('D10 · WS command handlers registered (init/start-bind/cancel-bind/fetch-status/send-text/send-media/shutdown)');
+    log.info('D11 · WS command handlers registered (incl. post-status-text/media · browse-statuses · react-status · update-profile-about)');
   }
 
   // ─── 启动行为分流 ───────────────────────────────────────────────

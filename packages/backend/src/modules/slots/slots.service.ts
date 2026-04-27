@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   forwardRef,
@@ -10,13 +11,17 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import * as fs from 'node:fs';
+import { OnEvent } from '@nestjs/event-emitter';
 import { AccountSlotEntity, AccountSlotStatus, AccountSlotRole } from './account-slot.entity';
 import { WaAccountEntity } from './wa-account.entity';
 import { TenantEntity } from '../tenants/tenant.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { BaileysService } from '../baileys/baileys.service';
+import { MessageDirection, MessageType } from '../baileys/chat-message.entity';
 import { SlotRuntimeRegistry } from '../slot-runtime/slot-runtime.registry';
+import { RuntimeBridgeService } from '../runtime-bridge/runtime-bridge.service';
+import { RuntimeProcessManagerService } from '../runtime-process/runtime-process-manager.service';
 import { getSlotDir } from '../../common/storage';
 import { ensureFingerprint } from '../../common/fingerprint';
 import { writeProxyConf, type ProxyDescriptor } from '../../common/proxy-config';
@@ -66,30 +71,710 @@ export class SlotsService {
     private readonly dataSource: DataSource,
     // 2026-04-25 · D9-4 · 通过 Registry 选 runtime 实装 · 替 D8-3 直接 inject
     private readonly runtimes: SlotRuntimeRegistry,
+    // 2026-04-25 · 测试冻结期 · connected 后调 fetch-account-info 拿真 phone
+    private readonly runtimeBridge: RuntimeBridgeService,
+    // 2026-04-26 · P0.10 · bringToFront 自愈需要 stop+respawn runtime
+    private readonly runtimeProcess: RuntimeProcessManagerService,
   ) {}
 
   // 2026-04-25 · D9-4 · bind facade · 走 Registry · backend 不再到处写 if chromium / if baileys
   // (Codex 边界 6: 单一 runtime 协议来源 · bind/status/send 抽象层成立)
+  // 2026-04-27 · D11.5 · per-slot 路由 · 客服号永远走 chromium
 
   async bindStartBind(slotId: number, pairingPhoneNumber?: string): Promise<unknown> {
-    return this.runtimes.current().startBind(slotId, pairingPhoneNumber);
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    const r = await this.runtimes.runtimeFor(slot).startBind(slotId, pairingPhoneNumber);
+    // 立即返当前 status (含 frontend 期待的字段) · 让 modal 拿首条 state
+    const s = await this.bindGetStatus(slotId);
+    return s ?? r;
   }
 
   async bindCancelBind(slotId: number): Promise<unknown> {
-    return this.runtimes.current().cancelBind(slotId);
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    await this.runtimes.runtimeFor(slot).cancelBind(slotId);
+    return this.bindGetStatus(slotId);
   }
 
-  bindGetStatus(slotId: number): unknown {
-    const status = this.runtimes.current().getBindStatus(slotId);
-    // 兼容老前端字段: 加上 runtime/connected 别名 (D14 收敛)
-    if (status && typeof (status as { then?: unknown }).then === 'function') {
-      // 异步返回 (理论上 ISlotRuntime.getBindStatus 同步 · 但允许 Promise)
-      return status;
+  // 2026-04-25 · 测试冻结期 · 修 D8-3 字段不对齐 bug (frontend BindExistingModal 期待老 baileys 形态)
+  // 不动 ISlotRuntime 接口 · 在 facade 层投影 · D14 真收敛时再统一接口字段
+  // 2026-04-27 · D11.5 · 改 async · 内部 fetch slot 拿 role
+  async bindGetStatus(slotId: number): Promise<unknown> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    const raw = this.runtimes.runtimeFor(slot).getBindStatus(slotId);
+    // raw 可能 sync (chromium) 或 Promise (理论上 baileys 也 sync · 但接口允 Promise)
+    if (raw && typeof (raw as { then?: unknown }).then === 'function') {
+      // baileys/异步 实装路径 · 直接透传 (老 BaileysService.getStatus 已是 BindStatusView 形)
+      return raw;
     }
-    return {
-      runtime: this.runtimes.getCurrentMode(),
-      ...status,
+    const status = raw as {
+      online?: boolean;
+      bindState?: string;
+      qrDataUrl?: string | null;
+      qrRefreshCount?: number;
+      error?: string | null;
+      sessionStartedAt?: number;
+      connectedAt?: number;
+      lastDisconnectCategory?: string | null;
+      lastDisconnectReason?: string | null;
+      // baileys 也可能有
+      state?: string;
+      qr?: string | null;
+      pairingCode?: string | null;
+      mode?: 'qr' | 'pairing-code';
+      phoneNumber?: string | null;
+      startedAt?: string;
+      lastEventAt?: string;
     };
+    // 投影到 frontend 期待的形态 (BindStatusView)
+    // 优先 baileys 字段 (state/qr/etc) · 没就用 chromium 字段映射
+    const nowIso = new Date().toISOString();
+    const startedAt =
+      status.startedAt ??
+      (status.sessionStartedAt && status.sessionStartedAt > 0
+        ? new Date(status.sessionStartedAt).toISOString()
+        : nowIso);
+    const lastEventAt =
+      status.lastEventAt ??
+      (status.connectedAt && status.connectedAt > 0
+        ? new Date(status.connectedAt).toISOString()
+        : startedAt);
+
+    return {
+      // frontend BindExistingModal 期待的字段 (baileys 老形态 · 必有)
+      state: status.state ?? status.bindState ?? 'idle',
+      qr: status.qr ?? status.qrDataUrl ?? null,
+      pairingCode: status.pairingCode ?? null,
+      mode: status.mode ?? 'qr',
+      phoneNumber: status.phoneNumber ?? null,
+      startedAt,
+      lastEventAt,
+      error: status.error ?? null,
+      // 新增字段保留 (D14 收敛后会成主) · 不破坏老 frontend
+      // 2026-04-27 · D11.5 · per-slot · 客服号永远 chromium
+      runtime: this.runtimes.getRuntimeFor(slot),
+      qrRefreshCount: status.qrRefreshCount ?? 0,
+      online: status.online ?? false,
+      lastDisconnectCategory: status.lastDisconnectCategory ?? null,
+      lastDisconnectReason: status.lastDisconnectReason ?? null,
+    };
+  }
+
+  // ═══ 2026-04-25 · 测试冻结期 · chromium bind connected → DB finalize ═══
+  // 缺漏 (T2.1 暴露): runtime 报 bind-state=connected · 但 backend 没写 DB
+  // baileys 路径走 creds.update 自动创号 · chromium 需在事件层手动
+  // 流程:
+  //   1. 收到 'runtime.bridge.bind-state' state=connected
+  //   2. INSERT placeholder wa_account (phone=pending-<slotId>-<ts>) (D14 改读真号)
+  //   3. UPDATE account_slot SET account_id, status=active, suspendedUntil=null
+  //   4. log + 不报错
+  @OnEvent('runtime.bridge.bind-state')
+  async onChromiumBindStateChange(evt: { slotId: number; state: string }): Promise<void> {
+    if (evt.state !== 'connected') return;
+    try {
+      const slot = await this.slotRepo.findOne({ where: { id: evt.slotId } });
+      if (!slot) {
+        this.logger.warn(`bind connected event · slot ${evt.slotId} 不存在 · 跳`);
+        return;
+      }
+      // 2026-04-25 · 测试冻结期 · connected 后异步拉真 phone (fetch-account-info)
+      // 给 page 一点时间 (chat-list 出现后 localStorage 可能还在写)
+      const fetchRealPhone = async (): Promise<string | null> => {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const r = await this.runtimeBridge.sendCommand<{
+            phone: string | null;
+            source: string;
+            rawWid?: string;
+          }>(slot.id, { kind: 'cmd', type: 'fetch-account-info' });
+          if (r?.phone) {
+            this.logger.log(
+              `slot ${slot.id} fetch-account-info · phone=${r.phone} source=${r.source} rawWid=${r.rawWid ?? 'n/a'}`,
+            );
+            return r.phone;
+          }
+          this.logger.warn(`slot ${slot.id} fetch-account-info · 未找到 phone (source=${r?.source})`);
+          return null;
+        } catch (err) {
+          this.logger.warn(
+            `slot ${slot.id} fetch-account-info 失败: ${err instanceof Error ? err.message : err}`,
+          );
+          return null;
+        }
+      };
+
+      if (slot.accountId) {
+        // 已有 account · rehydrate 路径 · 只确保 status=active
+        if (slot.status !== AccountSlotStatus.Active && slot.status !== AccountSlotStatus.Warmup) {
+          slot.status = AccountSlotStatus.Active;
+          slot.suspendedUntil = null;
+          await this.slotRepo.save(slot);
+          this.logger.log(`slot ${slot.id} rehydrate connected · status → active`);
+        }
+        // 如果当前 account 是 placeholder phone · 也试着拉真 phone 替换
+        const acc = await this.accountRepo.findOne({ where: { id: slot.accountId } });
+        if (acc && acc.phoneNumber.startsWith('pending-')) {
+          const realPhone = await fetchRealPhone();
+          if (realPhone) {
+            // 防 phone 冲突: 先查是否已存在
+            const dup = await this.accountRepo.findOne({ where: { phoneNumber: realPhone } });
+            if (dup && dup.id !== acc.id) {
+              this.logger.warn(
+                `slot ${slot.id} fetch-phone=${realPhone} 已绑 account ${dup.id} · 不替换 placeholder`,
+              );
+            } else {
+              acc.phoneNumber = realPhone;
+              await this.accountRepo.save(acc);
+              this.logger.log(`slot ${slot.id} placeholder phone → ${realPhone} (account ${acc.id})`);
+            }
+          }
+        }
+        return;
+      }
+      // 首次 bind · 先创占位 account · 再异步替换真号
+      const placeholderPhone = `pending-${slot.id}-${Date.now()}`;
+      const account = await this.accountRepo.save(
+        this.accountRepo.create({
+          phoneNumber: placeholderPhone,
+        }),
+      );
+      slot.accountId = account.id;
+      slot.status = AccountSlotStatus.Active;
+      slot.suspendedUntil = null;
+      await this.slotRepo.save(slot);
+      this.logger.log(
+        `slot ${slot.id} · bind connected · account=${account.id} (placeholder phone) · 异步拉真号`,
+      );
+
+      // 异步拉真 phone · 不阻塞 listener
+      void (async () => {
+        const realPhone = await fetchRealPhone();
+        if (realPhone) {
+          const dup = await this.accountRepo.findOne({ where: { phoneNumber: realPhone } });
+          if (dup && dup.id !== account.id) {
+            this.logger.warn(
+              `slot ${slot.id} fetch-phone=${realPhone} 已存在 account ${dup.id} · 改 slot 指向 dup · 删 placeholder`,
+            );
+            slot.accountId = dup.id;
+            await this.slotRepo.save(slot);
+            await this.accountRepo.delete(account.id);
+          } else {
+            account.phoneNumber = realPhone;
+            await this.accountRepo.save(account);
+            this.logger.log(`slot ${slot.id} placeholder → ${realPhone} (account ${account.id})`);
+          }
+        }
+      })();
+    } catch (err) {
+      this.logger.error(
+        { err: err instanceof Error ? err.message : err, slotId: evt.slotId },
+        `slot ${evt.slotId} · bind connected DB finalize 失败 · 不影响 runtime`,
+      );
+    }
+  }
+
+  // 2026-04-25 · 测试冻结期 · chromium 心跳 → DB heartbeat 列
+  // 缺漏 (T2.1 暴露): UI "心跳已 Infinity 分钟无响应" · 因 socket_last_heartbeat_at=null
+  // baileys 路径在 sock keepalive 写 · chromium 路径要在 backend 收到 heartbeat 事件时写
+  @OnEvent('runtime.bridge.heartbeat')
+  async onChromiumHeartbeat(evt: { slotId: number; ts: number }): Promise<void> {
+    try {
+      // 直接 UPDATE 不读 · 写次数 = slot 数 × 2/min · 量级低
+      await this.slotRepo.update(
+        { id: evt.slotId },
+        { socketLastHeartbeatAt: new Date(evt.ts) },
+      );
+    } catch (err) {
+      // 高频事件 · 错误降 debug 不污染 log
+      this.logger.debug?.(
+        `slot ${evt.slotId} heartbeat DB update failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  // 2026-04-26 · P0.10 · 把 slot 对应 Chromium 窗口提前台 (人工接管入口)
+  // 自愈: page session 关 (用户关了 chrome 窗口) · 自动 stop+respawn+rehydrate · 重试一次
+  // 2026-04-27 · D11.5 · per-slot 路由 · 客服号永远 chromium · 不看全局 mode
+  async bringToFront(slotId: number): Promise<{ broughtToFront: boolean; healed?: boolean }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    const mode = this.runtimes.getRuntimeFor(slot);
+    if (mode !== 'chromium') {
+      throw new BadRequestException(
+        `bring-to-front 仅 chromium runtime 有意义 · 当前 slot ${slotId} (role=${slot.role}) 走 ${mode} · 客服号才走 chromium`,
+      );
+    }
+
+    const tryOnce = async (): Promise<{ broughtToFront: boolean }> => {
+      if (!this.runtimeBridge.hasConnection(slotId)) {
+        throw new Error('runtime not connected');
+      }
+      const r = await this.runtimeBridge.sendCommand<{ broughtToFront: boolean }>(slotId, {
+        kind: 'cmd',
+        type: 'bring-to-front',
+      });
+      return { broughtToFront: r?.broughtToFront ?? false };
+    };
+
+    const isPageDeadError = (msg: string): boolean =>
+      /session closed|page has been closed|Target closed|protocol error.*bring/i.test(msg);
+
+    try {
+      const r = await tryOnce();
+      this.logger.log(`slot ${slotId} bring-to-front · result=${r.broughtToFront}`);
+      return r;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isPageDeadError(msg) && msg !== 'runtime not connected') {
+        throw err;
+      }
+      this.logger.warn(
+        `slot ${slotId} bringToFront · page session 已关 (or runtime offline) · 自动 stop+respawn+rehydrate (~30s)`,
+      );
+
+      // 1. stop 当前 runtime (kill chrome + node 进程)
+      try {
+        await this.runtimeProcess.stop(slotId);
+      } catch (stopErr) {
+        this.logger.debug?.(
+          `slot ${slotId} stop 失败 (可能 process 已自然 exit): ${stopErr instanceof Error ? stopErr.message : stopErr}`,
+        );
+      }
+      // 2. 等 1s 让 process 真退
+      await new Promise((res) => setTimeout(res, 1500));
+
+      // 3. 触发 rehydrate (内含 spawn + start-bind + waitForLogin)
+      // ChromiumSlotRuntime.startBind 自带 ensureRuntimeOnline · 起新 runtime + 跑 runBindFlow
+      // 2026-04-27 · D11.5 · 走 per-slot · slot 已 fetch 上文
+      await this.runtimes.runtimeFor(slot).startBind(slotId);
+
+      // 4. 等 bindState=connected (rehydrate complete) · poll bindStates cache 30s
+      const start = Date.now();
+      while (Date.now() - start < 30_000) {
+        const cache = this.runtimeBridge.getCachedBindState(slotId);
+        if (cache?.bindState === 'connected') break;
+        await new Promise((res) => setTimeout(res, 500));
+      }
+
+      // 5. 重试 bringToFront
+      const r = await tryOnce();
+      this.logger.log(
+        `slot ${slotId} bring-to-front · 自愈 respawn 后 · result=${r.broughtToFront}`,
+      );
+      return { ...r, healed: true };
+    }
+  }
+
+  // ═══ 2026-04-25 · P0 集中补洞 · 发送 facade · 不再让 controller 直调 BaileysService ═══
+  // 路由: SlotsService.sendText/sendMedia → SlotRuntimeRegistry.current() → Baileys/ChromiumSlotRuntime
+  // 持久化: 任一 runtime 成功后都用 BaileysService.persistMessage (chat_message + contact upsert + emit takeover.message.in)
+
+  /**
+   * 发文本 · 路由到当前 runtime · 持久化 chat_message
+   *
+   * @throws BadRequestException slot 没绑账号 / runtime 未在线
+   */
+  // 2026-04-26 · Class A · 暴露 runtime mode 给 executor 做 chromium-only / baileys-only 决策
+  // 2026-04-27 · D11.5 · executor 保留这个全局值用 (broadcast 决策仍用全局)
+  //   客服号 executor 已不依赖此值 · slot 路由经 SlotsService 内部 facade · 已 per-slot
+  getCurrentMode(): 'baileys' | 'chromium' {
+    return this.runtimes.getCurrentMode();
+  }
+
+  // 2026-04-26 · Class A · 统一在线判定 facade
+  // baileys mode: 看 pool / worker
+  // chromium mode: 看 ws bridge + heartbeat (60s · 因为这条只用于"能不能立刻发" gate)
+  // 任何 mode 下 pool 假阴性都不会误判 chromium slot 离线
+  async isOnline(slotId: number): Promise<boolean> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) return false;
+    if (this.baileys.isOnlineSmooth(slotId)) return true;
+    if (!this.runtimeBridge.hasConnection(slotId)) return false;
+    const last = slot.socketLastHeartbeatAt;
+    return !!last && Date.now() - last.getTime() < 90_000;
+  }
+
+  async sendText(
+    slotId: number,
+    to: string,
+    text: string,
+  ): Promise<{ waMessageId: string | null }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot?.accountId) {
+      throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    }
+    // 2026-04-27 · D11.5 · per-slot 路由 · 客服号永远 chromium
+    const mode = this.runtimes.getRuntimeFor(slot);
+    // chromium 路径: runtime 直接拿 phone (不要 @s.whatsapp.net 后缀)
+    // baileys 路径: 老逻辑期待 normalizeJid 后的 jid
+    const recipient = mode === 'chromium' ? to.replace(/[^\d+]/g, '') : this.baileys.normalizeJid(to);
+    if (!recipient) {
+      throw new BadRequestException(`收件人 "${to}" 无效`);
+    }
+
+    let waMessageId: string | null;
+    if (mode === 'chromium') {
+      // ChromiumSlotRuntime.sendText · 错误用 throw 反映 (sendCommand ok=false → reject)
+      const r = await this.runtimes.runtimeFor(slot).sendText(slotId, recipient, text);
+      waMessageId = r.messageId ?? null;
+      this.logger.log(
+        `slot ${slotId} chromium sendText to=${recipient} → messageId=${waMessageId}`,
+      );
+    } else {
+      // baileys 老路径 · 复用 BaileysService.sendText (内含 typing 模拟 / pool / persist)
+      const r = await this.baileys.sendText(slotId, recipient, text);
+      // baileys 已自己 persist · 直接返
+      return { waMessageId: r.waMessageId };
+    }
+
+    // chromium 路径: 自己 persist · jid 用 baileys 风格便于 takeover/dispatcher 兼容
+    const persistJid = recipient.includes('@')
+      ? recipient
+      : `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+    await this.baileys.persistMessage({
+      accountId: slot.accountId,
+      remoteJid: persistJid,
+      direction: MessageDirection.Out,
+      msgType: MessageType.Text,
+      content: text,
+      sentAt: new Date(),
+      waMessageId,
+    });
+    return { waMessageId };
+  }
+
+  /**
+   * 发媒体 · 路由到当前 runtime · 持久化 chat_message
+   *
+   * 当前 chromium runtime 仅支持 image / file (D10 范围 · video/voice 抛 not-supported)
+   */
+  // 2026-04-26 · Class A · 接 'video' 类型 (baileys 走 · chromium 拒)
+  async sendMedia(
+    slotId: number,
+    to: string,
+    type: 'image' | 'voice' | 'file' | 'video',
+    contentBase64: string,
+    options?: { mimeType?: string; filename?: string; caption?: string },
+  ): Promise<{ waMessageId: string | null; mediaPath: string | null }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot?.accountId) {
+      throw new BadRequestException(`槽位 ${slotId} 没有绑定账号`);
+    }
+    // 2026-04-27 · D11.5 · per-slot 路由
+    const mode = this.runtimes.getRuntimeFor(slot);
+
+    if (mode === 'chromium') {
+      // chromium D10 · image/file ok · voice/video 直接拒 (留 D11+)
+      if (type === 'voice' || type === 'video') {
+        throw new BadRequestException(
+          `chromium runtime 当前不支持 ${type} 发送 · 请用文本 / 图片 / 文件 (留 D11+ 扩展)`,
+        );
+      }
+      const recipient = to.replace(/[^\d+]/g, '');
+      if (!recipient) throw new BadRequestException(`收件人 "${to}" 无效`);
+
+      // 此处 type 已经收敛到 'image' | 'file' (voice/video 上面已抛)
+      const r = await this.runtimes.runtimeFor(slot).sendMedia(
+        slotId,
+        recipient,
+        type as 'image' | 'file',
+        contentBase64,
+        { caption: options?.caption, fileName: options?.filename },
+      );
+      const waMessageId = r.messageId ?? null;
+      this.logger.log(
+        `slot ${slotId} chromium sendMedia type=${type} to=${recipient} → messageId=${waMessageId}`,
+      );
+
+      const persistJid = `${recipient.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+      // type 'voice' 在上面已抛 · 这里只剩 'image' | 'file'
+      const msgType = type === 'image' ? MessageType.Image : MessageType.File;
+      await this.baileys.persistMessage({
+        accountId: slot.accountId,
+        remoteJid: persistJid,
+        direction: MessageDirection.Out,
+        msgType,
+        content: options?.caption ?? null,
+        sentAt: new Date(),
+        waMessageId,
+      });
+      // chromium path · runtime 不暴露磁盘路径 · mediaPath 为 null (前端用其它 API 取媒体)
+      return { waMessageId, mediaPath: null };
+    }
+
+    // baileys 老路径
+    return this.baileys.sendMedia(slotId, this.baileys.normalizeJid(to), type, contentBase64, {
+      mimeType: options?.mimeType,
+      filename: options?.filename,
+      caption: options?.caption,
+    });
+  }
+
+  // ═══ 2026-04-26 · D11 · WA Status / Profile facade ════════════════
+  // chromium 模式 → 走 ChromiumSlotRuntime → wa-web DOM cmd
+  // baileys  模式 → 走 BaileysService 现有方法
+
+  // 2026-04-27 · D11.5 · 5 个 status/profile facade · 全部走 per-slot 路由
+  // 客服号 → chromium · 其他号 → baileys · 跟全局 env 不再相关
+
+  /** 发文字 status (动态/Story) */
+  async postStatusText(slotId: number, text: string): Promise<{ waMessageId: string | null }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
+      const rt = this.runtimes.runtimeFor(slot);
+      if (!rt.postStatusText) throw new BadRequestException('chromium runtime postStatusText 未实现');
+      const r = await rt.postStatusText(slotId, text);
+      return { waMessageId: r.messageId ?? null };
+    }
+    // baileys: sendStatusText 返 { waMessageId } 形态对齐
+    const r = await this.baileys.sendStatusText(slotId, text);
+    return { waMessageId: r.waMessageId };
+  }
+
+  /** 发图/视频 status (动态/Story) */
+  async postStatusMedia(
+    slotId: number,
+    mediaType: 'image' | 'video',
+    mediaBase64: string,
+    options?: { caption?: string; fileName?: string; mimeType?: string },
+  ): Promise<{ waMessageId: string | null }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
+      const rt = this.runtimes.runtimeFor(slot);
+      if (!rt.postStatusMedia) throw new BadRequestException('chromium runtime postStatusMedia 未实现');
+      const r = await rt.postStatusMedia(slotId, mediaType, mediaBase64, {
+        caption: options?.caption,
+        fileName: options?.fileName,
+      });
+      return { waMessageId: r.messageId ?? null };
+    }
+    // baileys: sendStatusMedia 签名: (slotId, type, base64, options{mimeType,caption,filename})
+    const r = await this.baileys.sendStatusMedia(slotId, mediaType, mediaBase64, {
+      mimeType: options?.mimeType,
+      caption: options?.caption,
+      filename: options?.fileName,
+    });
+    return { waMessageId: r.waMessageId };
+  }
+
+  /** 浏览未读他人 status (chromium 真 DOM 走;  baileys 用 StatusCache + readMessages) */
+  async browseStatuses(
+    slotId: number,
+    options: { maxItems: number; dwellMs: number },
+  ): Promise<{ viewed: number }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
+      const rt = this.runtimes.runtimeFor(slot);
+      if (!rt.browseStatuses) throw new BadRequestException('chromium runtime browseStatuses 未实现');
+      return rt.browseStatuses(slotId, options);
+    }
+    // baileys 路径不在 facade 里实现 (现 StatusBrowseExecutor 直接用 baileys.getSocket/getStatusCache)
+    // facade 仅 chromium · baileys 模式 executor 仍走老逻辑 (返"facade 不适用 baileys" hint)
+    throw new BadRequestException(
+      'baileys 模式 browseStatuses 不通过 facade · executor 直接用 baileys.getStatusCache + sock.readMessages',
+    );
+  }
+
+  /** 给 N 条 status 点赞 */
+  async reactStatuses(
+    slotId: number,
+    options: { maxItems: number; emoji: string },
+  ): Promise<{ reacted: number }> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
+      const rt = this.runtimes.runtimeFor(slot);
+      if (!rt.reactStatuses) throw new BadRequestException('chromium runtime reactStatuses 未实现');
+      return rt.reactStatuses(slotId, options);
+    }
+    throw new BadRequestException(
+      'baileys 模式 reactStatuses 不通过 facade · executor 直接用 baileys.sendReact + StatusCache',
+    );
+  }
+
+  /** 改个人签名 */
+  async updateProfileAbout(slotId: number, text: string): Promise<void> {
+    const slot = await this.slotRepo.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException(`槽位 ${slotId} 不存在`);
+    if (this.runtimes.getRuntimeFor(slot) === 'chromium') {
+      const rt = this.runtimes.runtimeFor(slot);
+      if (!rt.updateProfileAbout) throw new BadRequestException('chromium runtime updateProfileAbout 未实现');
+      return rt.updateProfileAbout(slotId, text);
+    }
+    await this.baileys.updateProfileStatus(slotId, text);
+  }
+
+  /**
+   * P0.2 · Chromium runtime 推 message-upsert event · 进 backend 后写 chat_message
+   *
+   * Role gate (Codex D11-1 · 单一客服号):
+   *   - customer_service: 持久化 + 触发 takeover.message.in (UI 卡片 / 自动回复链路)
+   *   - broadcast: 不持久化, 仅 log (广告号收到回复就丢)
+   *
+   * payload 形态来自 runtime-chromium inbound-watcher · 是 IncomingMessageHint:
+   *   { preview, phoneE164, lastMessagePreview, unreadCount, detectedAt, dedupeKey }
+   *
+   * 注意: hint 是 chat-list 预览 · 不是完整消息体. 没 phoneE164 时 = 不可对账 · 跳过.
+   */
+  @OnEvent('runtime.bridge.message-upsert')
+  async onChromiumMessageUpsert(evt: {
+    slotId: number;
+    ts: number;
+    messages: unknown[];
+  }): Promise<void> {
+    try {
+      const slot = await this.slotRepo.findOne({ where: { id: evt.slotId } });
+      if (!slot) return;
+      if (!slot.accountId) {
+        this.logger.debug?.(`message-upsert · slot ${evt.slotId} 无 account · 跳`);
+        return;
+      }
+      // role gate
+      if (slot.role !== AccountSlotRole.CustomerService) {
+        // broadcast 号 · 收到回复不入库 · 仅 log 留痕
+        this.logger.log(
+          `slot ${evt.slotId} (broadcast) inbound 丢弃 · count=${evt.messages?.length ?? 0}`,
+        );
+        return;
+      }
+
+      for (const raw of evt.messages ?? []) {
+        // 2026-04-26 · P0.11 · 高保真消息识别 (schemaVersion='p0.11-hifi')
+        const hifi = raw as {
+          schemaVersion?: string;
+          waMessageId?: string;
+          direction?: 'in' | 'out';
+          text?: string;
+          timestamp?: number;
+          senderJid?: string;
+          senderDisplay?: string;
+        };
+        if (hifi && hifi.schemaVersion === 'p0.11-hifi' && hifi.waMessageId) {
+          // 高保真路径 · 真消息原文 + 真 jid + 真 messageId
+          // 跳过 out (我方发的 · sendText/sendMedia 已在 outbound persist 路径写库)
+          if (hifi.direction === 'out') {
+            this.logger.debug?.(`slot ${evt.slotId} (CS) hifi inbound · direction=out · skip (outbound 路径已写库)`);
+            continue;
+          }
+          // 提 phone 真号 (从 senderJid '60186888168@c.us' 抽)
+          const jidMatch = (hifi.senderJid ?? '').match(/^(\d{8,15})@(c\.us|s\.whatsapp\.net|lid)$/);
+          if (!jidMatch) {
+            this.logger.warn(
+              `slot ${evt.slotId} (CS) hifi inbound · senderJid 形态异常 · ${hifi.senderJid} · 跳`,
+            );
+            continue;
+          }
+          const phone = jidMatch[1];
+          const remoteJid = `${phone}@s.whatsapp.net`; // 内部存 标准 jid
+          // dedupe 用 wa_message_id (DB 现已有 wa_message_id 字段 · DB UNIQUE 约束兜底)
+          // 但应用层先查 · 防止重复 INSERT 抛异常
+          try {
+            const existing = await this.dataSource
+              .getRepository('chat_message' as never)
+              .createQueryBuilder('m')
+              .where('m.wa_message_id = :id', { id: hifi.waMessageId })
+              .getCount();
+            if (existing > 0) {
+              this.logger.debug?.(
+                `slot ${evt.slotId} (CS) hifi inbound · waMessageId=${hifi.waMessageId} · 已存在 · 跳`,
+              );
+              continue;
+            }
+          } catch {
+            /* 查不到也继续 INSERT · DB unique 兜底 */
+          }
+          await this.baileys.persistMessage({
+            accountId: slot.accountId,
+            remoteJid,
+            direction: MessageDirection.In,
+            msgType: MessageType.Text,
+            content: hifi.text ?? '',
+            sentAt: new Date(hifi.timestamp ?? evt.ts ?? Date.now()),
+            waMessageId: hifi.waMessageId,
+            updateContactLastMessageAt: true,
+            pushName: hifi.senderDisplay ?? undefined,
+          });
+          this.logger.log(
+            `slot ${evt.slotId} (CS) P0.11 hifi inbound persist · phone=${phone} senderDisplay="${hifi.senderDisplay}" waMessageId=${hifi.waMessageId} text="${(hifi.text ?? '').slice(0, 40)}"`,
+          );
+          continue;
+        }
+
+        // 老 hint 路径 (chat-reader 失败时 fallback / 无 rowDataId 兼容)
+        const hint = raw as {
+          preview?: string;
+          phoneE164?: string | null;
+          lastMessagePreview?: string | null;
+          unreadCount?: number;
+          detectedAt?: number;
+          identitySource?: 'phone' | 'jid-attr' | 'displayName' | 'unknown';
+          displayName?: string | null;
+        };
+        if (!hint || typeof hint !== 'object') continue;
+
+        // 2026-04-25 · B 路线 · 多身份兜底 (phone > displayName synthetic)
+        // 不再因 phoneE164=null 直接跳 · 有 displayName 就构 synthetic JID 入库
+        const phone = (hint.phoneE164 ?? '').replace(/[^\d]/g, '');
+        let remoteJid: string;
+        let identityLog: string;
+        let identitySource: 'phone' | 'jid-attr' | 'displayName' | 'unknown' =
+          hint.identitySource ?? 'unknown';
+
+        if (phone) {
+          // phone 有 (识别源 phone 或 jid-attr 都走这条 · WA 标准 JID)
+          remoteJid = `${phone}@s.whatsapp.net`;
+          identityLog = `phone=${phone}`;
+          // 没显式 source 时按"有 phone"补 phone 标
+          if (identitySource === 'unknown' || identitySource === 'displayName') {
+            identitySource = 'phone';
+          }
+        } else if (hint.displayName) {
+          // synthetic JID · 用 displayName slug · 防 contact 表 unique 冲突
+          // 示例: "MTB Cas" → "synthetic-mtb-cas@local.synthetic"
+          const slug = hint.displayName
+            .toLowerCase()
+            .replace(/[^a-z0-9一-龥]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 40) || 'unknown';
+          remoteJid = `synthetic-${slug}@local.synthetic`;
+          identityLog = `displayName="${hint.displayName}" jid=${remoteJid}`;
+          identitySource = 'displayName';
+        } else {
+          // 全失败 · 真没 identity · 跳 (这种是 watcher 极端边界 · 应几乎不发生)
+          this.logger.warn(
+            `slot ${evt.slotId} inbound hint 既无 phone 也无 displayName · preview="${(hint.preview ?? '').slice(0, 40)}" · 跳`,
+          );
+          continue;
+        }
+
+        const content = hint.lastMessagePreview ?? hint.preview ?? '';
+        const sentAt = new Date(hint.detectedAt ?? evt.ts ?? Date.now());
+
+        await this.baileys.persistMessage({
+          accountId: slot.accountId,
+          remoteJid,
+          direction: MessageDirection.In,
+          msgType: MessageType.Text,
+          content,
+          sentAt,
+          waMessageId: null,
+          updateContactLastMessageAt: true,
+          pushName: hint.displayName ?? undefined,
+        });
+        this.logger.log(
+          `slot ${evt.slotId} (CS) inbound persist · source=${identitySource} ${identityLog} preview="${(content ?? '').slice(0, 40)}"`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `slot ${evt.slotId} message-upsert handler failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   // ═══ 2026-04-25 · D11-1 · slot 角色管理 (Codex 锁定 5 边界) ═══════
@@ -365,6 +1050,15 @@ export class SlotsService {
     // 1. 踢出 pool socket (如果在线)
     await this.baileys.evictFromPool(id);
 
+    // 2026-04-26 · 1.5 · 停 Chromium runtime 子进程 (修僵尸: clear 后 D12-3 还在 spawn loop 里)
+    //   不阻塞 clear 主流程 · 失败只 warn · graceful=true 让它优雅退出 (8s 超时 force kill)
+    try {
+      await this.runtimeProcess.stop(id, { graceful: true, timeoutMs: 8_000 });
+      this.logger.log(`slot ${id} runtime 子进程已停止 (clear 触发)`);
+    } catch (err) {
+      this.logger.warn(`slot ${id} runtime stop 失败 (clear 仍继续): ${err instanceof Error ? err.message : err}`);
+    }
+
     // 2. 删 wa_account (CASCADE 带走 sim_info / account_health / wa_contact / chat_message)
     const accountIdToDelete = slot.accountId;
     slot.accountId = null;
@@ -440,7 +1134,14 @@ export class SlotsService {
     const currentDay = stats?.warmupCurrentDay ?? 0;
     const progressPct = Math.round((currentDay / WARMUP_TOTAL_DAYS) * 100);
     // 2026-04-22 · 实际 socket 是否在 pool · 用平滑版本 (60s 内开过就算 online)
-    const online = this.baileys.isOnlineSmooth(slot.id);
+    // 2026-04-25 · D12+ · Chromium 路径: bridge 有 WS 连接且 heartbeat < 90s → online
+    //   (baileys 路径在 RUNTIME_MODE=chromium 时 pool 永远空 · 只看 baileys 会一直误报"正在同步连接")
+    const baileysOnline = this.baileys.isOnlineSmooth(slot.id);
+    const bridgeConnected = this.runtimeBridge.hasConnection(slot.id);
+    const heartbeatFresh =
+      slot.socketLastHeartbeatAt &&
+      Date.now() - slot.socketLastHeartbeatAt.getTime() < 90_000;
+    const online = baileysOnline || (bridgeConnected && Boolean(heartbeatFresh));
     return {
       id: slot.id,
       tenantId: slot.tenantId,
@@ -456,6 +1157,9 @@ export class SlotsService {
       proxyId: slot.proxyId,
       profilePath: slot.profilePath,
       createdAt: slot.createdAt,
+      // 2026-04-25 · P1.6 · 前端按 runtime 模式决定哪些字段可信
+      // 2026-04-27 · D11.5 · per-slot · 客服号永远 chromium · 其他号跟全局 env
+      runtime: this.runtimes.getRuntimeFor(slot),
       // 2026-04-25 · 稳定性 · 真实状态三指标
       suspendedUntil: slot.suspendedUntil ? slot.suspendedUntil.toISOString() : null,
       socketLastHeartbeatAt: slot.socketLastHeartbeatAt

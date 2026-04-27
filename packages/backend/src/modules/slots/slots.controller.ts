@@ -220,7 +220,23 @@ export class SlotsController {
     return this.slots.bindCancelBind(id);
   }
 
+  // 2026-04-26 · P0.10 · 人工接管入口 · 把 slot 对应 Chromium 窗口提前台
+  // 设计: 5173 接管页只做"按钮入口" · 真操作面在桌面真 chrome 窗口里 (用户用 WA Web 自身 UI)
+  // 不做 iframe / screencast / 假 chat UI
+  @Post(':id/bring-to-front')
+  @HttpCode(HttpStatus.OK)
+  async bringToFront(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<unknown> {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.slots.bringToFront(id);
+  }
+
   // ── 消息收发 (M2 W2) ──────────────────────────────────
+  // 2026-04-25 · P0.1 集中补洞 · 路由改走 SlotsService facade
+  // 老路径 controller→BaileysService 在 RUNTIME_MODE=chromium 时 pool 永远空 · 必死
+  // SlotsService.sendText/sendMedia 内部按 mode 路由到对应 runtime + 持久化 chat_message
   @Post(':id/send')
   @HttpCode(HttpStatus.OK)
   async sendText(
@@ -229,7 +245,7 @@ export class SlotsController {
     @Body() dto: SendTextMessageDto,
   ) {
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.sendText(id, dto.to, dto.text);
+    return this.slots.sendText(id, dto.to, dto.text);
   }
 
   // W3: image/voice/file 发送, body 带 base64
@@ -241,7 +257,7 @@ export class SlotsController {
     @Body() dto: SendMediaMessageDto,
   ) {
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.sendMedia(id, dto.to, dto.type, dto.contentBase64, {
+    return this.slots.sendMedia(id, dto.to, dto.type, dto.contentBase64, {
       mimeType: dto.mimeType,
       filename: dto.filename,
       caption: dto.caption,

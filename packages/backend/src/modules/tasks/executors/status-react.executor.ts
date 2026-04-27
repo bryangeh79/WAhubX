@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
 import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
 // 2026-04-22 · 点赞朋友圈 · 真实装 · 从 StatusCache 挑未点赞 · sendMessage react
@@ -16,7 +17,9 @@ export class StatusReactExecutor implements TaskExecutor {
   private readonly logger = new Logger(StatusReactExecutor.name);
 
   constructor(
+    // 2026-04-26 · Class B · sendReact / getStatusCache 是 baileys-only · chromium 早 skip
     private readonly baileys: BaileysService,
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -31,7 +34,20 @@ export class StatusReactExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    if (!this.baileys.isSlotOnline(slot.id)) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+    if (!(await this.slots.isOnline(slot.id))) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位未在线' };
+
+    // 2026-04-26 · D11 · chromium 模式走 wa-web facade · 给前 N 条 status 点赞
+    if (this.slots.getCurrentMode() === 'chromium') {
+      try {
+        const r = await this.slots.reactStatuses(slot.id, { maxItems: maxPerDay, emoji });
+        ctx.log('chromium-status-react-done', true, { reacted: r.reacted, max: maxPerDay });
+        return { success: true, errorMessage: `点赞 ${r.reacted} 条` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.log('chromium-status-react-failed', false, { error: msg });
+        return { success: false, errorCode: 'REACT_FAILED', errorMessage: msg };
+      }
+    }
 
     const cache = this.baileys.getStatusCache();
     if (!cache) {

@@ -24,6 +24,7 @@ import { TenantReplySettingsController } from './controllers/tenant-reply-settin
 import { ConversationsController } from './controllers/conversations.controller';
 
 import { BaileysModule } from '../baileys/baileys.module';
+import { SlotsModule } from '../slots/slots.module';
 import { AiModule } from '../ai/ai.module';
 
 // 2026-04-24 · 智能客服 V1 · 完整模块
@@ -42,6 +43,7 @@ import { AiModule } from '../ai/ai.module';
       AccountSlotEntity,
     ]),
     BaileysModule,
+    SlotsModule, // 2026-04-26 · R9-bis · ReplyExecutorService 注 SlotsService.sendText facade
     AiModule,
   ],
   controllers: [
