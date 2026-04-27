@@ -174,10 +174,8 @@ export class ChromiumSlotRuntime implements ISlotRuntime {
     mediaBase64: string,
     options?: SendMediaOptions,
   ): Promise<SendResult> {
-    // D10 范围 (Codex 锁): image/file · video/voice 抛 not-supported (留 D11+)
-    if (mediaType === 'video' || mediaType === 'voice' || mediaType === 'audio') {
-      throw new Error(`chromium runtime D10: ${mediaType} not supported · D11+ extends`);
-    }
+    // 2026-04-28 · B1+B2 · video/voice/audio 全开 · runtime 内分流到 image/file 上传通道
+    //   待用户真机验证 (MORNING_TODO 列出)
     const cmd = {
       kind: 'cmd',
       type: 'send-media',

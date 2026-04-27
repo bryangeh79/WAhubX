@@ -1114,24 +1114,33 @@ async function main() {
             if (g_state !== 'chat-list') {
               return { ok: false, error: `cannot send · not in chat-list (current: ${g_state})` };
             }
-            const supported = cmd.mediaType === 'image' || cmd.mediaType === 'file';
+            // 2026-04-28 · B1+B2 · video 走 image 通道 (WA Web image input 接受 video MIME)
+            //   voice/audio 走 file 通道 (WA Web document upload · WA 自动识别 audio)
+            const supported =
+              cmd.mediaType === 'image' ||
+              cmd.mediaType === 'file' ||
+              cmd.mediaType === 'video' ||
+              cmd.mediaType === 'voice' ||
+              cmd.mediaType === 'audio';
             if (!supported) {
               return {
                 ok: false,
-                error: `D10 only supports image/file · got: ${cmd.mediaType}`,
+                error: `unsupported mediaType: ${cmd.mediaType}`,
               };
             }
             const openR = await openChatByPhone(page, cmd.to, log, diagnosticsDir);
             if (!openR.ok) {
               return { ok: false, error: `open chat failed: ${openR.error}` };
             }
+            const uploadKind: 'image' | 'file' =
+              cmd.mediaType === 'image' || cmd.mediaType === 'video' ? 'image' : 'file';
             const sendR = await sendMediaInOpenChat(
               page,
               cmd.mediaBase64,
               {
                 caption: cmd.caption,
                 fileName: cmd.fileName,
-                kind: cmd.mediaType === 'image' ? 'image' : 'file',
+                kind: uploadKind,
                 diagnosticsDir,
               },
               log,
