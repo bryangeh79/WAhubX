@@ -113,6 +113,12 @@ export class CampaignsController {
     return this.service.resume(this.tenantOf(cur), id);
   }
 
+  // 2026-04-27 · 强推所有 pending task 立即执行 · 不等节流窗口
+  @Post(':id/run-now')
+  runNow(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.service.runNow(this.tenantOf(cur), id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
