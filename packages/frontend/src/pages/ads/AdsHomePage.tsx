@@ -240,14 +240,10 @@ export function AdsHomePage() {
       key: 'op',
       render: (_: unknown, row) => (
         <Space size="small">
+          {/* 2026-04-28 · 详情 → 日志 (跟 targets 表"日志"按钮一致 · 抽屉显基本信息+触发+目标+报告) */}
           <Button size="small" type="link" onClick={() => setDetailId(row.id)}>
-            详情
+            🔍 日志
           </Button>
-          {row.status === CampaignStatus.Running && (
-            // 2026-04-28 · 老的"全局立即执行"按钮删 · 改在详情抽屉每个 target 行 per-task 立即执行
-            // 列表只保留 详情 / 暂停 / 恢复 / 启动
-            null
-          )}
           {row.status === CampaignStatus.Running && (
             <Button
               size="small"
@@ -297,6 +293,49 @@ export function AdsHomePage() {
               }}
             >
               启动
+            </Button>
+          )}
+          {/* 2026-04-28 · 删除按钮 · cancelled 状态不再重复显 */}
+          {row.status !== CampaignStatus.Cancelled && (
+            <Button
+              size="small"
+              type="link"
+              danger
+              onClick={() => {
+                const isActive =
+                  row.status === CampaignStatus.Running || row.status === CampaignStatus.Paused;
+                modal.confirm({
+                  title: '删除投放任务',
+                  content: (
+                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                      <div>
+                        投放 <strong>{row.name}</strong>
+                      </div>
+                      <div style={{ marginTop: 6, color: '#666' }}>
+                        {isActive
+                          ? '当前在跑 · 删除会取消所有 pending 任务 · 已发送的不撤回'
+                          : row.status === CampaignStatus.Done
+                            ? '已完成投放 · 删除清列表 · 报告/统计仍可在后端查'
+                            : '取消投放 · 不再排期'}
+                      </div>
+                    </div>
+                  ),
+                  okText: '删除',
+                  okButtonProps: { danger: true },
+                  cancelText: '取消',
+                  onOk: async () => {
+                    try {
+                      await campaignsApi.remove(row.id);
+                      message.success(`已删除 → ${row.name}`);
+                      await reload();
+                    } catch (err) {
+                      message.error(extractErrorMessage(err, '删除失败'));
+                    }
+                  },
+                });
+              }}
+            >
+              🗑 删除
             </Button>
           )}
         </Space>
