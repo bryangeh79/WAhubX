@@ -70,15 +70,31 @@ export class ReplyExecutorService {
     //       逐个试 FAQ → 取最优; RAG 也跨多 KB 检索 chunks
     const defaultKbId = settings.defaultKbId;
     let primaryKbIds: number[] = [];
-    if (conv.kbId && conv.kbId !== defaultKbId) {
+    // 2026-04-28 · 产品名 keyword pre-filter
+    //   bug 复现: 客户问 "fahubx" · RAG 跨 [10,11,12] 余弦把 WAhubX (kb 11) 排在 FAhubX (kb 10) 之上
+    //   修: 客户消息含产品名 (kb.name 子串) 时 · 强制 primary 限定到那个 KB
+    //       优先做精确产品名匹配 · 模糊用 lowercase + alphanumeric 化
+    const allProductKbs = await this.kbRepo.find({
+      where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
+    });
+    const normalizeForKbName = (s: string): string =>
+      s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const qNorm = normalizeForKbName(mergedQuestion);
+    const hitKbsByName = allProductKbs.filter((k) => {
+      const kbNorm = normalizeForKbName(k.name);
+      return kbNorm.length >= 3 && qNorm.includes(kbNorm);
+    });
+    if (hitKbsByName.length > 0) {
+      primaryKbIds = hitKbsByName.map((k) => k.id);
+      this.logger.log(
+        `conv ${conv.id} · 产品名 keyword pre-filter 命中 · 限定 primary 到 [${hitKbsByName.map((k) => `${k.id}:${k.name}`).join(', ')}]`,
+      );
+    } else if (conv.kbId && conv.kbId !== defaultKbId) {
       // conv 已归因到具体产品 KB (campaign 路径)
       primaryKbIds = [conv.kbId];
     } else {
       // conv 没绑或绑到 default · 把 tenant 所有产品 KB 都纳入 primary
-      const productKbs = await this.kbRepo.find({
-        where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
-      });
-      primaryKbIds = productKbs.map((k) => k.id);
+      primaryKbIds = allProductKbs.map((k) => k.id);
     }
     // secondary 始终是通用 KB · 排重避免重复搜
     const secondaryKbId =
@@ -305,9 +321,15 @@ ${context.slice(0, 4000)}
       return;
     }
 
-    // 若 RAG 置信度处于中区 · 强制附加 "建议人工确认"
+    // 2026-04-28 · 中区 (0.45-0.75) 不再强制 markHandoff
+    //   bug 复现: 客户问 fahubx · RAG 中区命中 WAhubX KB · AI 答 WAhubX 介绍 + 强制 handoff
+    //            客户纠正"不是 wahubx 是 FAhubx" · 进 handoff_required · 后续问 M33 也 silent ack
+    //            实际上 AI 已经答了客户该有信心继续追问 · 不该一口气结束对话
+    //   修: 中区只 log 警告 · 不 force handoff · 让 LLM 看 intent 自己判 (intent='handoff' 才 mark)
     if (topScore < RAG_CONF_HIGH && topScore >= RAG_CONF_LOW) {
-      if (!parsed.handoff) parsed.handoff = true;
+      this.logger.log(
+        `conv ${conv.id} · RAG 中区命中 score=${topScore.toFixed(2)} · LLM intent=${parsed.intent} handoff=${parsed.handoff} · 不 force handoff (让客户能继续问)`,
+      );
     }
 
     // Guardrail 后处理
