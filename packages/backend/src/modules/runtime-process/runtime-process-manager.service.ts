@@ -340,6 +340,29 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
   }
 
   /**
+   * 2026-04-28 · purge · 完全清掉某 slot 在内存里的所有痕迹
+   * 用于 clear() 恢复出厂 · 防 handle 残留导致 stale state
+   * 顺序: 取消 respawn timer · 删 Map entry · 关闭可能的子进程 (best-effort)
+   */
+  purgeSlot(slotId: number): void {
+    const handle = this.handles.get(slotId);
+    if (!handle) return;
+    if (handle.respawnTimer) {
+      clearTimeout(handle.respawnTimer);
+      handle.respawnTimer = null;
+    }
+    if (handle.child && !handle.child.killed) {
+      try {
+        handle.child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+    }
+    this.handles.delete(slotId);
+    this.logger.log(`slot ${slotId} · purgeSlot · 内存 handle 清掉 (clear 触发)`);
+  }
+
+  /**
    * 拉某 slot 当前状态 · 不存在则返 initial
    */
   getProcessState(slotId: number): ProcessState {

@@ -192,6 +192,13 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 2026-04-28 · 清缓存的 bind 状态 (clear 触发 · 恢复出厂)
+   */
+  clearCachedBindState(slotId: number): void {
+    this.bindStates.delete(slotId);
+  }
+
+  /**
    * 下发命令 · 等 ACK · 30s 超时.
    */
   async sendCommand<T = unknown>(slotId: number, cmd: Omit<RuntimeCommand, 'requestId'>): Promise<T> {

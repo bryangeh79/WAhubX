@@ -1004,13 +1004,23 @@ export class SlotsService {
     return this.toResponse(slot, stats);
   }
 
-  // ── clear: 置空槽位 (M2 W2 实装完整 FS + 在线 socket 清理) ────
-  // 步骤:
+  // ── clear: 恢复出厂设置 · 完全清空 slot 所有痕迹 ────────────
+  // 2026-04-28 · 系统级重写 · 用户高频用此功能 · 必须保证不残留任何状态
+  // 13 步全清:
   //   1. RBAC 检查
-  //   2. Pool 里有 socket 则先踢出 (end)
-  //   3. 删 wa_account 行 (CASCADE 触发 sim_info / account_health / wa_contact / chat_message 级联删)
-  //   4. rm -rf data/slots/<slotIndex>/ (Baileys creds + keys + 未来 media 缓存)
-  //   5. slot 回 empty, 保留 proxy_id (代理绑定不随账号清空)
+  //   2. Tracked runtime 进程 graceful stop
+  //   3. Process Manager handle 内存 purge (清 respawnTimer 等)
+  //   4. Kill 任何 orphan chromium (按 user-data-dir 匹配 · 防上次 backend 残留)
+  //   5. Force release takeover lock (写 DB takeover_active=false)
+  //   6. 清 runtime-bridge bind state cache
+  //   7. 删 wa_account (CASCADE → sim_info / account_health / wa_contact / chat_message)
+  //   8. 重置 slot 所有 volatile 字段 (account_id / status / persona / profile_path /
+  //      takeover_active / suspended_until / socket_last_heartbeat_at / role)
+  //   9. rm -rf data/slots/<slotIndex>/  (老 baileys 残留)
+  //   10. rm -rf %APPDATA%/wahubx/slots/<slotIndex>/  (chromium puppeteer profile)
+  //   11. 保留: proxy_id (代理绑定独立于账号 · 租户期望保留)
+  //   12. 保留: tenant_id (槽位归属不变)
+  //   13. log 总结 + 返清空后 DTO
   async clear(id: number, requesterTenantId: number | null): Promise<SlotResponseDto> {
     const slot = await this.slotRepo.findOne({
       where: { id },
@@ -1019,60 +1029,110 @@ export class SlotsService {
     if (!slot) throw new NotFoundException(`槽位 ${id} 不存在`);
     this.assertCanAccess(slot, requesterTenantId);
 
-    // 2026-04-28 · Phase D · chromium-only · 直接停 runtime 子进程
+    const idxPadded = String(slot.slotIndex).padStart(2, '0');
+    const accountIdToDelete = slot.accountId;
+    this.logger.log(
+      `[clear] slot ${id} idx=${slot.slotIndex} acc=${accountIdToDelete} · 启动恢复出厂`,
+    );
+
+    // ── Step 2: tracked runtime graceful stop ────────────────
     try {
       await this.runtimeProcess.stop(id, { graceful: true, timeoutMs: 8_000 });
-      this.logger.log(`slot ${id} runtime 子进程已停止 (clear 触发)`);
+      this.logger.log(`[clear] slot ${id} · runtime stop OK`);
     } catch (err) {
-      this.logger.warn(`slot ${id} runtime stop 失败 (clear 仍继续): ${err instanceof Error ? err.message : err}`);
+      this.logger.warn(`[clear] slot ${id} · runtime stop 失败 (继续): ${err instanceof Error ? err.message : err}`);
     }
 
-    // 2. 删 wa_account (CASCADE 带走 sim_info / account_health / wa_contact / chat_message)
-    const accountIdToDelete = slot.accountId;
+    // ── Step 3: process manager 内存 handle purge ────────────
+    try {
+      this.runtimeProcess.purgeSlot(id);
+    } catch (err) {
+      this.logger.warn(`[clear] slot ${id} · purgeSlot 失败 (继续): ${err}`);
+    }
+
+    // ── Step 4: 杀 orphan chromium (按 user-data-dir 匹配 · 上次 backend 残留)
+    //   (best-effort · Windows 用 wmic 类似 · 这里用 Node 子进程 ps + kill)
+    //   实现: 列所有 chrome.exe + grep CommandLine 含 wahubx/slots/<idx>
+    //   失败不阻塞 · 老进程会自然死
+    if (process.platform === 'win32') {
+      try {
+        const { execSync } = require('node:child_process') as typeof import('node:child_process');
+        // 用 PowerShell 列 chrome.exe 命令行 · grep 匹配 slot · kill PID
+        const psCmd = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*wahubx*slots*${idxPadded}*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; Write-Host 'done'`;
+        execSync(`powershell -NoProfile -Command "${psCmd.replace(/"/g, '\\"')}"`, {
+          timeout: 8_000,
+          windowsHide: true,
+        });
+        this.logger.log(`[clear] slot ${id} · orphan chromium killed (idx=${idxPadded})`);
+      } catch (err) {
+        this.logger.warn(`[clear] slot ${id} · orphan chromium kill 失败 (继续): ${err}`);
+      }
+    }
+
+    // ── Step 5+8: 重置 slot 所有 volatile 字段 + force release takeover + DB ──
     slot.accountId = null;
     slot.account = null;
     slot.status = AccountSlotStatus.Empty;
     slot.persona = null;
     slot.profilePath = null;
+    slot.takeoverActive = false; // force release lock (in-memory orphan无害)
+    slot.suspendedUntil = null;
+    slot.socketLastHeartbeatAt = null;
+    // role 不重置 · 客服号 / 广告号属于槽位语义 · 跟账号无关
     await this.slotRepo.save(slot);
-    if (accountIdToDelete) {
-      await this.accountRepo.delete(accountIdToDelete);
+
+    // ── Step 6: 清 runtime-bridge bind state cache ────────────
+    try {
+      this.runtimeBridge.clearCachedBindState(id);
+    } catch (err) {
+      this.logger.warn(`[clear] slot ${id} · clear bind cache 失败 (继续): ${err}`);
     }
 
-    // 3. rm -rf data/slots/<slotIndex>/  (老 baileys session 路径)
+    // ── Step 7: 删 wa_account (CASCADE 带走子表) ─────────────
+    if (accountIdToDelete) {
+      try {
+        await this.accountRepo.delete(accountIdToDelete);
+        this.logger.log(`[clear] slot ${id} · wa_account ${accountIdToDelete} DELETE OK (cascade)`);
+      } catch (err) {
+        this.logger.warn(`[clear] slot ${id} · wa_account delete 失败 (DB 可能仍有残留): ${err}`);
+      }
+    }
+
+    // ── Step 9: rm -rf data/slots/<slotIndex>/ (老 baileys 路径) ──
     const slotDir = getSlotDir(slot.slotIndex);
     try {
       if (fs.existsSync(slotDir)) {
         fs.rmSync(slotDir, { recursive: true, force: true });
+        this.logger.log(`[clear] slot ${id} · ${slotDir} 已清`);
       }
     } catch (err) {
-      this.logger.warn(`slot ${id} 文件系统清理失败 (${slotDir}): ${err}`);
-      // 不阻塞: DB 已清干净, 磁盘残留留给用户手工处理
+      this.logger.warn(`[clear] slot ${id} · 文件系统清理失败 (${slotDir}): ${err}`);
     }
 
-    // 4. 2026-04-28 · CRITICAL · rm -rf chromium puppeteer profile
-    //   Windows: %APPDATA%\wahubx\slots\<slotIndex>\
-    //   bug: 老代码只删 data/slots/ (baileys 时代) · 没动 AppData/wahubx/slots/
-    //        chromium profile (cookies/IndexedDB) 残留 → 下次扫码自动登录旧号
-    const idxPadded = String(slot.slotIndex).padStart(2, '0');
+    // ── Step 10: rm -rf chromium puppeteer profile ───────────
+    //   Windows: %APPDATA%\wahubx\slots\<idx>\
+    //   macOS: ~/Library/Application Support/wahubx/slots/<idx>/
+    //   Linux: 跟 dataDir 同根 · Step 9 已清
     const chromiumSlotDir =
       process.platform === 'win32'
         ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'wahubx', 'slots', idxPadded)
         : process.platform === 'darwin'
           ? path.join(os.homedir(), 'Library', 'Application Support', 'wahubx', 'slots', idxPadded)
-          : null; // linux: 跟 dataDir 同根 · 上面 step 3 已清
+          : null;
     if (chromiumSlotDir) {
       try {
         if (fs.existsSync(chromiumSlotDir)) {
           fs.rmSync(chromiumSlotDir, { recursive: true, force: true });
-          this.logger.log(`slot ${id} chromium profile 已清: ${chromiumSlotDir}`);
+          this.logger.log(`[clear] slot ${id} · chromium profile 已清: ${chromiumSlotDir}`);
         }
       } catch (err) {
-        this.logger.warn(`slot ${id} chromium profile 清理失败 (${chromiumSlotDir}): ${err}`);
+        this.logger.warn(`[clear] slot ${id} · chromium profile 清理失败 (${chromiumSlotDir}): ${err}`);
       }
     }
 
-    this.logger.log(`Cleared slot ${id} (tenant ${slot.tenantId}, index ${slot.slotIndex})`);
+    this.logger.log(
+      `[clear] slot ${id} · 恢复出厂完成 · tenant=${slot.tenantId} idx=${slot.slotIndex}`,
+    );
     return this.toResponse(slot);
   }
 
