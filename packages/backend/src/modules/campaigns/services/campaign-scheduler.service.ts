@@ -180,7 +180,12 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       slotCapacity.set(s.slotId, Math.max(0, throttleParams.dailyCap - already));
     }
 
-    // 4. round-robin 分配 + 时段打散
+    // 2026-04-28 · 立即开始 mode = 用户期望马上发 · 不打散不等节流时段窗口
+    // schedule.mode='immediate': 全部 target 用同 NOW · 第一个立即, 后续被 dispatcher 6 并发限流
+    // 其他 mode: 走老的 nextSendTime 节流打散
+    const isImmediateMode = (campaign.schedule as { mode?: string })?.mode === 'immediate';
+
+    // 4. round-robin 分配 + 时段打散 (immediate mode 跳打散)
     const targets: CampaignTargetEntity[] = [];
     const tasks: TaskEntity[] = [];
     let skipped = 0;
@@ -208,7 +213,10 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       }
 
       // 时段打散: 从 now 起, 每个目标推 gap_sec[0]..gap_sec[1] 的随机秒, 尊重 throttle windows
-      const scheduledAt = this.nextSendTime(now, throttleParams.windows, throttleParams.gapSec, targets.length);
+      // immediate mode: 全部 NOW · 让 dispatcher 调度 (并发 6 + per-account 互斥兜底)
+      const scheduledAt = isImmediateMode
+        ? now
+        : this.nextSendTime(now, throttleParams.windows, throttleParams.gapSec, targets.length);
 
       // 选广告
       const adId =
@@ -255,6 +263,8 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
           phone,
           adId,
           openingId,
+          // 立即开始 mode · 标 forceRun · dispatcher 跳过 night-window 检查
+          ...(isImmediateMode ? { forceRun: true } : {}),
         },
         status: TaskStatus.Pending,
         lastError: null,

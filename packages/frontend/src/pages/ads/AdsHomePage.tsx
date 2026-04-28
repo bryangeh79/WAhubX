@@ -244,6 +244,51 @@ export function AdsHomePage() {
           <Button size="small" type="link" onClick={() => setDetailId(row.id)}>
             🔍 日志
           </Button>
+          {/* 2026-04-28 · 立即执行 · 强推所有 pending task · 跳节流 + 夜间窗口 */}
+          {(row.status === CampaignStatus.Running || row.status === CampaignStatus.Paused) && (
+            <Button
+              size="small"
+              type="link"
+              icon={<ThunderboltOutlined />}
+              style={{ color: '#fa8c16', padding: '0 4px' }}
+              onClick={() => {
+                modal.confirm({
+                  title: '立即执行所有 pending 任务',
+                  content: (
+                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                      <div>
+                        投放 <strong>{row.name}</strong>
+                      </div>
+                      <div style={{ marginTop: 6, color: '#666' }}>
+                        把该投放下所有等待中的任务的 <strong>scheduled_at</strong> 改 NOW · 跳过节流时段 + 夜间窗口
+                      </div>
+                      <div style={{ marginTop: 8, color: '#fa8c16' }}>
+                        ⚠ 立即执行会使任务集中在短时间内发送 · 可能增加封号风险
+                      </div>
+                    </div>
+                  ),
+                  okText: '立即执行',
+                  okButtonProps: { style: { background: '#fa8c16', borderColor: '#fa8c16' } },
+                  cancelText: '取消',
+                  onOk: async () => {
+                    try {
+                      const res = await campaignsApi.runNow(row.id);
+                      if (res.pushed > 0) {
+                        message.success(`已强推 ${res.pushed} 个任务`);
+                      } else {
+                        message.info('当前没有等待中的任务');
+                      }
+                      await reload();
+                    } catch (err) {
+                      message.error(extractErrorMessage(err, '强推失败'));
+                    }
+                  },
+                });
+              }}
+            >
+              立即执行
+            </Button>
+          )}
           {row.status === CampaignStatus.Running && (
             <Button
               size="small"

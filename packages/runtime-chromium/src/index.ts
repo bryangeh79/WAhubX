@@ -815,13 +815,21 @@ async function main() {
   // 范围: send-text / send-media · 同 slot 内串行 · 进程内 (runtime per-slot 一个 process)
 
   let sendMutex: Promise<void> = Promise.resolve();
-  const SEND_HARD_TIMEOUT_MS = 25_000;
-  const SEND_INNER_SETTLE_MAX_MS = 90_000; // inner truly hung 时 mutex 等多久强放
+  // 2026-04-28 · 动态超时 · 解决多行广告 type 时间长被 abort 的 bug
+  // 老: 25s 固定 · 200 字符广告 (人类 80-150ms/char) ≈ 24s · 边缘超时
+  // 新: base 30s + textLen × 150ms + buffer 10s · 200 字符 = 70s · 充分余量
+  const SEND_HARD_TIMEOUT_BASE_MS = 30_000;
+  const SEND_HARD_TIMEOUT_PER_CHAR_MS = 150;
+  const SEND_HARD_TIMEOUT_MEDIA_MS = 90_000; // media 上传更慢
+  const computeSendTimeoutMs = (textLen: number): number =>
+    SEND_HARD_TIMEOUT_BASE_MS + textLen * SEND_HARD_TIMEOUT_PER_CHAR_MS + 10_000;
+  const SEND_INNER_SETTLE_MAX_MS = 120_000; // inner truly hung 时 mutex 等多久强放 (跟 timeout 一样升)
 
   const withSendMutexAndHardTimeout = async <T extends { ok: boolean; error?: string }>(
     label: string,
     inner: () => Promise<T>,
     failResult: () => T,
+    timeoutMs: number = SEND_HARD_TIMEOUT_BASE_MS + 10_000,
   ): Promise<T> => {
     // ── 排队 ────────────────────────────
     const prev = sendMutex;
@@ -846,7 +854,7 @@ async function main() {
     let timer: NodeJS.Timeout | null = null;
 
     const timeoutSignal = new Promise<{ kind: 'timeout' }>((resolve) => {
-      timer = setTimeout(() => resolve({ kind: 'timeout' }), SEND_HARD_TIMEOUT_MS);
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
     });
     const innerSignal = innerP.then((r) => ({ kind: 'inner' as const, result: r }));
 
@@ -861,7 +869,7 @@ async function main() {
 
     // ── 硬超时分支 ───────────────────────
     log.error(
-      { label, timeoutMs: SEND_HARD_TIMEOUT_MS },
+      { label, timeoutMs },
       `P0.5 全链路硬超时 (${label.toUpperCase().replace(/-/g, '_')}_TIMEOUT) · 调用方先收 fail · mutex 等 inner settle 再放 (max ${SEND_INNER_SETTLE_MAX_MS}ms)`,
     );
     // page 恢复 · 不阻塞 · Escape 关 modal · stop 拦载入
@@ -1127,8 +1135,10 @@ async function main() {
         return { ok: true, data: { willShutdown: true } };
       }
       // 2026-04-25 · D10 W2 · sendText 实装
-      // 2026-04-25 · P0.5/P0.6 · 包 mutex+硬超时 · 调用方 25s 拿 fail · 但 inner 跑完才放 mutex
+      // 2026-04-25 · P0.5/P0.6 · 包 mutex+硬超时 · 调用方拿 fail · 但 inner 跑完才放 mutex
+      // 2026-04-28 · 动态超时 · 长广告 (200+字符) 不再 25s 误超
       if (cmd.type === 'send-text') {
+        const txtTimeoutMs = computeSendTimeoutMs(cmd.text?.length ?? 0);
         return withSendMutexAndHardTimeout(
           'send-text',
           async () => {
@@ -1149,8 +1159,9 @@ async function main() {
           },
           () => ({
             ok: false,
-            error: `SEND_TEXT_TIMEOUT (entire send-text flow > ${SEND_HARD_TIMEOUT_MS}ms · runtime 强制 abort)`,
+            error: `SEND_TEXT_TIMEOUT (entire send-text flow > ${txtTimeoutMs}ms · textLen=${cmd.text?.length ?? 0} · runtime 强制 abort)`,
           }),
+          txtTimeoutMs,
         );
       }
       // 2026-04-25 · D10 W2 · sendMedia 实装 (image/file)
@@ -1197,8 +1208,9 @@ async function main() {
           },
           () => ({
             ok: false,
-            error: `SEND_MEDIA_TIMEOUT (entire send-media flow > ${SEND_HARD_TIMEOUT_MS}ms · runtime 强制 abort)`,
+            error: `SEND_MEDIA_TIMEOUT (entire send-media flow > ${SEND_HARD_TIMEOUT_MEDIA_MS}ms · runtime 强制 abort)`,
           }),
+          SEND_HARD_TIMEOUT_MEDIA_MS,
         );
       }
       // 2026-04-26 · D11 · post-status-text · 发文字 status
@@ -1213,7 +1225,7 @@ async function main() {
             if (!r.ok) return { ok: false, error: r.error };
             return { ok: true, data: { messageId: r.pseudoMessageId } };
           },
-          () => ({ ok: false, error: `POST_STATUS_TEXT_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+          () => ({ ok: false, error: `POST_STATUS_TEXT_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
       // 2026-04-26 · D11 · post-status-media · 发图/视频 status
@@ -1234,7 +1246,7 @@ async function main() {
             if (!r.ok) return { ok: false, error: r.error };
             return { ok: true, data: { messageId: r.pseudoMessageId } };
           },
-          () => ({ ok: false, error: `POST_STATUS_MEDIA_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+          () => ({ ok: false, error: `POST_STATUS_MEDIA_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
       // 2026-04-26 · D11 · browse-statuses · 浏览未读他人 status
@@ -1253,7 +1265,7 @@ async function main() {
             if (!r.ok) return { ok: false, error: r.error };
             return { ok: true, data: { viewed: r.viewed } };
           },
-          () => ({ ok: false, error: `BROWSE_STATUSES_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+          () => ({ ok: false, error: `BROWSE_STATUSES_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
       // 2026-04-26 · D11 · react-status · 给 N 条 status 点赞
@@ -1272,7 +1284,7 @@ async function main() {
             if (!r.ok) return { ok: false, error: r.error };
             return { ok: true, data: { reacted: r.reacted } };
           },
-          () => ({ ok: false, error: `REACT_STATUS_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+          () => ({ ok: false, error: `REACT_STATUS_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
       // 2026-04-26 · D11 · update-profile-about · 改个人签名
@@ -1287,7 +1299,7 @@ async function main() {
             if (!r.ok) return { ok: false, error: r.error };
             return { ok: true };
           },
-          () => ({ ok: false, error: `UPDATE_PROFILE_TIMEOUT (>${SEND_HARD_TIMEOUT_MS}ms · runtime abort)` }),
+          () => ({ ok: false, error: `UPDATE_PROFILE_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
       // 所有合法分支都覆盖 · 这里仅防御性兜底
