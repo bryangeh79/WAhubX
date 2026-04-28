@@ -287,11 +287,25 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (targets.length === 0) {
+      // 2026-04-28 · 0 targets 大声 fail · 给 UI 显原因
+      // 常见: 客户群所有号 send_status≠0 (前次失败标坏) · 或 daily cap 满
+      const reason =
+        phones.length === 0
+          ? '客户群所有号都被标"坏号" (send_status≠0) · 之前失败过 · 解: 客户群管理 重置号状态 OR 换人'
+          : `${phones.length} 个号都没分到 slot (常见: 槽位 daily cap 已满, 保守=20/天). 解: 等明天 OR 换更宽节流档`;
       await this.runRepo.update(run.id, {
-        status: CampaignRunStatus.Done,
+        status: CampaignRunStatus.Cancelled,
         finishedAt: new Date(),
-        stats: { planned: phones.length, sent: 0, failed: 0, skipped: phones.length },
+        stats: {
+          planned: phones.length,
+          sent: 0,
+          failed: 0,
+          skipped: phones.length,
+          error: reason,
+        } as Record<string, unknown>,
       });
+      await this.campaignRepo.update(campaign.id, { status: CampaignStatus.Cancelled });
+      this.logger.warn(`campaign ${campaign.id} run ${run.id} · 0 targets · cancelled · reason=${reason}`);
       return;
     }
 
