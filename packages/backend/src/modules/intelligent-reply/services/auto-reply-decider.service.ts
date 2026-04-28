@@ -23,13 +23,31 @@ const AGGREGATION_WINDOW_MS = 8000;
 //     双层保险: 单对话 30 + 全租户 daily limit
 const RATE_DEBOUNCE_MS = 3_000;
 const RATE_24H_LIMIT = 30;
+// 2026-04-29 · 任务 8 · Level 1 关键词扩展
+//   原: 投诉 / 退款 / 退货 / 律师 / 报警 / 骂 / 操 / 傻逼 / 滚 / 垃圾 / 骗子 / scam/refund/lawyer/sue
+//   加: 购买/下单/付款/付不了/付不出/账号异常/不能登录/登不上/老板/sales/agent
+//       人工/真人/客服/转人工/要人工/找人工 (客户主动要求人工)
+//       demo/演示/试用 (从 Level 2 升 Level 1 · 用户硬要求"客户要 demo 必须立即转人工")
 const HANDOFF_KEYWORDS_LEVEL1 = [
+  // 投诉 / 情绪
   '投诉', '退款', '退货', '律师', '报警', '骂', '操', '傻逼', '滚', '垃圾', '骗子',
-  'scam', 'refund', 'lawyer', 'sue',
+  'scam', 'refund', 'lawyer', 'sue', 'cheat',
+  // 客户主动要求人工
+  '人工', '真人', '转人工', '要人工', '找人工', '转客服', '老板',
+  'sales', 'agent', 'human', 'real person', 'real human',
+  // demo / 购买 / 付款 / 退款 (任务 8 明确要求转人工)
+  'demo', '演示', '试一下', '试用',
+  '购买', '下单', '我要买', '想买', '要买', '怎么买', 'buy', 'purchase', 'order',
+  '报价', '合同', '签合同', '见面', '约见', '预约',
+  '付款', '付不了', '付不出', '付款失败', '不能付款', 'payment failed',
+  // 账号异常 / 技术问题
+  '账号异常', '不能登录', '登不上', '登录不了', '上不去', '出错', '报错',
+  '账号被封', '账号封', '号封了', 'account banned', 'cannot login',
 ];
+// Level 2 (当前未直接 markHandoff · 仅作为 LLM intent 提示) — 留作未来用
 const HANDOFF_KEYWORDS_LEVEL2 = [
-  '多少钱', '报价', '套餐', '怎么收费', '价格', '价钱', '优惠', '折扣',
-  'demo', '试用', '试一下', '合同', '见面', '预约',
+  '多少钱', '怎么收费', '价格', '价钱', '优惠', '折扣',
+  '套餐', '方案',
 ];
 
 interface InboundEvent {

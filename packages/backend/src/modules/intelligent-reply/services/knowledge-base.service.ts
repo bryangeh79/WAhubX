@@ -355,24 +355,79 @@ export class KnowledgeBaseService {
     const material = sampleChunks.map((c) => c.text).join('\n\n---\n\n');
     const goal = kb.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
 
-    const systemPrompt = `你是产品运营专家. 根据提供的产品资料, 生成客户最可能在 WhatsApp 咨询中问的问题 + 回答.`;
+    // 2026-04-29 · 任务 1+3+10 · FAQ 生成 prompt 升级
+    //   - 输出结构化 JSON (canonical_question / variants / intent / handoff_action / follow_up_question / risk_level / tags)
+    //   - 区分公司通用 KB 跟产品 KB · 通用 KB 出客服话术 (问候/转人工/价格反问/营业时间), 产品 KB 出产品专属 FAQ
+    //   - 风格: 口语化 + 销售引导 + 不报价
+    //   - 兼容存储: variants/intent/handoff_action/follow_up_question/risk_level 全部塞 tags 字段
+    //     格式: ['intent:pricing', 'handoff:if_no_price', 'risk:medium', 'fu:请问您想管理多少个号', 'var:多少钱', 'var:这个价位怎么样', 'var:报价', 'product_intro']
+    //     reply-executor.matchFaq 解析时把 var: 前缀的当 variant 参与匹配
+    const isCompanyCommonKb = kb.isDefault;
+    const kbScopeBlock = isCompanyCommonKb
+      ? `**这是公司通用 KB · 你要生成"客服通用话术 FAQ"** (不是产品介绍):
+- 问候 (你好 / 晚上好 / 在吗)
+- 自我介绍 / 这是哪家公司
+- 营业时间 / 客服在不在
+- 联系方式 / 怎么找你们
+- 价格反问 (客户没说哪个产品就问"多少钱" → 反问哪个产品)
+- 介绍一下 (客户没指定产品 → 引导先选产品)
+- 转人工 ("人工" / "真人" / "客服")
+- 闲聊兜底 (吃饭了吗 / 天气 / 累不累 → 简短陪聊 + 拉回业务)
+- 道别 / 感谢
+**不要生成产品具体功能 FAQ** (那是产品 KB 的工作)`
+      : `**这是产品 KB ("${kb.name}") · 你要生成"该产品专属 FAQ"**:
+- 这个产品是做什么的 / 主要功能
+- 适合什么客户 / 使用场景
+- 套餐 / 方案区别
+- 风险说明 / 安全性
+- 开通流程 / 怎么使用 / 上手要多久
+- 技术细节 (产品资料里写了的)
+- 常见疑虑 (会不会被封 / VPN / IP / 数据安全)
+**不要生成通用客服 FAQ** (问候 / 营业时间 / 联系方式 → 公司通用 KB 的工作)`;
+
+    const systemPrompt = `你是资深 WhatsApp 客服话术设计师, 帮 SaaS 公司生成"成交型 FAQ" (不是说明书摘抄).
+风格底线:
+- 中文口语化 · 像真人客服微信聊天
+- 答完带一个自然追问 (推动客户继续说话)
+- 可用少量 emoji (😊 ~ 不滥用)
+- 不官方腔 / 不机械
+- 不承诺 100% / 保证 / 绝对
+- 资料里有的联系方式原样保留
+- 资料里没有的价格 → 引导留联系方式 + 转人工 (不能编)
+- 销售导向: 客户一表现兴趣就引导留 WhatsApp / 公司名 / 账号需求量`;
+
     const userPrompt = `
 业务目标: ${goal}
 
-产品资料:
+${kbScopeBlock}
+
+参考资料:
 """
 ${material.slice(0, 8000)}
 """
 
-要求:
-1. 生成 ${count} 条高质量 Q/A · 覆盖产品功能/价格/售后/联系方式等维度
-2. Q 口语化 (像客户真的问出来, 15 字以内)
-3. A 友善简洁 · 100 字内 · 可带 emoji
-4. 保留资料里出现的电话/网站/邮箱等联系方式 (原样引用)
-5. 不编造资料里没有的信息 · 不承诺具体价格数字
+输出要求:
+生成 ${count} 条 FAQ · **严格 JSON 格式**, 每条:
+{
+  "canonical_question": "标准问题 (15 字以内 · 口语化)",
+  "variants": ["客户可能这样问 1", "客户可能这样问 2", "客户可能这样问 3"],
+  "answer": "亲切口语化答案 (≤120 字 · 含 emoji · 末尾带追问)",
+  "intent": "greeting | product_intro | pricing | package | demo | setup | risk | vpn_ip | technical_support | refund | payment | complaint | human_agent | off_topic | unclear | lead_collection",
+  "handoff_action": "none | always | if_no_price | if_uncertain",
+  "follow_up_question": "答完之后的自然追问",
+  "risk_level": "low | medium | high",
+  "tags": ["关键词 1", "关键词 2"]
+}
 
-返回 JSON (严格格式):
-{"faqs":[{"q":"问题","a":"回答","tags":["标签"]}]}
+要求:
+- variants 至少 3 个 · 涵盖客户真实可能的问法 (不是改写 canonical_question · 是不同表达)
+- 价格相关问题 handoff_action 设 "if_no_price"
+- demo / 购买 / 投诉 / 退款 / 付款 / 账号异常类 handoff_action 设 "always"
+- 风险话题 (会不会封号 / VPN / IP) risk_level 设 "high"
+- 销售场景 (客户表达兴趣 / 询价) intent 设 "lead_collection" 或 "pricing"
+
+返回:
+{"faqs":[{...}, {...}, ...]}
 `.trim();
 
     const res = await this.platformAi.llm(
@@ -380,29 +435,73 @@ ${material.slice(0, 8000)}
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      { temperature: 0.5, maxTokens: 4096, jsonMode: true },
+      { temperature: 0.6, maxTokens: 8192, jsonMode: true },
     );
 
     if (!res.ok) {
       throw new BadRequestException(`AI 调用失败: ${res.error ?? 'unknown'}`);
     }
 
-    let faqs: Array<{ q: string; a: string; tags?: string[] }> = [];
+    // 解析新格式 · 兼容老格式 (q/a/tags · 没 variants)
+    type NewFaq = {
+      canonical_question?: string;
+      q?: string;
+      variants?: string[];
+      answer?: string;
+      a?: string;
+      intent?: string;
+      handoff_action?: string;
+      follow_up_question?: string;
+      risk_level?: string;
+      tags?: string[];
+    };
+    let faqs: NewFaq[] = [];
     try {
-      const parsed = JSON.parse(res.text) as { faqs?: Array<{ q: string; a: string; tags?: string[] }> };
+      const parsed = JSON.parse(res.text) as { faqs?: NewFaq[] };
       faqs = parsed.faqs ?? [];
     } catch {
       throw new BadRequestException('AI 返回格式不正确 · 稍后重试');
     }
 
-    // 去重 + 存 draft
+    // 把 variants/intent/handoff_action/follow_up_question/risk_level 全塞进 tags · 用前缀区分
+    // matchFaq() 在 reply-executor 端解析 var: 前缀当 variant 参与 Jaccard
+    const buildTags = (f: NewFaq): string[] => {
+      const tags: string[] = [];
+      if (f.intent) tags.push(`intent:${f.intent.trim()}`);
+      if (f.handoff_action) tags.push(`handoff:${f.handoff_action.trim()}`);
+      if (f.risk_level) tags.push(`risk:${f.risk_level.trim()}`);
+      if (f.follow_up_question?.trim()) {
+        // fu 可能含逗号 · base64-safe-ish · 直接塞 (Postgres text[] 单元素能容忍特殊字符)
+        tags.push(`fu:${f.follow_up_question.trim().slice(0, 200)}`);
+      }
+      if (Array.isArray(f.variants)) {
+        for (const v of f.variants) {
+          const vt = (v ?? '').trim();
+          if (vt && vt.length <= 100) tags.push(`var:${vt}`);
+        }
+      }
+      // 普通关键词 tags 也塞 (但跳掉跟前缀冲突的)
+      if (Array.isArray(f.tags)) {
+        for (const t of f.tags) {
+          const tt = (t ?? '').trim();
+          if (!tt) continue;
+          if (/^(intent|handoff|risk|fu|var):/.test(tt)) continue;
+          if (tt.length > 30) continue;
+          tags.push(tt);
+        }
+      }
+      // Postgres text[] 单元素长度没硬限 · 但全表 tag 数量保守上限 30
+      return tags.slice(0, 30);
+    };
+
+    // 去重 (用 canonical_question · 同义 variants 不算重)
     const existing = await this.faqRepo.find({ where: { kbId }, select: ['question'] });
     const existSet = new Set(existing.map((e) => e.question.trim().toLowerCase()));
     let skipped = 0;
     const rows: KbFaqEntity[] = [];
     for (const f of faqs) {
-      const q = (f.q ?? '').trim();
-      const a = (f.a ?? '').trim();
+      const q = ((f.canonical_question ?? f.q) ?? '').trim();
+      const a = ((f.answer ?? f.a) ?? '').trim();
       if (!q || !a) continue;
       if (existSet.has(q.toLowerCase())) {
         skipped++;
@@ -414,7 +513,7 @@ ${material.slice(0, 8000)}
           kbId,
           question: q,
           answer: a,
-          tags: Array.isArray(f.tags) ? f.tags.slice(0, 5) : [],
+          tags: buildTags(f),
           status: 'draft', // 默认待审核 · 租户一键通过或逐条编辑
           source: 'ai_generated',
         }),
@@ -423,12 +522,10 @@ ${material.slice(0, 8000)}
     if (rows.length > 0) await this.faqRepo.save(rows);
 
     this.logger.log(
-      `generateFaqs · tenant=${tenantId} · kb=${kbId} · 生成 ${rows.length} / 请求 ${count} · 跳重 ${skipped} · tokens=${res.promptTokens}+${res.completionTokens}`,
+      `generateFaqs · tenant=${tenantId} · kb=${kbId} (${isCompanyCommonKb ? '公司通用' : '产品'}) · 生成 ${rows.length} / 请求 ${count} · 跳重 ${skipped} · tokens=${res.promptTokens}+${res.completionTokens}`,
     );
 
-    // 引用 quota 避免 lint warning (TODO 实现时用)
     void quota;
-
     return { generated: rows.length, skippedDup: skipped };
   }
 

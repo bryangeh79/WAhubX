@@ -62,6 +62,89 @@ export class ReplyExecutorService {
     const settings = await this.settings.get(conv.tenantId);
     if (settings.mode === 'off') return;
 
+    // 2026-04-29 · 任务 4 · 多产品选择菜单
+    //   场景: tenant 有多个产品 KB · conv 没绑产品 KB · 客户没明说哪个产品
+    //   行为:
+    //     a) 如果上一条 reply 是 product_menu_shown · 客户回复"1"/"2"/"产品名" → 解析 + 绑 conv.kbId
+    //     b) 否则若条件满足 → 发菜单
+    //   依据:
+    //     - allProductKbs 数 >= 2
+    //     - conv.kbId == null 或 == default
+    //     - mergedQuestion 不含产品名 (走 normalizeForKbName 检测)
+    //     - 客户消息 不像问候/转人工 (这些走通用 KB FAQ)
+    const allProductKbsForMenu = await this.kbRepo.find({
+      where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
+    });
+    const defaultKbIdEarly = settings.defaultKbId;
+    const isUnboundOrDefault = !conv.kbId || conv.kbId === defaultKbIdEarly;
+    if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault) {
+      // (a) 看上一条 audit 是不是 product_menu_shown · 是的话尝试解析客户回复
+      const lastNotice = await this.auditRepo
+        .createQueryBuilder('a')
+        .where('a.conversation_id = :c', { c: conv.id })
+        .andWhere('a.intent = :i', { i: 'product_menu_shown' })
+        .andWhere('a.created_at >= NOW() - INTERVAL \'5 minutes\'')
+        .orderBy('a.id', 'DESC')
+        .getOne();
+      if (lastNotice) {
+        const picked = this.parseProductMenuReply(mergedQuestion, allProductKbsForMenu);
+        if (picked) {
+          this.logger.log(
+            `conv ${conv.id} · 产品菜单回复命中 · 绑 kb=${picked.id} (${picked.name})`,
+          );
+          conv.kbId = picked.id;
+          await this.convRepo.save(conv);
+          const ack = `好的, 您选了 ${picked.name} 😊 请问您想了解功能、价格还是开通流程? 也可以直接说您的需求`;
+          await this.send(conv, ack, {
+            mode: 'faq',
+            kbId: picked.id,
+            confidence: 1.0,
+            intent: 'product_menu_picked',
+            handoff: false,
+            metadata: { kb_bound_now: true, kb_switched: false, picked_kb_id: picked.id },
+          });
+          return;
+        }
+        // 没 parse 出来 · 不发第二次菜单 · 继续走主流程 (FAQ/RAG 兜底)
+      }
+      // (b) 主动发菜单条件:
+      //   - 客户消息没产品名
+      //   - 客户消息不像问候 / 转人工 / 价格反问 (这些走通用 FAQ 答更自然)
+      //   - 上一条 reply 不是菜单 (避免连发 2 次菜单)
+      const qNormForMenu = mergedQuestion.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const containsProductName = allProductKbsForMenu.some((k) => {
+        const n = k.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return n.length >= 3 && qNormForMenu.includes(n);
+      });
+      const looksLikeGreeting = this.isGreetingOrSimple(mergedQuestion);
+      const shouldShowMenu =
+        !containsProductName && !looksLikeGreeting && !lastNotice;
+      if (shouldShowMenu) {
+        const tenantName = await this.getTenantDisplayName(conv.tenantId);
+        const menuLines = allProductKbsForMenu
+          .map((k, i) => `${i + 1}. ${k.name}${k.description ? ' - ' + k.description.slice(0, 30) : ''}`)
+          .join('\n');
+        const menuText = `您好, 我是 ${tenantName} 的智能客服 😊
+请问您想咨询哪一个产品?
+
+${menuLines}
+
+直接回复编号或产品名称即可`;
+        await this.send(conv, menuText, {
+          mode: 'faq',
+          kbId: defaultKbIdEarly ?? null,
+          confidence: 1.0,
+          intent: 'product_menu_shown',
+          handoff: false,
+          metadata: {
+            product_menu_shown: true,
+            available_kb_ids: allProductKbsForMenu.map((k) => k.id),
+          },
+        });
+        return;
+      }
+    }
+
     // 2026-04-28 · 双层 KB Fallback (产品 KB list → 通用 KB → RAG → handoff)
     //   bug 修: 老逻辑 primaryKbId = conv.kbId ?? defaultKbId · 当 conv 没绑产品 KB 时
     //          primary === default → secondary 自动 null → 产品 KB 永远查不到
@@ -112,27 +195,50 @@ export class ReplyExecutorService {
     }
 
     // 1A · FAQ 匹配 (跨所有 primary 产品 KB · 取最优)
-    let bestPrimary: { kbId: number; faq: KbFaqEntity; score: number } | null = null;
+    let bestPrimary: {
+      kbId: number;
+      faq: KbFaqEntity;
+      score: number;
+      matchedVariant?: string;
+    } | null = null;
     for (const pKbId of primaryKbIds) {
       const m = await this.matchFaq(pKbId, mergedQuestion);
       if (m && (!bestPrimary || m.score > bestPrimary.score)) {
-        bestPrimary = { kbId: pKbId, faq: m.faq, score: m.score };
+        bestPrimary = {
+          kbId: pKbId,
+          faq: m.faq,
+          score: m.score,
+          matchedVariant: m.matchedVariant,
+        };
       }
     }
     if (bestPrimary && bestPrimary.score >= FAQ_MATCH_THRESHOLD) {
       this.logger.log(
-        `conv ${conv.id} · FAQ 命中 primary kb=${bestPrimary.kbId} (跨 ${primaryKbIds.length} 个产品 KB) · score=${bestPrimary.score.toFixed(2)} · faq=${bestPrimary.faq.id}`,
+        `conv ${conv.id} · FAQ 命中 primary kb=${bestPrimary.kbId} (跨 ${primaryKbIds.length} 个产品 KB) · score=${bestPrimary.score.toFixed(2)} · faq=${bestPrimary.faq.id}${bestPrimary.matchedVariant ? ` · variant="${bestPrimary.matchedVariant.slice(0, 30)}"` : ''}`,
       );
       const replyText = this.applyGuardrail(bestPrimary.faq.answer, mergedQuestion, bestPrimary.kbId);
+      // 2026-04-29 · 任务 9 · 写 audit metadata · 含 matched_variant + faq tags 抽出 intent
+      const faqMeta = ReplyExecutorService.extractFaqMeta(bestPrimary.faq.tags);
       await this.send(conv, replyText, {
         mode: 'faq',
         kbId: bestPrimary.kbId,
         matchedFaqId: bestPrimary.faq.id,
         confidence: bestPrimary.score,
-        intent: 'faq_hit',
-        handoff: false,
+        intent: faqMeta.intent ?? 'faq_hit',
+        handoff: faqMeta.handoffAction === 'always',
+        metadata: {
+          matched_variant: bestPrimary.matchedVariant ?? null,
+          faq_intent: faqMeta.intent,
+          faq_handoff_action: faqMeta.handoffAction,
+          faq_risk_level: faqMeta.riskLevel,
+          mode_resolved: 'primary_kb_faq',
+        },
       });
       await this.faqRepo.increment({ id: bestPrimary.faq.id }, 'hitCount', 1);
+      // 任务 8 · faq tag handoff_action='always' → 直接 mark handoff
+      if (faqMeta.handoffAction === 'always') {
+        await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+      }
       return;
     }
 
@@ -141,30 +247,61 @@ export class ReplyExecutorService {
       const faqMatch2 = await this.matchFaq(secondaryKbId, mergedQuestion);
       if (faqMatch2 && faqMatch2.score >= FAQ_MATCH_THRESHOLD) {
         this.logger.log(
-          `conv ${conv.id} · FAQ 命中 secondary 通用 kb=${secondaryKbId} · score=${faqMatch2.score.toFixed(2)} · faq=${faqMatch2.faq.id}`,
+          `conv ${conv.id} · FAQ 命中 secondary 通用 kb=${secondaryKbId} · score=${faqMatch2.score.toFixed(2)} · faq=${faqMatch2.faq.id}${faqMatch2.matchedVariant ? ` · variant="${faqMatch2.matchedVariant.slice(0, 30)}"` : ''}`,
         );
         const replyText = this.applyGuardrail(
           faqMatch2.faq.answer,
           mergedQuestion,
           secondaryKbId,
         );
+        const faqMeta = ReplyExecutorService.extractFaqMeta(faqMatch2.faq.tags);
         await this.send(conv, replyText, {
           mode: 'faq',
           kbId: secondaryKbId,
           matchedFaqId: faqMatch2.faq.id,
           confidence: faqMatch2.score,
-          intent: 'faq_hit_fallback',
-          handoff: false,
+          intent: faqMeta.intent ?? 'faq_hit_fallback',
+          handoff: faqMeta.handoffAction === 'always',
+          metadata: {
+            matched_variant: faqMatch2.matchedVariant ?? null,
+            faq_intent: faqMeta.intent,
+            faq_handoff_action: faqMeta.handoffAction,
+            faq_risk_level: faqMeta.riskLevel,
+            mode_resolved: 'secondary_common_kb_faq',
+          },
         });
         await this.faqRepo.increment({ id: faqMatch2.faq.id }, 'hitCount', 1);
+        if (faqMeta.handoffAction === 'always') {
+          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+        }
         return;
       }
     }
 
     // 2026-04-24 · FAQ 模式: FAQ 没命中就转人工 · 不调 AI
+    // 2026-04-29 · 任务 5 · FAQ-only 兜底: 不直接 markHandoff · 发默认菜单 (产品/价格/开通流程/转人工)
     if (settings.mode === 'faq') {
-      this.logger.debug(`conv ${conv.id} · FAQ 模式 · primary+secondary FAQ 都未命中 · handoff`);
-      await this.markHandoff(conv, 'FAQ 模式 · 未命中');
+      this.logger.debug(`conv ${conv.id} · FAQ 模式 · primary+secondary FAQ 都未命中 · 发默认菜单`);
+      const fallbackMenu = `不好意思, 这个问题我暂时没找到对应资料 😅 我主要可以协助您了解:
+
+1. 产品介绍
+2. 价格 / 套餐
+3. 开通流程
+4. 转人工客服
+
+请直接回复编号或您的需求, 我帮您处理~`;
+      await this.send(conv, fallbackMenu, {
+        mode: 'faq',
+        kbId: secondaryKbId ?? primaryKbIds[0] ?? null,
+        confidence: 0,
+        intent: 'faq_only_fallback_menu',
+        handoff: false,
+        metadata: {
+          faq_only_fallback: true,
+          primary_kb_ids: primaryKbIds,
+        },
+      });
+      // 不 markHandoff · 客户回复编号能继续走 (4=转人工 由后续消息匹配 handoff 关键词触发)
       return;
     }
 
@@ -280,22 +417,60 @@ export class ReplyExecutorService {
       const firstKb = await this.kbRepo.findOne({ where: { id: primaryKbIds[0] } });
       targetedKbName = firstKb?.name ?? '';
     }
-    const systemPrompt = `你是该公司的 WhatsApp 客服代表. 保持友善/简洁/口语化.
+    // 2026-04-29 · 任务 6+7 · system prompt 全面升级
+    //   - 销售引导 (账号数量 / 用途 → Pro/Enterprise 优先)
+    //   - 闲聊处理 (简短陪聊 + 拉回业务)
+    //   - lead collection (兴趣明显时引导留 WhatsApp / 公司名 / 账号需求量)
+    //   - 转人工话术 (价格/demo/购买/付款/退款/账号异常 自动 handoff=true)
+    const systemPrompt = `你是该公司在 WhatsApp 上的智能客服顾问 · 不是单纯说明书机器人.
 业务目标: ${goal}
-重要规则:
-- 只根据"资料"内容回答, 不编造
-- 资料里有的联系方式 (电话/网址/邮箱) 必须保留原样
-- 不报具体价格数字 (若客户问价 · 引导留联系方式)
-- 不承诺 "100%" / "保证" / "绝对"
-- 回复 ${MAX_REPLY_LENGTH} 字以内
+
+== 风格 ==
+- 中文口语化 · 像真人客服微信聊
+- 简洁 (≤ ${MAX_REPLY_LENGTH} 字) · 不官方腔
+- 适度 emoji (😊 ~ 不滥用)
+- 答完带一个自然追问 (推动客户继续说)
+
+== 销售流程 (按客户进度引导) ==
+1. 客户问候 → 问 "您想了解哪个产品" 或介绍主推产品
+2. 客户问产品 → 简要介绍 + 问 "您大概需要多少个号" 或用途
+3. 客户说账号数量 → 推荐方案 (10 号 = Basic / 30 号 = Pro 主推 / 50 号 = Enterprise 主推)
+4. 客户问价 / 想 demo / 要购买 → 立即转人工 (告诉用户"我帮您转接顾问")
+5. 客户表达兴趣 → 引导留 WhatsApp / 公司名 / 联系方式
+
+== 必须转人工的场景 (设 handoff=true) ==
+- 客户问具体价格但资料没价格
+- 客户要 demo / 演示 / 试用 (没 demo 资料就转)
+- 客户说要购买 / 下单 / 报价 / 合同
+- 客户投诉 / 付款 / 退款问题
+- 客户技术问题 / 账号异常 / 登不上
+- 客户骂人 / 情绪激动
+- 客户要求人工 / 真人 / sales / agent / 老板
+
+== 闲聊处理 ==
+- 客户问吃饭 / 天气 / 今天累不累 / 你是谁 (跟产品无关) → 简短陪聊一句, 拉回业务
+  例: "哈哈, 我主要是负责产品咨询的 AI 智能客服 😊 您是想了解产品功能、价格、开通流程, 还是需要我帮您转人工呢?"
+- 不要冷漠拒答, 也不要陪聊太多
+
+== 硬规则 ==
+- 只根据"资料"内容回答 · 不编造
+- 资料里有的联系方式 (电话/网址/邮箱) 必须原样保留
+- **不报具体价格数字** (资料里也只能说大概范围, 引导转人工确认)
+- 不承诺 "100%" / "保证" / "绝对" / "一定"
 - 不提及竞品${blackList ? `\n- 禁止话题: ${blackList}` : ''}
 ${
   targetedKbName
-    ? `- 当前产品 = "${targetedKbName}" · 资料里可能用旧名/英文名/简称 (例如 "${targetedKbName}" 在资料中可能写作不同名字) · 答客户时统一用客户的称呼 "${targetedKbName}", 内容以资料为准`
+    ? `- 当前产品 = "${targetedKbName}" · 资料里产品名可能跟客户称呼不同 (新旧名/英文名/简称) · 答时统一用客户的称呼 "${targetedKbName}"`
     : ''
 }
 
-输出严格 JSON: {"reply": "回复文字", "intent": "curious|interested|buying|complaint|handoff", "handoff": true|false}`;
+== 输出 ==
+严格 JSON · 不要其他文字:
+{
+  "reply": "客服回复文字",
+  "intent": "curious | interested | buying | pricing | demo | complaint | technical | off_topic | handoff",
+  "handoff": true 或 false
+}`;
 
     const userPrompt = `资料:
 """
@@ -383,7 +558,7 @@ ${context.slice(0, 4000)}
   private async matchFaq(
     kbId: number,
     question: string,
-  ): Promise<{ faq: KbFaqEntity; score: number } | null> {
+  ): Promise<{ faq: KbFaqEntity; score: number; matchedVariant?: string } | null> {
     const faqs = await this.faqRepo.find({
       where: { kbId, status: 'enabled' as const },
     });
@@ -392,33 +567,91 @@ ${context.slice(0, 4000)}
     const qTokens = this.tokenize(question);
     if (qTokens.size === 0) return null;
 
-    // 2026-04-28 · Codex 执行单 D · 多语言 FAQ 优先
-    //   bug: 客户问 "Hi" · 跟英文 + 中文 FAQ 都低 jaccard · 排序不稳
-    //   fix: 同语言 FAQ score × 1.20 boost · 不同语言 score × 0.80 降权
-    //        "Hi" → en boost · 优先命中 "Hi! Thanks for reaching out..."
-    //        "你好" → zh boost · 不会跑去英文 FAQ
     const qLang = this.detectLang(question);
 
-    let best: { faq: KbFaqEntity; score: number } | null = null;
+    let best: { faq: KbFaqEntity; score: number; matchedVariant?: string } | null = null;
     for (const f of faqs) {
-      const fTokens = this.tokenize(f.question);
-      let score = this.jaccard(qTokens, fTokens);
-      // 语言加权 · 同语言 +20% · 异语言 -20% · mixed/未知 不动
-      if (qLang !== 'mixed' && qLang !== 'unknown') {
-        const fLangs = this.faqLangs(f);
-        if (fLangs.has(qLang)) {
-          score *= 1.2;
-        } else if (fLangs.size > 0 && !fLangs.has('mixed')) {
-          score *= 0.8;
+      // 2026-04-29 · 任务 2 · 同时跑 canonical question + 所有 variants · 取最高分
+      //   variants 来源: tags 数组里 'var:xxx' 前缀
+      //   兼容老 FAQ (没 var: tags) · 仍按 canonical question 单点 jaccard
+      const candidates: Array<{ text: string; isVariant: boolean }> = [
+        { text: f.question, isVariant: false },
+      ];
+      const variants = ReplyExecutorService.extractVariantsFromTags(f.tags);
+      for (const v of variants) {
+        candidates.push({ text: v, isVariant: true });
+      }
+
+      const fLangs = this.faqLangs(f);
+      let bestForFaq: { score: number; matchedVariant?: string } | null = null;
+      for (const c of candidates) {
+        const cTokens = this.tokenize(c.text);
+        let score = this.jaccard(qTokens, cTokens);
+        // 语言加权 (同 commit 65d4749 逻辑 · 同语言 ×1.2, 异语言 ×0.8)
+        if (qLang !== 'mixed' && qLang !== 'unknown') {
+          if (fLangs.has(qLang)) {
+            score *= 1.2;
+          } else if (fLangs.size > 0 && !fLangs.has('mixed')) {
+            score *= 0.8;
+          }
+        }
+        if (score > 1) score = 1;
+        if (!bestForFaq || score > bestForFaq.score) {
+          bestForFaq = {
+            score,
+            matchedVariant: c.isVariant ? c.text : undefined,
+          };
         }
       }
-      // 限上限 1.0 (保留 threshold 语义)
-      if (score > 1) score = 1;
-      if (!best || score > best.score) {
-        best = { faq: f, score };
+
+      if (bestForFaq && (!best || bestForFaq.score > best.score)) {
+        best = { faq: f, score: bestForFaq.score, matchedVariant: bestForFaq.matchedVariant };
       }
     }
     return best;
+  }
+
+  // 2026-04-29 · 任务 2 · variants 从 tags 数组抽
+  static extractVariantsFromTags(tags: string[] | null | undefined): string[] {
+    if (!tags || tags.length === 0) return [];
+    const out: string[] = [];
+    for (const t of tags) {
+      if (typeof t === 'string' && t.startsWith('var:')) {
+        const v = t.slice(4).trim();
+        if (v) out.push(v);
+      }
+    }
+    return out;
+  }
+
+  // 2026-04-29 · 任务 2 · 解析 tags 里其他元数据
+  static extractFaqMeta(tags: string[] | null | undefined): {
+    intent?: string;
+    handoffAction?: string;
+    riskLevel?: string;
+    followUp?: string;
+    variants: string[];
+    plainTags: string[];
+  } {
+    const out: {
+      intent?: string;
+      handoffAction?: string;
+      riskLevel?: string;
+      followUp?: string;
+      variants: string[];
+      plainTags: string[];
+    } = { variants: [], plainTags: [] };
+    if (!tags) return out;
+    for (const t of tags) {
+      if (typeof t !== 'string') continue;
+      if (t.startsWith('intent:')) out.intent = t.slice(7).trim();
+      else if (t.startsWith('handoff:')) out.handoffAction = t.slice(8).trim();
+      else if (t.startsWith('risk:')) out.riskLevel = t.slice(5).trim();
+      else if (t.startsWith('fu:')) out.followUp = t.slice(3).trim();
+      else if (t.startsWith('var:')) out.variants.push(t.slice(4).trim());
+      else out.plainTags.push(t);
+    }
+    return out;
   }
 
   // 2026-04-28 · Codex D · 语言检测 (粗规则 · 跑 hot path · 不调外部)
@@ -552,6 +785,10 @@ ${context.slice(0, 4000)}
       handoff: boolean;
       costTokensIn?: number;
       costTokensOut?: number;
+      // 2026-04-29 · 任务 9 · 增强 audit metadata · 复用 jsonb guardrail_edits
+      //   字段: matched_variant / product_menu_shown / kb_bound_now / kb_switched
+      //         handoff_reason / was_off_topic / faq_only_fallback / primary_kb_ids 等
+      metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
     const settings = await this.settings.get(conv.tenantId);
@@ -567,21 +804,27 @@ ${context.slice(0, 4000)}
         // 2026-04-26 · R9-bis · 走 SlotsService facade · chromium-aware
         const sendRes = await this.slots.sendText(conv.slotId, jid, replyText);
         sentMessageId = sendRes.waMessageId;
-        // 更新 conversation 计数
-        conv.lastAiReplyAt = new Date();
-        conv.aiReplyCount24h = (conv.aiReplyCount24h ?? 0) + 1;
-        conv.aiReplyCountTotal = (conv.aiReplyCountTotal ?? 0) + 1;
-        await this.convRepo.save(conv);
+        // 更新 conversation 计数 (system_notice/menu 类不算 AI 答 · intent 含 system_notice/product_menu 跳过)
+        const intentRaw = meta.intent ?? '';
+        const isSystemNotice =
+          intentRaw.startsWith('system_notice_') || intentRaw === 'product_menu_shown';
+        if (!isSystemNotice) {
+          conv.lastAiReplyAt = new Date();
+          conv.aiReplyCount24h = (conv.aiReplyCount24h ?? 0) + 1;
+          conv.aiReplyCountTotal = (conv.aiReplyCountTotal ?? 0) + 1;
+          await this.convRepo.save(conv);
+        }
       } catch (err) {
         this.logger.warn(`sendText failed: ${err instanceof Error ? err.message : err}`);
       }
     }
 
-    // 审计
+    // 审计 · metadata 写 guardrail_edits jsonb (复用现有字段 · 零 migration)
     await this.auditRepo.save(
       this.auditRepo.create({
         tenantId: conv.tenantId,
         conversationId: conv.id,
+        inboundMessage: null, // handle() 入口未传 · 后续可补
         replyText,
         mode: meta.mode,
         kbId: meta.kbId ?? null,
@@ -591,12 +834,73 @@ ${context.slice(0, 4000)}
         model: meta.model ?? null,
         intent: meta.intent ?? null,
         handoffTriggered: meta.handoff,
+        guardrailEdits: meta.metadata
+          ? (meta.metadata as Record<string, unknown>)
+          : null,
         sentMessageId,
         draft: false,
         costTokensIn: meta.costTokensIn ?? 0,
         costTokensOut: meta.costTokensOut ?? 0,
       }),
     );
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // 2026-04-29 · 任务 4 · 多产品菜单辅助函数
+  // ════════════════════════════════════════════════════════════════
+
+  /** 检查客户消息是不是问候 / 简单短语 (问候应走通用 FAQ · 不发产品菜单) */
+  private isGreetingOrSimple(s: string): boolean {
+    const trimmed = s.trim().toLowerCase();
+    if (trimmed.length === 0) return true;
+    if (trimmed.length <= 4) return true; // 太短 (hi / 你好 / 嗨 / 在吗 等)
+    const greetingPatterns = [
+      /^(hi|hello|hey|您好|你好|妳好|嗨|哈囉|哈罗|在吗|在嗎)[\s!,.]*$/i,
+      /^(早|早上好|下午好|晚上好|good\s*(morning|afternoon|evening))[\s!,.]*$/i,
+      /^(谢谢|多谢|thanks?|thank\s*you|感谢|ok|好的|嗯|嗯嗯|👍)[\s!,.]*$/i,
+      /^(再见|拜拜|88|bye)[\s!,.]*$/i,
+      /^(人工|真人|客服|转人工|要人工|找人工|转客服|sales|agent)[\s!,.]*$/i,
+    ];
+    return greetingPatterns.some((p) => p.test(trimmed));
+  }
+
+  /** 解析客户对产品菜单的回复 · 返回选中的 KB 或 null */
+  private parseProductMenuReply(
+    s: string,
+    productKbs: KnowledgeBaseEntity[],
+  ): KnowledgeBaseEntity | null {
+    const trimmed = s.trim();
+    // 数字回复 (1, 2, 3) · 0 索引 + 1 = 编号
+    const numMatch = trimmed.match(/^[1-9]\d?$/);
+    if (numMatch) {
+      const idx = parseInt(numMatch[0], 10) - 1;
+      if (idx >= 0 && idx < productKbs.length) return productKbs[idx];
+    }
+    // 产品名包含 (跟 KB pre-filter 同款 normalize)
+    const norm = trimmed.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
+    if (norm.length >= 2) {
+      for (const k of productKbs) {
+        const kn = k.name.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
+        if (kn.length >= 2 && (norm.includes(kn) || kn.includes(norm))) {
+          return k;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 拿 tenant 名字做菜单开场白 */
+  private async getTenantDisplayName(tenantId: number): Promise<string> {
+    try {
+      const rows = await this.convRepo.query<Array<{ name: string }>>(
+        `SELECT name FROM tenant WHERE id = $1 LIMIT 1`,
+        [tenantId],
+      );
+      const name = (rows[0]?.name ?? '').trim();
+      return name || '本公司';
+    } catch {
+      return '本公司';
+    }
   }
 
   private async markHandoff(conv: CustomerConversationEntity, reason?: string): Promise<void> {
