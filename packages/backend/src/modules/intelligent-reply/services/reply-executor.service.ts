@@ -139,8 +139,31 @@ export class ReplyExecutorService {
     //        正确: 通用 FAQ 先试一次 · 命中就答 (问候/闲聊/客气话/转人工等都该走通用 FAQ)
     //   规则: 触发菜单前先扫一遍通用 KB FAQ · 命中 score >= FAQ_THRESHOLD 直接答 · 不发菜单
     //   注: 这只挡 secondary KB FAQ · 产品 KB FAQ 仍走主流程 (KB pre-filter 优先)
+    // 2026-04-29 · 真租户验收 D3 修 · 早期通用 FAQ probe 让位给 KB pre-filter
+    //   bug: 客户问 "M33 多少钱" · 早期 FAQ 命中通用 "多少钱" canonical (jaccard=0.75)
+    //        系统反问 "想了解 FAhubX/M33/WAhubX 哪个的价格" · 但客户已经说 M33
+    //   修: 早期通用 FAQ probe 之前先快速扫 KB pre-filter
+    //       客户消息含具体产品名 → skip 此 probe · 让主路径 KB pre-filter 锁 KB
+    //       问候/闲聊/无产品名 → 仍走早期通用 FAQ probe (问候不被菜单挡 仍生效)
+    const earlyKbProbeNorm = mergedQuestion.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
+    const earlyKbHit = allProductKbsForMenu.some((k) => {
+      const kn = k.name.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
+      if (kn.length < 2 || earlyKbProbeNorm.length < 2) return false;
+      if (earlyKbProbeNorm.includes(kn) || kn.includes(earlyKbProbeNorm)) return true;
+      const maxLen = Math.min(kn.length, 8);
+      for (let len = maxLen; len >= 2; len--) {
+        for (let i = 0; i + len <= kn.length; i++) {
+          if (earlyKbProbeNorm.includes(kn.substring(i, i + len))) return true;
+        }
+      }
+      return false;
+    });
+    if (earlyKbHit && trace) {
+      trace.steps?.push(`early common FAQ probe · 跳过 (客户消息含产品名 · 让主路径 KB pre-filter 锁产品 KB)`);
+    }
+
     let earlyCommonFaqMatch: { faq: KbFaqEntity; score: number; matchedVariant?: string } | null = null;
-    if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault && defaultKbIdEarly) {
+    if (!earlyKbHit && allProductKbsForMenu.length >= 2 && isUnboundOrDefault && defaultKbIdEarly) {
       earlyCommonFaqMatch = await this.matchFaq(defaultKbIdEarly, mergedQuestion);
       if (trace) {
         trace.steps?.push(
@@ -395,7 +418,13 @@ ${menuLines}
     }
 
     // 1B · 双层 fallback · FAQ 匹配 (通用 KB)
-    if (secondaryKbId) {
+    // 2026-04-29 · 真租户验收 D3 修 · isKbExplicitlyTargeted=true 时 skip 1B
+    //   bug: 客户问 "M33 多少钱" · KB pre-filter 锁 M33 · 但 M33 KB 没专属"多少钱" FAQ
+    //        1B secondary 命中通用 "多少钱" canonical → 答 "想了解 FAhubX/M33/WAhubX 哪个的价格"
+    //        客户已经说 M33 · 反问把客户体验拉远
+    //   修: KB pre-filter 锁了产品 KB → skip 1B · 让 RAG 路径接管 (用 M33 chunks 找价格)
+    //       RAG 找不到价格 → 走中段 LLM 答 "资料没价格 · 帮您转人工" (handoff)
+    if (secondaryKbId && !isKbExplicitlyTargeted) {
       const faqMatch2 = await this.matchFaq(secondaryKbId, mergedQuestion);
       if (faqMatch2 && faqMatch2.score >= FAQ_MATCH_THRESHOLD) {
         this.logger.log(
