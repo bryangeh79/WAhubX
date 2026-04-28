@@ -687,7 +687,9 @@ ${material.slice(0, 8000)}
   async customizeStarterFaqs(
     tenantId: number,
     kbId: number,
-  ): Promise<{ processed: number; updated: number; skipped: number; failed: number }> {
+    options: { force?: boolean } = {},
+  ): Promise<{ processed: number; updated: number; skipped: number; failed: number; force: boolean }> {
+    const force = options.force === true;
     await this.get(tenantId, kbId); // 验权限
 
     // 1. 收集业务 context (tenant 其他 product KB 的 description + goal)
@@ -705,17 +707,26 @@ ${material.slice(0, 8000)}
       );
     }
 
-    // 2. 拉本 KB 的 starter FAQ (tags 含 'starter' · 排除已 customized 的)
+    // 2. 拉本 KB 的 starter FAQ
+    //   默认: 仅处理还没 customized 过的 (避免重复调 LLM 烧 token)
+    //   force=true (2026-04-29 · V2.4): 也处理已 customized 的 · 用于"重新优化"
+    //     场景: 老 customize 答案含产品名硬编码 (V2.2 R2 之前的 sanity 漏)
+    //          用户在后台再点一次"AI 重新优化通用 FAQ" · 走 force 路径
+    //          新 sanity check 会拦下 LLM 写产品名 → 真正修干净
     const allFaqs = await this.faqRepo.find({ where: { kbId } });
     const starterFaqs = allFaqs.filter(
       (f) =>
         Array.isArray(f.tags) &&
         f.tags.includes('starter') &&
-        !f.tags.includes('starter-customized'),
+        (force || !f.tags.includes('starter-customized')),
     );
 
     if (starterFaqs.length === 0) {
-      return { processed: 0, updated: 0, skipped: 0, failed: 0 };
+      this.logger.log(
+        `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} force=${force} · 无可处理的 starter FAQ` +
+          (!force ? ' (全部已 customized · 加 force=true 可强制重跑)' : ''),
+      );
+      return { processed: 0, updated: 0, skipped: 0, failed: 0, force };
     }
 
     // 2026-04-29 · V2.2 R2 · 拿 tenant 名 + 准备占位符 ctx
@@ -814,13 +825,14 @@ ${businessContext.slice(0, 2000)}
     }
 
     this.logger.log(
-      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} processed=${starterFaqs.length} updated=${updated} failed=${failed} rejectedHardcoded=${rejectedHardcoded}`,
+      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} force=${force} processed=${starterFaqs.length} updated=${updated} failed=${failed} rejectedHardcoded=${rejectedHardcoded}`,
     );
     return {
       processed: starterFaqs.length,
       updated,
       skipped: starterFaqs.length - updated - failed,
       failed,
+      force,
     };
   }
 }

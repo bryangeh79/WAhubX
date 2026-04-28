@@ -142,40 +142,93 @@ export function KbFaqTab({ kbId, onChanged }: Props) {
   };
 
   // 2026-04-28 · 用租户 AI 把 starter FAQ 改写得贴合公司业务
+  // 2026-04-29 · V2.4 · 加 force 路径
+  //   场景 1 (首次): KB 里 starter FAQ 还没被 customized · 走旧逻辑 (force=false)
+  //   场景 2 (重新优化): 已有 starter-customized FAQ · 弹"覆盖确认" modal · force=true
   const handleCustomizeStarter = () => {
-    modal.confirm({
-      title: '用 AI 优化通用 FAQ',
-      content: (
-        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-          <div>系统会根据你的<strong>产品 KB 描述</strong>调用你配的 AI · 改写每条 starter FAQ 答案让它更贴合公司业务.</div>
-          <div style={{ marginTop: 6, color: '#666' }}>
-            前提: 在 设置 → AI 配置 已填 API Key (DeepSeek / OpenAI / 等)
-          </div>
-          <div style={{ marginTop: 8, color: '#1677ff' }}>
-            约 1-3 分钟 · 处理 50 条 · 费用按你的 AI 套餐扣
-          </div>
-        </div>
-      ),
-      okText: '开始 AI 优化',
-      okButtonProps: { type: 'primary' },
-      onOk: async () => {
-        setCustomizing(true);
-        try {
-          const res = await kbApi.customizeStarterFaqs(kbId);
-          if (res.failed > 0) {
-            message.warning(`AI 优化完成 · 成功 ${res.updated} 条 · 失败 ${res.failed} 条`);
-          } else {
-            message.success(`AI 优化完成 · ${res.updated} 条 starter FAQ 已贴合业务`);
-          }
-          await reload();
-          onChanged();
-        } catch (err) {
-          message.error(extractErrorMessage(err, 'AI 优化失败 · 请确认已配 AI Key'));
-        } finally {
-          setCustomizing(false);
+    // 检测是否已有 customized starter FAQ (老答案可能含产品名硬编码)
+    const customizedCount = faqs.filter(
+      (f) =>
+        Array.isArray(f.tags) &&
+        f.tags.includes('starter') &&
+        f.tags.includes('starter-customized'),
+    ).length;
+    const hasCustomized = customizedCount > 0;
+
+    const runCustomize = async (force: boolean) => {
+      setCustomizing(true);
+      try {
+        const res = await kbApi.customizeStarterFaqs(kbId, { force });
+        if (res.failed > 0) {
+          message.warning(`AI 优化完成 · 成功 ${res.updated} 条 · 失败 ${res.failed} 条`);
+        } else if (res.updated === 0) {
+          message.info(
+            force
+              ? `没有可优化的 starter FAQ`
+              : `所有 starter FAQ 都已优化过 · 如需重新优化请再点一次按钮`,
+          );
+        } else {
+          message.success(
+            force
+              ? `重新优化完成 · ${res.updated} 条 starter FAQ 已覆盖`
+              : `AI 优化完成 · ${res.updated} 条 starter FAQ 已贴合业务`,
+          );
         }
-      },
-    });
+        await reload();
+        onChanged();
+      } catch (err) {
+        message.error(extractErrorMessage(err, 'AI 优化失败 · 请确认已配 AI Key'));
+      } finally {
+        setCustomizing(false);
+      }
+    };
+
+    if (hasCustomized) {
+      // 场景 2: 二次确认 modal (覆盖现有)
+      modal.confirm({
+        title: '重新优化已优化过的通用 FAQ?',
+        content: (
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+            <div>
+              检测到 <strong style={{ color: '#fa8c16' }}>{customizedCount} 条</strong> 已被 AI 优化过的 starter FAQ.
+            </div>
+            <div style={{ marginTop: 8 }}>
+              这会<strong style={{ color: '#cf1322' }}>重新调 AI 优化</strong>这些 FAQ ·
+              <strong style={{ color: '#cf1322' }}>覆盖旧回答</strong>.
+            </div>
+            <div style={{ marginTop: 8, color: '#666' }}>
+              使用场景: 老 customize 答案含写死的产品名 / 旧风格 · 想用最新 sanity check + variants 重写.
+            </div>
+            <div style={{ marginTop: 8, color: '#1677ff' }}>
+              约 1-3 分钟 · 费用按你的 AI 套餐扣 · 此操作不可撤销.
+            </div>
+          </div>
+        ),
+        okText: '确认重新优化（覆盖）',
+        okButtonProps: { danger: true },
+        cancelText: '取消',
+        onOk: async () => runCustomize(true),
+      });
+    } else {
+      // 场景 1: 首次优化 modal (旧行为)
+      modal.confirm({
+        title: '用 AI 优化通用 FAQ',
+        content: (
+          <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+            <div>系统会根据你的<strong>产品 KB 描述</strong>调用你配的 AI · 改写每条 starter FAQ 答案让它更贴合公司业务.</div>
+            <div style={{ marginTop: 6, color: '#666' }}>
+              前提: 在 设置 → AI 配置 已填 API Key (DeepSeek / OpenAI / 等)
+            </div>
+            <div style={{ marginTop: 8, color: '#1677ff' }}>
+              约 1-3 分钟 · 处理 50 条 · 费用按你的 AI 套餐扣
+            </div>
+          </div>
+        ),
+        okText: '开始 AI 优化',
+        okButtonProps: { type: 'primary' },
+        onOk: async () => runCustomize(false),
+      });
+    }
   };
 
   const handleDelete = async (id: number) => {

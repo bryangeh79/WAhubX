@@ -198,11 +198,18 @@ export const kbApi = {
     return res.data;
   },
   // 2026-04-28 · 用租户 AI 改写 starter FAQ · 让答案贴合公司业务
+  // 2026-04-29 · V2.4 · 加 force 参数
+  //   不传 (默认): 仅处理还没 customized 过的 starter FAQ (旧行为)
+  //   force=true: 也重新处理已 customized 过的 (覆盖旧答案)
   async customizeStarterFaqs(
     id: number,
-  ): Promise<{ processed: number; updated: number; skipped: number; failed: number }> {
-    const res = await api.post<{ processed: number; updated: number; skipped: number; failed: number }>(
-      `/knowledge-base/${id}/faqs/customize-starter`,
+    options: { force?: boolean } = {},
+  ): Promise<{ processed: number; updated: number; skipped: number; failed: number; force?: boolean }> {
+    const url = options.force
+      ? `/knowledge-base/${id}/faqs/customize-starter?force=true`
+      : `/knowledge-base/${id}/faqs/customize-starter`;
+    const res = await api.post<{ processed: number; updated: number; skipped: number; failed: number; force?: boolean }>(
+      url,
       undefined,
       { timeout: 600_000 }, // 50+ 条调 AI · 给 10min
     );

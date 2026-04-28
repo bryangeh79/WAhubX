@@ -168,12 +168,19 @@ export class KnowledgeBaseController {
 
   // 2026-04-28 · 用租户的 AI 把 starter FAQ 改写得贴合公司业务
   // 前提: tenant 必须配 AI provider · 否则返 NO_PROVIDER 错
+  // 2026-04-29 · V2.4 · 加 ?force=true query param
+  //   不传 (默认): 仅处理还没 customized 过的 starter FAQ (旧行为, 向后兼容)
+  //   force=true: 也重新处理已 customized 过的 (用于"重新优化", 覆盖旧答案)
+  //   接受值: 'true' / '1' / 'yes' (大小写不敏感) · 其他都按 false
   @Post(':id/faqs/customize-starter')
   customizeStarter(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
+    @Query('force') force?: string,
   ) {
-    return this.service.customizeStarterFaqs(this.tenantOf(cur), id);
+    const isForce = typeof force === 'string'
+      && ['true', '1', 'yes'].includes(force.toLowerCase().trim());
+    return this.service.customizeStarterFaqs(this.tenantOf(cur), id, { force: isForce });
   }
 
   @Patch(':id/faqs/:faqId')
