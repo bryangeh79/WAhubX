@@ -158,6 +158,24 @@ export class KnowledgeBaseController {
     return this.service.approveAllDrafts(this.tenantOf(cur), id);
   }
 
+  // 2026-04-28 · 通用 FAQ starter (问候/身份/转人工等 52 条) · 灌入指定 KB
+  // idempotent · 已存在 question 跳过. id=0 时自动找/建 default KB.
+  @Post(':id/faqs/seed-common')
+  seedCommon(@CurrentUser() cur: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    const kbId = id === 0 ? undefined : id;
+    return this.service.seedCommonFaqs(this.tenantOf(cur), kbId);
+  }
+
+  // 2026-04-28 · 用租户的 AI 把 starter FAQ 改写得贴合公司业务
+  // 前提: tenant 必须配 AI provider · 否则返 NO_PROVIDER 错
+  @Post(':id/faqs/customize-starter')
+  customizeStarter(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.service.customizeStarterFaqs(this.tenantOf(cur), id);
+  }
+
   @Patch(':id/faqs/:faqId')
   updateFaq(
     @CurrentUser() cur: RequestUser,

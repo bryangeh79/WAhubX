@@ -13,6 +13,8 @@ import { KbFaqEntity, FaqSource, FaqStatus } from '../entities/kb-faq.entity';
 import { KbProtectedEntity, ProtectedEntityType } from '../entities/kb-protected.entity';
 import { FileParserService } from './file-parser.service';
 import { PlatformAiService } from './platform-ai.service';
+import { AiTextService } from '../../ai/ai-text.service';
+import { STARTER_COMMON_FAQ, COMMON_KB_META } from '../data/starter-common-faq';
 
 const DEFAULT_FAQ_QUOTA_PER_MONTH = 20;
 
@@ -33,6 +35,7 @@ export class KnowledgeBaseService {
     private readonly protectedRepo: Repository<KbProtectedEntity>,
     private readonly parser: FileParserService,
     private readonly platformAi: PlatformAiService,
+    private readonly tenantAi: AiTextService,
   ) {}
 
   // ── CRUD ────────────────────────────────────────
@@ -468,5 +471,195 @@ ${material.slice(0, 8000)}
     const faqDraft = await this.faqRepo.count({ where: { kbId, status: 'draft' } });
     const faqEnabled = await this.faqRepo.count({ where: { kbId, status: 'enabled' } });
     return { sources, chunks, faqs, faqDraft, faqEnabled, entities };
+  }
+
+  // ── 通用 FAQ starter ────────────────────────────────────
+  // 2026-04-28 · 用户高频用 · 必须可重新种子化 · 也支持 AI 优化
+
+  /**
+   * 给 KB 灌 starter FAQ (52 条问候/身份/转人工等通用问答)
+   * idempotent · 已存在的 question 不重复插
+   * 如果该 tenant 还没 default KB · 自动建一个并设为 default
+   *
+   * 返回: { kbId, inserted, skipped, created (true=新建了 KB) }
+   */
+  async seedCommonFaqs(
+    tenantId: number,
+    targetKbId?: number,
+  ): Promise<{ kbId: number; inserted: number; skipped: number; created: boolean }> {
+    let kbId = targetKbId ?? 0;
+    let created = false;
+
+    if (!kbId) {
+      // 找 tenant 的 default KB
+      const def = await this.kbRepo.findOne({ where: { tenantId, isDefault: true } });
+      if (def) {
+        kbId = def.id;
+      } else {
+        // 没 default · 看有没有同名 KB
+        const sameName = await this.kbRepo.findOne({
+          where: { tenantId, name: COMMON_KB_META.name },
+        });
+        if (sameName) {
+          sameName.isDefault = true;
+          await this.kbRepo.save(sameName);
+          kbId = sameName.id;
+        } else {
+          // 真新建
+          const newKb = await this.kbRepo.save(
+            this.kbRepo.create({
+              tenantId,
+              name: COMMON_KB_META.name,
+              description: COMMON_KB_META.description,
+              goalPrompt: COMMON_KB_META.goalPrompt,
+              language: COMMON_KB_META.language,
+              isDefault: true,
+              status: KbStatus.Enabled,
+            }),
+          );
+          kbId = newKb.id;
+          created = true;
+        }
+      }
+    } else {
+      // 验 KB 归属
+      await this.get(tenantId, kbId);
+    }
+
+    // 灌 FAQ · 跳已存在 question
+    let inserted = 0;
+    let skipped = 0;
+    for (const faq of STARTER_COMMON_FAQ) {
+      const exist = await this.faqRepo.findOne({ where: { kbId, question: faq.question } });
+      if (exist) {
+        skipped++;
+        continue;
+      }
+      await this.faqRepo.save(
+        this.faqRepo.create({
+          kbId,
+          question: faq.question,
+          answer: faq.answer,
+          tags: faq.tags,
+          status: 'enabled' as FaqStatus,
+          source: 'manual_bulk' as FaqSource,
+        }),
+      );
+      inserted++;
+    }
+
+    this.logger.log(
+      `seedCommonFaqs · tenant=${tenantId} kb=${kbId} created=${created} inserted=${inserted} skipped=${skipped}`,
+    );
+    return { kbId, inserted, skipped, created };
+  }
+
+  /**
+   * 用 AI (租户配的 provider) 把 starter FAQ 改写得贴合 tenant 自己的业务
+   * - 拉 tenant 的产品 KB description / goal_prompt 作为 context
+   * - 对每条带 'starter' tag 的 FAQ · 让 AI 改写 answer
+   * - 改完 tag 加上 'starter-customized' (UI 显蓝色"AI 优化"标)
+   *
+   * 返回: { processed, updated, skipped, failed }
+   */
+  async customizeStarterFaqs(
+    tenantId: number,
+    kbId: number,
+  ): Promise<{ processed: number; updated: number; skipped: number; failed: number }> {
+    await this.get(tenantId, kbId); // 验权限
+
+    // 1. 收集业务 context (tenant 其他 product KB 的 description + goal)
+    const productKbs = await this.kbRepo.find({
+      where: { tenantId },
+    });
+    const businessContext = productKbs
+      .filter((k) => k.id !== kbId) // 排除当前通用 KB 自己
+      .map((k) => `[KB: ${k.name}] ${k.description ?? ''}\n目标: ${k.goalPrompt ?? ''}`)
+      .join('\n\n');
+
+    if (!businessContext.trim()) {
+      throw new BadRequestException(
+        '没有产品 KB 可作为业务上下文 · 请先建 1 个产品 KB 并填描述',
+      );
+    }
+
+    // 2. 拉本 KB 的 starter FAQ (tags 含 'starter' · 排除已 customized 的)
+    const allFaqs = await this.faqRepo.find({ where: { kbId } });
+    const starterFaqs = allFaqs.filter(
+      (f) =>
+        Array.isArray(f.tags) &&
+        f.tags.includes('starter') &&
+        !f.tags.includes('starter-customized'),
+    );
+
+    if (starterFaqs.length === 0) {
+      return { processed: 0, updated: 0, skipped: 0, failed: 0 };
+    }
+
+    let updated = 0;
+    let failed = 0;
+
+    // 3. 对每条 FAQ 调 AI 改写 (单条单调用 · 控成本 + 容错)
+    for (const faq of starterFaqs) {
+      const systemPrompt = `你是一个客服 FAQ 优化助手. 根据公司业务上下文 · 把通用 FAQ 答案改写得更贴合公司. 要求:
+- 友善亲切 · 口语化
+- 不超过 80 字
+- 保留关键引导信息 (如让用户提供订单号 / 转人工等)
+- 自然不生硬 · 不要太营销
+- 直接输出新答案 · 不要解释 · 不要 JSON`;
+
+      const userPrompt = `公司业务上下文:
+${businessContext.slice(0, 2000)}
+
+通用 FAQ 问题: ${faq.question}
+默认答案: ${faq.answer}
+
+请改写答案 (直接输出文本):`;
+
+      try {
+        const r = await this.tenantAi.chatWithTenant({
+          systemPrompt,
+          userPrompt,
+          maxTokens: 200,
+          timeoutMs: 30_000,
+        });
+        if (!r.ok) {
+          failed++;
+          this.logger.warn(`customizeStarterFaqs · faq ${faq.id} · AI 失败: ${r.errorCode}`);
+          continue;
+        }
+        let newAnswer = (r.text ?? '').trim();
+        // 简单 sanity: 长度 + 防 AI 输出明显格式错误
+        if (newAnswer.length < 5 || newAnswer.length > 500) {
+          failed++;
+          continue;
+        }
+        // 截 200 字防 guardrail
+        if (newAnswer.length > 200) newAnswer = newAnswer.slice(0, 200);
+
+        // 更新 FAQ · 加 starter-customized tag · 保留原 starter tag 兼容
+        const newTags = Array.from(new Set([...(faq.tags ?? []), 'starter-customized']));
+        await this.faqRepo.update(faq.id, {
+          answer: newAnswer,
+          tags: newTags,
+        });
+        updated++;
+      } catch (err) {
+        failed++;
+        this.logger.warn(
+          `customizeStarterFaqs · faq ${faq.id} · 异常: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} processed=${starterFaqs.length} updated=${updated} failed=${failed}`,
+    );
+    return {
+      processed: starterFaqs.length,
+      updated,
+      skipped: starterFaqs.length - updated - failed,
+      failed,
+    };
   }
 }

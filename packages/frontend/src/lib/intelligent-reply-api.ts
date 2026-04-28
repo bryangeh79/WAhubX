@@ -187,6 +187,27 @@ export const kbApi = {
     const res = await api.post<{ updated: number }>(`/knowledge-base/${id}/faqs/approve-all-drafts`);
     return res.data;
   },
+  // 2026-04-28 · 灌入 52 条通用 starter FAQ (问候/身份/转人工等)
+  // id=0 → 自动找/建 default KB · 反之灌入指定 KB
+  async seedCommonFaqs(
+    id: number,
+  ): Promise<{ kbId: number; inserted: number; skipped: number; created: boolean }> {
+    const res = await api.post<{ kbId: number; inserted: number; skipped: number; created: boolean }>(
+      `/knowledge-base/${id}/faqs/seed-common`,
+    );
+    return res.data;
+  },
+  // 2026-04-28 · 用租户 AI 改写 starter FAQ · 让答案贴合公司业务
+  async customizeStarterFaqs(
+    id: number,
+  ): Promise<{ processed: number; updated: number; skipped: number; failed: number }> {
+    const res = await api.post<{ processed: number; updated: number; skipped: number; failed: number }>(
+      `/knowledge-base/${id}/faqs/customize-starter`,
+      undefined,
+      { timeout: 600_000 }, // 50+ 条调 AI · 给 10min
+    );
+    return res.data;
+  },
   async updateFaq(
     id: number,
     faqId: number,

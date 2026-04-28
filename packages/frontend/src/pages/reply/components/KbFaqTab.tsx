@@ -50,6 +50,8 @@ export function KbFaqTab({ kbId, onChanged }: Props) {
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<KbFaq | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
 
   const reload = async () => {
     setLoading(true);
@@ -104,6 +106,76 @@ export function KbFaqTab({ kbId, onChanged }: Props) {
     } catch (err) {
       message.error(extractErrorMessage(err, '操作失败'));
     }
+  };
+
+  // 2026-04-28 · 灌入 52 条通用 starter FAQ (问候/身份/转人工等共性问题)
+  const handleSeedCommon = () => {
+    modal.confirm({
+      title: '灌入 52 条通用 FAQ',
+      content: (
+        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+          <div>包含 12 类通用客服问答:</div>
+          <div style={{ marginTop: 6, color: '#666' }}>
+            问候 · 身份 · 营业时间 · 联系方式 · 价格咨询 · 产品介绍 · 优惠活动 ·
+            订单物流 · 退款售后 · 投诉 · 转人工 · 道别感谢
+          </div>
+          <div style={{ marginTop: 8, color: '#fa8c16' }}>
+            ⚠ 已存在的 question 会跳过 (idempotent · 重复点没坏处)
+          </div>
+        </div>
+      ),
+      okText: '灌入',
+      onOk: async () => {
+        setSeeding(true);
+        try {
+          const res = await kbApi.seedCommonFaqs(kbId);
+          message.success(`已灌入 ${res.inserted} 条 · 跳重复 ${res.skipped} 条`);
+          await reload();
+          onChanged();
+        } catch (err) {
+          message.error(extractErrorMessage(err, '灌入失败'));
+        } finally {
+          setSeeding(false);
+        }
+      },
+    });
+  };
+
+  // 2026-04-28 · 用租户 AI 把 starter FAQ 改写得贴合公司业务
+  const handleCustomizeStarter = () => {
+    modal.confirm({
+      title: '用 AI 优化通用 FAQ',
+      content: (
+        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+          <div>系统会根据你的<strong>产品 KB 描述</strong>调用你配的 AI · 改写每条 starter FAQ 答案让它更贴合公司业务.</div>
+          <div style={{ marginTop: 6, color: '#666' }}>
+            前提: 在 设置 → AI 配置 已填 API Key (DeepSeek / OpenAI / 等)
+          </div>
+          <div style={{ marginTop: 8, color: '#1677ff' }}>
+            约 1-3 分钟 · 处理 50 条 · 费用按你的 AI 套餐扣
+          </div>
+        </div>
+      ),
+      okText: '开始 AI 优化',
+      okButtonProps: { type: 'primary' },
+      onOk: async () => {
+        setCustomizing(true);
+        try {
+          const res = await kbApi.customizeStarterFaqs(kbId);
+          if (res.failed > 0) {
+            message.warning(`AI 优化完成 · 成功 ${res.updated} 条 · 失败 ${res.failed} 条`);
+          } else {
+            message.success(`AI 优化完成 · ${res.updated} 条 starter FAQ 已贴合业务`);
+          }
+          await reload();
+          onChanged();
+        } catch (err) {
+          message.error(extractErrorMessage(err, 'AI 优化失败 · 请确认已配 AI Key'));
+        } finally {
+          setCustomizing(false);
+        }
+      },
+    });
   };
 
   const handleDelete = async (id: number) => {
@@ -217,6 +289,23 @@ export function KbFaqTab({ kbId, onChanged }: Props) {
             </Button>
           </Popconfirm>
         )}
+        {/* 2026-04-28 · 通用 FAQ starter (问候/身份/转人工等 52 条) */}
+        <Button
+          icon={<span>🌟</span>}
+          onClick={handleSeedCommon}
+          loading={seeding}
+          style={{ borderColor: '#faad14', color: '#fa8c16' }}
+        >
+          灌入通用 FAQ (52 条)
+        </Button>
+        <Button
+          icon={<span>🤖</span>}
+          onClick={handleCustomizeStarter}
+          loading={customizing}
+          style={{ borderColor: '#1677ff', color: '#1677ff' }}
+        >
+          AI 优化通用 FAQ
+        </Button>
       </Space>
 
       {/* 过滤 */}

@@ -60,26 +60,36 @@ export class ReplyExecutorService {
     const settings = await this.settings.get(conv.tenantId);
     if (settings.mode === 'off') return;
 
-    // 选 KB: 对话绑定的 > 租户 default
-    const kbId = conv.kbId ?? settings.defaultKbId;
-    if (!kbId) {
+    // 2026-04-28 · 双层 KB Fallback (产品 KB → 通用 KB → RAG → handoff)
+    // primaryKbId: 对话绑定的产品 KB (或 fallback 到 default)
+    // secondaryKbId: 通用 KB (default_kb_id) · 仅当 primary 不是 default 时启用
+    const primaryKbId = conv.kbId ?? settings.defaultKbId;
+    if (!primaryKbId) {
       this.logger.debug(`conv ${conv.id} · 无 KB · handoff`);
       await this.markHandoff(conv);
       return;
     }
-    const kb = await this.kbRepo.findOne({ where: { id: kbId } });
-    if (!kb) {
+    const secondaryKbId =
+      settings.defaultKbId && primaryKbId !== settings.defaultKbId
+        ? settings.defaultKbId
+        : null;
+
+    const primaryKb = await this.kbRepo.findOne({ where: { id: primaryKbId } });
+    if (!primaryKb) {
       await this.markHandoff(conv);
       return;
     }
 
-    // 1. FAQ 匹配 (两种模式都走这步)
-    const faqMatch = await this.matchFaq(kbId, mergedQuestion);
+    // 1A · FAQ 匹配 (产品 KB)
+    const faqMatch = await this.matchFaq(primaryKbId, mergedQuestion);
     if (faqMatch && faqMatch.score >= FAQ_MATCH_THRESHOLD) {
-      const replyText = this.applyGuardrail(faqMatch.faq.answer, mergedQuestion, kbId);
+      this.logger.log(
+        `conv ${conv.id} · FAQ 命中 primary kb=${primaryKbId} · score=${faqMatch.score.toFixed(2)} · faq=${faqMatch.faq.id}`,
+      );
+      const replyText = this.applyGuardrail(faqMatch.faq.answer, mergedQuestion, primaryKbId);
       await this.send(conv, replyText, {
         mode: 'faq',
-        kbId,
+        kbId: primaryKbId,
         matchedFaqId: faqMatch.faq.id,
         confidence: faqMatch.score,
         intent: 'faq_hit',
@@ -89,9 +99,34 @@ export class ReplyExecutorService {
       return;
     }
 
+    // 1B · 双层 fallback · FAQ 匹配 (通用 KB)
+    if (secondaryKbId) {
+      const faqMatch2 = await this.matchFaq(secondaryKbId, mergedQuestion);
+      if (faqMatch2 && faqMatch2.score >= FAQ_MATCH_THRESHOLD) {
+        this.logger.log(
+          `conv ${conv.id} · FAQ 命中 secondary 通用 kb=${secondaryKbId} · score=${faqMatch2.score.toFixed(2)} · faq=${faqMatch2.faq.id}`,
+        );
+        const replyText = this.applyGuardrail(
+          faqMatch2.faq.answer,
+          mergedQuestion,
+          secondaryKbId,
+        );
+        await this.send(conv, replyText, {
+          mode: 'faq',
+          kbId: secondaryKbId,
+          matchedFaqId: faqMatch2.faq.id,
+          confidence: faqMatch2.score,
+          intent: 'faq_hit_fallback',
+          handoff: false,
+        });
+        await this.faqRepo.increment({ id: faqMatch2.faq.id }, 'hitCount', 1);
+        return;
+      }
+    }
+
     // 2026-04-24 · FAQ 模式: FAQ 没命中就转人工 · 不调 AI
     if (settings.mode === 'faq') {
-      this.logger.debug(`conv ${conv.id} · FAQ 模式 · FAQ 未命中 · handoff`);
+      this.logger.debug(`conv ${conv.id} · FAQ 模式 · primary+secondary FAQ 都未命中 · handoff`);
       await this.markHandoff(conv, 'FAQ 模式 · 未命中');
       return;
     }
@@ -111,15 +146,39 @@ export class ReplyExecutorService {
     }
     const qVec = embedRes.vectors[0];
 
-    // 向量检索 top-3
-    const candidates = await this.chunkRepo.find({ where: { kbId } });
-    const scored = candidates
+    // 向量检索 top-3 (优先产品 KB)
+    const primaryCandidates = await this.chunkRepo.find({ where: { kbId: primaryKbId } });
+    let scored = primaryCandidates
       .filter((c) => c.embedding && c.embedding.length === qVec.length)
       .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 3);
 
-    const topScore = scored[0]?.score ?? 0;
+    let topScore = scored[0]?.score ?? 0;
+    let usedKbId = primaryKbId;
+    let usedKb = primaryKb;
+
+    // 2026-04-28 · 双层 fallback · primary RAG 信心低 · 试通用 KB
+    if (topScore < RAG_CONF_HIGH && secondaryKbId) {
+      const secondaryCandidates = await this.chunkRepo.find({ where: { kbId: secondaryKbId } });
+      const scored2 = secondaryCandidates
+        .filter((c) => c.embedding && c.embedding.length === qVec.length)
+        .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+      const topScore2 = scored2[0]?.score ?? 0;
+      if (topScore2 > topScore) {
+        // 通用 KB 信心更高 · 切到通用
+        this.logger.log(
+          `conv ${conv.id} · RAG fallback to secondary kb=${secondaryKbId} · score=${topScore2.toFixed(2)} > primary ${topScore.toFixed(2)}`,
+        );
+        scored = scored2;
+        topScore = topScore2;
+        usedKbId = secondaryKbId;
+        const secondKb = await this.kbRepo.findOne({ where: { id: secondaryKbId } });
+        if (secondKb) usedKb = secondKb;
+      }
+    }
 
     if (topScore < RAG_CONF_LOW) {
       // 置信度太低 → 不编造, handoff
@@ -128,19 +187,19 @@ export class ReplyExecutorService {
         '这个问题让我确认一下, 稍后让同事跟你联系 🙌',
         {
           mode: 'handoff',
-          kbId,
+          kbId: usedKbId,
           confidence: topScore,
           intent: 'low_confidence',
           handoff: true,
         },
       );
-      await this.markHandoff(conv, 'RAG 低置信度');
+      await this.markHandoff(conv, 'RAG 低置信度 (primary+fallback 都低)');
       return;
     }
 
     // 组 prompt 调 LLM
     const context = scored.map((s) => s.chunk.text).join('\n\n---\n\n');
-    const goal = kb.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
+    const goal = usedKb.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
     const blackList = (settings.blacklistKeywords ?? []).join('; ');
 
     const systemPrompt = `你是该公司的 WhatsApp 客服代表. 保持友善/简洁/口语化.
@@ -203,11 +262,11 @@ ${context.slice(0, 4000)}
     }
 
     // Guardrail 后处理
-    replyText = this.applyGuardrail(replyText, mergedQuestion, kbId);
+    replyText = this.applyGuardrail(replyText, mergedQuestion, usedKbId);
 
     await this.send(conv, replyText, {
       mode: 'ai',
-      kbId,
+      kbId: usedKbId,
       matchedChunkIds: scored.map((s) => s.chunk.id),
       confidence: topScore,
       model: llmRes.model,
