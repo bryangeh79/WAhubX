@@ -52,11 +52,11 @@ export interface InboundWatcherOptions {
   log: Logger;
 }
 
-// 2026-04-25 · B 路线 · 默认 dedupe 窗 60s → 5s
-// 老逻辑: 同 chat / 同 unread count 60s 内全丢 → 用户连发多条 / 同号两条都漏
-// 新逻辑: 5s 内同 key 丢 (只压 MutationObserver 单帧多次 fire) · 5s 后视作新事件
-// 真业务级去重 (waMessageId) 留 D11+ 进 chat 拿原文时做
-const DEFAULT_DEDUPE_WINDOW_MS = 5_000;
+// 2026-04-28 · 5s → 60s
+//   bug: 加了 5s poll 后 · 同 row 每 5s 都重新 fire · 后端 8s 聚合 timer 反复被 reset · 永不 flush
+//   60s 窗 + 去 30s 时间桶 (见下) → 同 row 60s 内只 fire 1 次 · 8s 聚合稳定 fire → AI 回复发出
+//   真客户连发多条会改 unread count · dedupeKey 含 unread → 仍可识别新消息
+const DEFAULT_DEDUPE_WINDOW_MS = 60_000;
 
 /**
  * 安装 inbound watcher · 必须在 chat-list 状态调
@@ -314,10 +314,13 @@ export async function installInboundWatcher(
         row.querySelector('div > span:last-of-type');
       if (lastEl) lastMsg = (lastEl.textContent ?? '').trim().slice(0, 200);
 
-      // 2026-04-25 · B 路线 · dedupeKey 加 30s 时间桶 · 同 chat 30s+ 来新消息视作新事件
-      // 5s 窗口内 + 同 bucket = 真重复 (DOM 同帧多 fire); 30s 后 bucket 翻 = 同内容也算新
-      const timeBucket = Math.floor(Date.now() / 30_000);
-      const dedupeKey = `${text.slice(0, 50)}|${lastMsg ?? ''}|${unread}|${timeBucket}`;
+      // 2026-04-28 · 去掉 30s 时间桶 · 同 row 不再被强制重 fire
+      //   bug: 时间桶导致每 30s 同未读 row 又 fire · 后端 8s 聚合 timer 永远被 reset
+      //   现: dedupeKey = (rowId or text) + lastMsg + unread
+      //   user 真发新消息 → unread+1 → key 变 → 新 fire (依然能识别新消息)
+      //   user 一直没读 → unread 不变 → key 不变 → 60s 窗内不重 fire
+      const rowKeyBase = rowDataId ?? text.slice(0, 50);
+      const dedupeKey = `${rowKeyBase}|${lastMsg ?? ''}|${unread}`;
 
       return {
         preview: text.slice(0, 80),
