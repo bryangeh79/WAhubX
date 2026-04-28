@@ -3,7 +3,7 @@
 //   1. 顶部 dropdown 列出所有已绑定号 (客服号优先 · 在线优先)
 //   2. 任意时间只允许打开 1 个接管窗口 (前端 state 单 activeSlotId)
 //   3. 切号自动 release 旧 + acquire 新 (后端 takeover-lock 已支持 per-account 锁)
-//   4. 跨页面导航不释放 · localStorage 持久化 activeSlotId
+//   4. 跨页面导航不释放 · sessionStorage 持久化 activeSlotId
 //      释放时机仅: 显式切号 / 显式点 [释放] / backend 30min idle 兜底
 //   5. 每 60s 心跳一次 keep-alive 锁 (仅页面打开时)
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -32,12 +32,14 @@ interface SlotOption {
 
 // 2026-04-28 · 接管态持久化 · 跨页面导航不释放锁
 // 用户体验: 选了 slot 2 后切去广告页 / 仪表盘 · 回来仍是 slot 2 接管中
-// 释放时机: 显式切号 · 显式点 [释放] · backend 30min idle 兜底
-const TAKEOVER_STORAGE_KEY = 'wahubx.takeover.activeSlotId';
+// 释放时机: 显式切号 · 显式点 [释放] · backend 30min idle 兜底 · 关 tab/窗口
+//
+// 用 sessionStorage 不是 localStorage · 只在当前浏览器 tab 有效
+// 关闭 tab/窗口 = 自动清 (避免跨日跨会话误激活 · 老 bug 用户被静默接管 slot)
 
 function loadActiveSlotIdFromStorage(): number | null {
   try {
-    const raw = localStorage.getItem(TAKEOVER_STORAGE_KEY);
+    const raw = sessionStorage.getItem(TAKEOVER_STORAGE_KEY);
     if (!raw) return null;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) ? n : null;
@@ -48,17 +50,17 @@ function loadActiveSlotIdFromStorage(): number | null {
 
 function saveActiveSlotIdToStorage(slotId: number | null): void {
   try {
-    if (slotId === null) localStorage.removeItem(TAKEOVER_STORAGE_KEY);
-    else localStorage.setItem(TAKEOVER_STORAGE_KEY, String(slotId));
+    if (slotId === null) sessionStorage.removeItem(TAKEOVER_STORAGE_KEY);
+    else sessionStorage.setItem(TAKEOVER_STORAGE_KEY, String(slotId));
   } catch {
-    /* localStorage 满了不致命 */
+    /* sessionStorage 满了不致命 */
   }
 }
 
 export function TakeoverPage() {
   const { message, modal } = App.useApp();
   const [slots, setSlots] = useState<SlotOption[]>([]);
-  // 初值从 localStorage 读 · 跨页面导航回来恢复
+  // 初值从 sessionStorage 读 · 跨页面导航回来恢复
   const [activeSlotId, setActiveSlotIdRaw] = useState<number | null>(loadActiveSlotIdFromStorage);
   const setActiveSlotId = useCallback((next: number | null | ((prev: number | null) => number | null)) => {
     setActiveSlotIdRaw((prev) => {
@@ -108,7 +110,7 @@ export function TakeoverPage() {
   // 2026-04-28 · 不再 unmount 自动释放 · 改为持久化 + backend 30min idle 兜底
   // 用户切到广告/仪表盘等其他页 · 接管态保留 · 回来仍是同一个号
 
-  // 重挂载时 · 如果 localStorage 有 activeSlotId · 静默 re-acquire (idempotent)
+  // 重挂载时 · 如果 sessionStorage 有 activeSlotId · 静默 re-acquire (idempotent)
   // 兜底场景: 用户离开 30+ 分钟 backend idle 释放了 · 回来时重新拿
   const acquiredOnMountRef = useRef(false);
   useEffect(() => {
@@ -124,6 +126,10 @@ export function TakeoverPage() {
     // acquire 是幂等的: 同 user 持锁 → 返已有锁 · 锁空 → 新建. 不同 user → 403, 清状态
     void api
       .post(`/takeover/${slot.accountId}/acquire`, {})
+      .then(() => {
+        // 显式提示 · 不再静默 (老 bug: 用户不知道自己仍在接管 slot 2)
+        message.info(`已恢复对 #${slot.slotIndex} (${slot.phoneNumber ?? '—'}) 的接管. 不需要请点 [释放]`);
+      })
       .catch((err: { response?: { status?: number } }) => {
         if (err?.response?.status === 403) {
           message.warning('该号被其他用户接管中 · 已切回未接管状态');
