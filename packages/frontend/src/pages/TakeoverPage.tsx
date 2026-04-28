@@ -3,11 +3,10 @@
 //   1. 顶部 dropdown 列出所有已绑定号 (客服号优先 · 在线优先)
 //   2. 任意时间只允许打开 1 个接管窗口 (前端 state 单 activeSlotId)
 //   3. 切号自动 release 旧 + acquire 新 (后端 takeover-lock 已支持 per-account 锁)
-//   4. 离开页面时自动释放当前锁 (避免锁泄漏 · backend 30min idle 兜底)
-//   5. 每 60s 心跳一次 keep-alive 锁
-//
-// 历史: 老版只硬看 customer_service 角色号, 用户要任意切号
-import { useEffect, useRef, useState } from 'react';
+//   4. 跨页面导航不释放 · localStorage 持久化 activeSlotId
+//      释放时机仅: 显式切号 / 显式点 [释放] / backend 30min idle 兜底
+//   5. 每 60s 心跳一次 keep-alive 锁 (仅页面打开时)
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Card, Select, Space, Tag, Typography } from 'antd';
 import { MessageOutlined, SwapOutlined } from '@ant-design/icons';
 import { api } from '@/lib/api';
@@ -31,19 +30,46 @@ interface SlotOption {
   accountId: number | null;
 }
 
+// 2026-04-28 · 接管态持久化 · 跨页面导航不释放锁
+// 用户体验: 选了 slot 2 后切去广告页 / 仪表盘 · 回来仍是 slot 2 接管中
+// 释放时机: 显式切号 · 显式点 [释放] · backend 30min idle 兜底
+const TAKEOVER_STORAGE_KEY = 'wahubx.takeover.activeSlotId';
+
+function loadActiveSlotIdFromStorage(): number | null {
+  try {
+    const raw = localStorage.getItem(TAKEOVER_STORAGE_KEY);
+    if (!raw) return null;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveSlotIdToStorage(slotId: number | null): void {
+  try {
+    if (slotId === null) localStorage.removeItem(TAKEOVER_STORAGE_KEY);
+    else localStorage.setItem(TAKEOVER_STORAGE_KEY, String(slotId));
+  } catch {
+    /* localStorage 满了不致命 */
+  }
+}
+
 export function TakeoverPage() {
   const { message, modal } = App.useApp();
   const [slots, setSlots] = useState<SlotOption[]>([]);
-  const [activeSlotId, setActiveSlotId] = useState<number | null>(null);
+  // 初值从 localStorage 读 · 跨页面导航回来恢复
+  const [activeSlotId, setActiveSlotIdRaw] = useState<number | null>(loadActiveSlotIdFromStorage);
+  const setActiveSlotId = useCallback((next: number | null | ((prev: number | null) => number | null)) => {
+    setActiveSlotIdRaw((prev) => {
+      const v = typeof next === 'function' ? (next as (p: number | null) => number | null)(prev) : next;
+      saveActiveSlotIdToStorage(v);
+      return v;
+    });
+  }, []);
   const [switching, setSwitching] = useState(false);
   const [loading, setLoading] = useState(true);
-
-  // ref 给 unmount cleanup 用 (避免 stale closure)
-  const activeSlotIdRef = useRef<number | null>(null);
   const slotsRef = useRef<SlotOption[]>([]);
-  useEffect(() => {
-    activeSlotIdRef.current = activeSlotId;
-  }, [activeSlotId]);
   useEffect(() => {
     slotsRef.current = slots;
   }, [slots]);
@@ -79,19 +105,32 @@ export function TakeoverPage() {
     return () => clearInterval(t);
   }, []);
 
-  // 卸载时自动释放当前锁
+  // 2026-04-28 · 不再 unmount 自动释放 · 改为持久化 + backend 30min idle 兜底
+  // 用户切到广告/仪表盘等其他页 · 接管态保留 · 回来仍是同一个号
+
+  // 重挂载时 · 如果 localStorage 有 activeSlotId · 静默 re-acquire (idempotent)
+  // 兜底场景: 用户离开 30+ 分钟 backend idle 释放了 · 回来时重新拿
+  const acquiredOnMountRef = useRef(false);
   useEffect(() => {
-    return () => {
-      const slotId = activeSlotIdRef.current;
-      if (!slotId) return;
-      const slot = slotsRef.current.find((s) => s.id === slotId);
-      if (slot?.accountId) {
-        // fire-and-forget · 失败也不影响 (backend 30min idle 兜底)
-        void api.post(`/takeover/${slot.accountId}/release`).catch(() => {});
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (acquiredOnMountRef.current) return;
+    if (!activeSlotId || slots.length === 0) return;
+    const slot = slots.find((s) => s.id === activeSlotId);
+    if (!slot?.accountId) {
+      // 持久化的 slotId 已不在当前列表 (slot 删了/重绑) · 清掉
+      setActiveSlotId(null);
+      return;
+    }
+    acquiredOnMountRef.current = true;
+    // acquire 是幂等的: 同 user 持锁 → 返已有锁 · 锁空 → 新建. 不同 user → 403, 清状态
+    void api
+      .post(`/takeover/${slot.accountId}/acquire`, {})
+      .catch((err: { response?: { status?: number } }) => {
+        if (err?.response?.status === 403) {
+          message.warning('该号被其他用户接管中 · 已切回未接管状态');
+          setActiveSlotId(null);
+        }
+      });
+  }, [activeSlotId, slots, message, setActiveSlotId]);
 
   // 锁 keep-alive · 每 60s 一次心跳 (backend 30min idle timer)
   useEffect(() => {

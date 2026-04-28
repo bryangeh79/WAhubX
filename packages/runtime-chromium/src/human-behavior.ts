@@ -136,7 +136,25 @@ export class HumanBehaviorSimulator {
   async simulateHumanTyping(text: string): Promise<void> {
     const [minDelay, maxDelay] = TYPING_RANGES[this.opts.typingSpeed];
 
-    for (const ch of text) {
+    // 2026-04-28 · 修致命 bug · WA Web 里 \n 直接触发发送 · 必须 Shift+Enter 才是消息内换行
+    // 老代码 keyboard.type('\n') 会把多行广告拆成多条独立消息 · 客户体验毁灭
+    // 同时 \r\n 标准化成 \n 防 Windows 文件遗留 \r 误触发
+    const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    for (const ch of normalized) {
+      // 换行: Shift+Enter (WA Web 软换行 · 不发送)
+      if (ch === '\n') {
+        try {
+          await this.page.keyboard.down('Shift');
+          await this.page.keyboard.press('Enter');
+          await this.page.keyboard.up('Shift');
+        } catch {
+          return;
+        }
+        await this.randomDelay(minDelay, maxDelay);
+        continue;
+      }
+
       // 5% 概率模拟打错 · 输个邻近字符然后退格
       if (Math.random() < this.opts.typoProbability) {
         const wrong = TYPO_CHARS[Math.floor(Math.random() * TYPO_CHARS.length)];
