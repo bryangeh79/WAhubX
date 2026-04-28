@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { App, Button, Descriptions, Drawer, Empty, Progress, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { App, Button, Descriptions, Drawer, Empty, Modal, Progress, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CopyOutlined, ReloadOutlined, SyncOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import {
   campaignsApi,
+  tasksApi,
   type Campaign,
   type CampaignRun,
   type CampaignTarget,
+  type TaskRunLog,
   CampaignStatus,
 } from '@/lib/campaigns-api';
 import { extractErrorMessage } from '@/lib/api';
@@ -53,43 +55,12 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
   const [autoPoll, setAutoPoll] = useState(true);
   const [activeTab, setActiveTab] = useState('info');
   const [cloning, setCloning] = useState(false);
+  const [logsTaskId, setLogsTaskId] = useState<number | null>(null);
   const pollRef = useRef<number | null>(null);
 
   // 2026-04-27 · 强推该投放下所有 pending task 立即执行
-  const doRunNow = () => {
-    if (!campaignId) return;
-    modal.confirm({
-      title: '立即执行',
-      content: (
-        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-          <div>
-            将该投放下所有<strong>等待中</strong>的任务的执行时间改为<strong>现在</strong>,
-            跳过节流窗口立即派发.
-          </div>
-          <div style={{ marginTop: 8, color: '#fa8c16' }}>
-            ⚠️ 立即执行会使任务集中在短时间内发送, 可能增加封号风险. 仅建议测试或紧急投放使用.
-          </div>
-        </div>
-      ),
-      okText: '立即执行',
-      okButtonProps: { style: { background: '#fa8c16', borderColor: '#fa8c16' } },
-      cancelText: '取消',
-      onOk: async () => {
-        try {
-          const res = await campaignsApi.runNow(campaignId);
-          if (res.pushed > 0) {
-            message.success(`已强推 ${res.pushed} 个任务立即执行`);
-          } else {
-            message.info('当前没有等待中的任务可强推');
-          }
-          await fetchData(true);
-          onChanged?.();
-        } catch (err) {
-          message.error(extractErrorMessage(err, '强推失败'));
-        }
-      },
-    });
-  };
+  // 2026-04-28 · 抽屉 UI 拆掉 "立即执行" 大按钮 (改 per-task 行内按钮 in TaskList)
+  // 此处 doRunNow 函数已废弃 · per-task 立即执行在 CampaignTargetTable 实装
 
   const doClone = async () => {
     if (!campaignId) return;
@@ -344,20 +315,10 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                       <b style={{ color: '#fa8c16' }}>{fmt}</b>{' '}
                       <Typography.Text type="secondary">({relative})</Typography.Text>
                     </span>
-                    {campaign?.status === CampaignStatus.Running && (
-                      <Button
-                        size="small"
-                        icon={<ThunderboltOutlined />}
-                        onClick={doRunNow}
-                        style={{
-                          background: '#fa8c16',
-                          borderColor: '#fa8c16',
-                          color: '#fff',
-                        }}
-                      >
-                        立即执行
-                      </Button>
-                    )}
+                    {/* 2026-04-28 · 老的"全局立即执行"按钮删 · 改在下面"目标"表每行 per-task 立即执行 */}
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      → 切到"目标"标签 · 每行单独 [立即执行]
+                    </Typography.Text>
                   </div>
                 );
               })()}
@@ -453,8 +414,19 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                     {
                       title: '统计',
                       dataIndex: 'stats',
-                      render: (s: CampaignRun['stats']) =>
-                        `发:${s.sent ?? 0} 失:${s.failed ?? 0} 跳:${s.skipped ?? 0} / 计划${s.planned ?? 0}`,
+                      render: (s: CampaignRun['stats']) => {
+                        const err = (s as { error?: string })?.error;
+                        return (
+                          <Space direction="vertical" size={0}>
+                            <span>{`发:${s.sent ?? 0} 失:${s.failed ?? 0} 跳:${s.skipped ?? 0} / 计划${s.planned ?? 0}`}</span>
+                            {err && (
+                              <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                                ⚠ {err}
+                              </Typography.Text>
+                            )}
+                          </Space>
+                        );
+                      },
                     },
                   ]}
                   pagination={false}
@@ -509,6 +481,137 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                       render: (v: string | null) => v ?? '—',
                       ellipsis: true,
                     },
+                    {
+                      title: '操作',
+                      key: 'action',
+                      width: 200,
+                      render: (_: unknown, row: CampaignTarget) => {
+                        // 立即执行: 仅 status=1 dispatched + task pending + scheduledAt 未来才显
+                        const isFuture =
+                          row.scheduledAt &&
+                          new Date(row.scheduledAt).getTime() > Date.now() + 30_000;
+                        const canRunNow =
+                          row.status === 1 && row.taskStatus === 'pending' && isFuture;
+                        // 删除: status=1 (dispatched) 都可删 · sent/failed 任务也可清
+                        // status=0 (pending · 极少见) 也允许
+                        const canDelete = row.status !== 4; // 已 skipped 不再重复删
+                        return (
+                          <Space size={2}>
+                            {row.taskId !== null && (
+                              <Button
+                                size="small"
+                                type="link"
+                                onClick={() => setLogsTaskId(row.taskId)}
+                                style={{ padding: '0 4px' }}
+                              >
+                                🔍 日志
+                              </Button>
+                            )}
+                            {canRunNow && (
+                              <Button
+                                size="small"
+                                type="link"
+                                icon={<ThunderboltOutlined />}
+                                style={{ color: '#fa8c16', padding: '0 4px' }}
+                                onClick={() => {
+                                  modal.confirm({
+                                    title: '立即执行此任务',
+                                    content: (
+                                      <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                                        <div>
+                                          号码 <strong>{row.phoneE164}</strong> · 槽位{' '}
+                                          <strong>{row.assignedSlotId !== null ? `#${row.assignedSlotId}` : '—'}</strong>
+                                        </div>
+                                        <div style={{ marginTop: 4 }}>
+                                          原计划:{' '}
+                                          <strong>
+                                            {row.scheduledAt
+                                              ? new Date(row.scheduledAt).toLocaleString('zh-CN', { hour12: false })
+                                              : '—'}
+                                          </strong>
+                                        </div>
+                                        <div style={{ marginTop: 8, color: '#fa8c16' }}>
+                                          ⚠ 仅这一个任务立即执行 · 跳过节流时段+夜间窗口.
+                                        </div>
+                                      </div>
+                                    ),
+                                    okText: '立即执行',
+                                    okButtonProps: {
+                                      style: { background: '#fa8c16', borderColor: '#fa8c16' },
+                                    },
+                                    cancelText: '取消',
+                                    onOk: async () => {
+                                      if (!campaignId) return;
+                                      try {
+                                        const res = await campaignsApi.runNowTarget(
+                                          campaignId,
+                                          row.id,
+                                        );
+                                        if (res.pushed) {
+                                          message.success(`已强推任务 → ${row.phoneE164}`);
+                                        } else {
+                                          message.warning(res.reason ?? '强推失败');
+                                        }
+                                        await fetchData(true);
+                                      } catch (err) {
+                                        message.error(extractErrorMessage(err, '强推失败'));
+                                      }
+                                    },
+                                  });
+                                }}
+                              >
+                                立即执行
+                              </Button>
+                            )}
+                            {canDelete && (
+                              <Button
+                                size="small"
+                                type="link"
+                                danger
+                                style={{ padding: '0 4px' }}
+                                onClick={() => {
+                                  modal.confirm({
+                                    title: '删除此任务',
+                                    content: (
+                                      <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                                        <div>
+                                          号码 <strong>{row.phoneE164}</strong>
+                                        </div>
+                                        <div style={{ marginTop: 4, color: '#666' }}>
+                                          {row.status === 2
+                                            ? '该号已发送过广告 · 删除仅清列表 · 不撤回 WA 消息'
+                                            : row.status === 3
+                                              ? '失败任务 · 删除清记录'
+                                              : '取消未执行任务 + 标记跳过'}
+                                        </div>
+                                      </div>
+                                    ),
+                                    okText: '删除',
+                                    okButtonProps: { danger: true },
+                                    cancelText: '取消',
+                                    onOk: async () => {
+                                      if (!campaignId) return;
+                                      try {
+                                        await campaignsApi.cancelTarget(
+                                          campaignId,
+                                          row.id,
+                                        );
+                                        message.success(`已删除 → ${row.phoneE164}`);
+                                        await fetchData(true);
+                                      } catch (err) {
+                                        message.error(extractErrorMessage(err, '删除失败'));
+                                      }
+                                    },
+                                  });
+                                }}
+                              >
+                                🗑 删除
+                              </Button>
+                            )}
+                          </Space>
+                        );
+                      },
+                    },
                   ]}
                   pagination={{ pageSize: 20 }}
                 />
@@ -525,6 +628,117 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
         />
         </Space>
       )}
+      {/* 任务执行日志 modal · 复用 /tasks/:id/logs · 见 SchedulerPage 同款 */}
+      <TaskLogsModal taskId={logsTaskId} onClose={() => setLogsTaskId(null)} />
     </Drawer>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 任务执行日志 Modal · 简化版 (相比 SchedulerPage 的 STEP_FRIENDLY 字典 · 直接显原 step)
+// ════════════════════════════════════════════════════════════════════
+function TaskLogsModal({
+  taskId,
+  onClose,
+}: {
+  taskId: number | null;
+  onClose: () => void;
+}) {
+  const [runs, setRuns] = useState<TaskRunLog[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (taskId === null) return;
+    setLoading(true);
+    try {
+      const data = await tasksApi.getLogs(taskId);
+      setRuns(data);
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (taskId === null) return;
+    void load();
+    // 仅 pending/running 才轮询 · 完成的任务静态显
+    const iv = setInterval(() => void load(), 3000);
+    return () => clearInterval(iv);
+  }, [taskId, load]);
+
+  return (
+    <Modal
+      open={taskId !== null}
+      onCancel={onClose}
+      footer={null}
+      width={780}
+      title={`📜 任务 #${taskId ?? '—'} · 执行日志`}
+      destroyOnClose
+    >
+      {loading && runs.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 32 }}>
+          <Spin />
+        </div>
+      ) : runs.length === 0 ? (
+        <Empty description="任务尚未执行 / 无日志记录" />
+      ) : (
+        <div>
+          {runs.map((run) => (
+            <div
+              key={run.runId}
+              style={{
+                marginBottom: 16,
+                padding: 12,
+                background: run.status === 'failed' ? '#fff2f0' : '#fafafa',
+                border: `1px solid ${run.status === 'failed' ? '#ffccc7' : '#e8e8e8'}`,
+                borderRadius: 8,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <Typography.Text strong>
+                  Run #{run.runId} ·{' '}
+                  <Tag color={run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : 'processing'}>
+                    {run.status}
+                  </Tag>
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {new Date(run.startedAt).toLocaleString('zh-CN', { hour12: false })}
+                  {run.finishedAt && ` → ${new Date(run.finishedAt).toLocaleString('zh-CN', { hour12: false })}`}
+                </Typography.Text>
+              </div>
+              {run.errorMessage && (
+                <div style={{ marginBottom: 8, padding: 8, background: '#fff', borderRadius: 4 }}>
+                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                    ❌ {run.errorCode ?? 'ERROR'}: {run.errorMessage}
+                  </Typography.Text>
+                </div>
+              )}
+              {run.logs && run.logs.length > 0 && (
+                <div style={{ fontFamily: 'monospace', fontSize: 12, lineHeight: 1.6 }}>
+                  {run.logs.map((log, idx) => (
+                    <div key={idx} style={{ display: 'flex', gap: 8 }}>
+                      <span style={{ color: '#888', flexShrink: 0 }}>
+                        {new Date(log.at).toLocaleTimeString('zh-CN', { hour12: false })}
+                      </span>
+                      <span style={{ color: log.ok ? '#52c41a' : '#f5222d', flexShrink: 0 }}>
+                        {log.ok ? '✓' : '✗'}
+                      </span>
+                      <span style={{ flex: 1 }}>
+                        <strong>{log.step}</strong>
+                        {log.meta && Object.keys(log.meta).length > 0 && (
+                          <span style={{ color: '#666', marginLeft: 6 }}>
+                            {JSON.stringify(log.meta)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }

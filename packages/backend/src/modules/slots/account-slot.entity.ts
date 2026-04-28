@@ -20,11 +20,24 @@ import { WaAccountEntity } from './wa-account.entity';
 //   id         SERIAL PK (DB 内部用)
 //   slotIndex  INT      (1..slot_limit, 租户视角的槽位号, 每租户内 unique)
 // 生产单租户部署时, slotIndex == slot_id 的语义不变.
+// 2026-04-25 · 加 Quarantine · 区别于 suspended
+//   suspended  · 临时掉线 · 可人工 reactivate · periodic recovery 也会试
+//   quarantine · 连续 2 次 440 明确判死 · 只能原厂重置换号 · 系统不再自动碰
 export enum AccountSlotStatus {
   Empty = 'empty',
   Active = 'active',
   Suspended = 'suspended',
   Warmup = 'warmup',
+  Quarantine = 'quarantine',
+}
+
+// 2026-04-25 · D11-1 · slot 角色 (Codex 锁定 5 边界)
+//   broadcast        广告号 · 跑 warmup / ads / broadcast 任务 · 寿命 2-8 周 · 死了换 SIM
+//   customer_service 客服号 · always-on · 跑 inbound / auto-reply / takeover · 长期养
+// 约束: 每 tenant 同时最多 1 个 customer_service (DB partial unique index 强制)
+export enum AccountSlotRole {
+  Broadcast = 'broadcast',
+  CustomerService = 'customer_service',
 }
 
 @Entity('account_slot')
@@ -55,6 +68,16 @@ export class AccountSlotEntity {
   @Column({ type: 'enum', enum: AccountSlotStatus, default: AccountSlotStatus.Empty })
   status!: AccountSlotStatus;
 
+  // 2026-04-25 · D11-1 · slot 角色 · per-tenant 至多 1 个 customer_service
+  // DB 约束: uq_account_slot_tenant_customer_service (partial unique index)
+  @Column({
+    type: 'enum',
+    enum: AccountSlotRole,
+    default: AccountSlotRole.Broadcast,
+    name: 'role',
+  })
+  role!: AccountSlotRole;
+
   @Column({ type: 'int', name: 'proxy_id', nullable: true })
   proxyId!: number | null;
 
@@ -75,6 +98,14 @@ export class AccountSlotEntity {
   // M9 接管 UI 会通过 /takeover/:accountId/acquire 置 true, /release 置 false
   @Column({ type: 'boolean', name: 'takeover_active', default: false })
   takeoverActive!: boolean;
+
+  // 2026-04-25 · 稳定性 · suspended 冷却时间戳 · 其他路径这时间前不允许翻回 active
+  @Column({ type: 'timestamptz', name: 'suspended_until', nullable: true })
+  suspendedUntil!: Date | null;
+
+  // 2026-04-25 · 稳定性 · socket 最后心跳时间 · UI 判真实存活
+  @Column({ type: 'timestamptz', name: 'socket_last_heartbeat_at', nullable: true })
+  socketLastHeartbeatAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;

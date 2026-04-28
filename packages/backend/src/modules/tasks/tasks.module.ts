@@ -16,7 +16,6 @@ import { StatusPostExecutor } from '../warmup/status-post.executor';
 import { StatusBrowseExecutor } from '../warmup/status-browse.executor';
 // 2026-04-21 · 新增 5 个 executor (task-scheduler-tab.md)
 import { JoinGroupExecutor } from './executors/join-group.executor';
-import { FollowChannelExecutor } from './executors/follow-channel.executor';
 import { StatusReactExecutor } from './executors/status-react.executor';
 import { AutoAcceptExecutor } from './executors/auto-accept.executor';
 import { StatusBrowseBulkExecutor } from './executors/status-browse-bulk.executor';
@@ -28,7 +27,7 @@ import { SendVoiceExecutor } from './executors/send-voice.executor';
 import { SendImageExecutor } from './executors/send-image.executor';
 import { SendVideoExecutor } from './executors/send-video.executor';
 import { AssetsModule } from '../assets/assets.module';
-import { BaileysModule } from '../baileys/baileys.module';
+import { MessagingModule } from '../messaging/messaging.module';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WarmupPlanEntity } from '../warmup/warmup-plan.entity';
 import { ChannelItemsModule } from '../channel-items/channel-items.module';
@@ -36,16 +35,19 @@ import { ChannelItemEntity } from '../channel-items/channel-item.entity';
 // 2026-04-23 · 广告投放 send-ad executor 需要注册到 TASK_EXECUTORS · dispatcher 才能捡 task_type='send_ad'
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
+// 2026-04-26 · R9-bis · ChatExecutor 改走 SlotsService.sendText facade
+import { SlotsModule } from '../slots/slots.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([TaskEntity, TaskRunEntity, AccountSlotEntity, WarmupPlanEntity, ChannelItemEntity]),
     ScriptsModule,
     WarmupModule,
-    BaileysModule,
+    MessagingModule, // 2026-04-28 · Phase D · 取代 BaileysModule (entity + persistMessage)
     ChannelItemsModule,
     AssetsModule,
     CampaignsModule,
+    SlotsModule, // R9-bis · ChatExecutor 注 SlotsService
   ],
   controllers: [TasksController],
   providers: [
@@ -54,7 +56,6 @@ import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
     ExecutorRegistry,
     ChatExecutor,
     JoinGroupExecutor,
-    FollowChannelExecutor,
     StatusReactExecutor,
     AutoAcceptExecutor,
     StatusBrowseBulkExecutor,
@@ -74,7 +75,6 @@ import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
         statusPost: StatusPostExecutor,
         statusBrowse: StatusBrowseExecutor,
         joinGroup: JoinGroupExecutor,
-        followChannel: FollowChannelExecutor,
         statusReact: StatusReactExecutor,
         autoAccept: AutoAcceptExecutor,
         statusBrowseBulk: StatusBrowseBulkExecutor,
@@ -93,7 +93,6 @@ import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
         statusPost,
         statusBrowse,
         joinGroup,
-        followChannel,
         statusReact,
         autoAccept,
         statusBrowseBulk,
@@ -113,7 +112,6 @@ import { SendAdExecutor } from '../campaigns/executors/send-ad.executor';
         StatusPostExecutor,
         StatusBrowseExecutor,
         JoinGroupExecutor,
-        FollowChannelExecutor,
         StatusReactExecutor,
         AutoAcceptExecutor,
         StatusBrowseBulkExecutor,

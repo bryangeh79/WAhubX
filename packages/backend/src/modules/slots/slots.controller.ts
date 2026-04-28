@@ -13,11 +13,11 @@ import {
   Query,
 } from '@nestjs/common';
 import { SlotsService } from './slots.service';
+import { AccountSlotRole } from './account-slot.entity';
 import type { SlotResponseDto } from './dto/slot-response.dto';
 import { SendTextMessageDto } from './dto/send-message.dto';
 import { SendMediaMessageDto } from './dto/send-media.dto';
 import { CurrentUser, type RequestUser } from '../auth/decorators/current-user.decorator';
-import { BaileysService, type BindStatusView } from '../baileys/baileys.service';
 import {
   SimInfoService,
   type UpdateSimInfoDto,
@@ -31,7 +31,6 @@ import type { Response } from 'express';
 export class SlotsController {
   constructor(
     private readonly slots: SlotsService,
-    private readonly baileys: BaileysService,
     private readonly simInfo: SimInfoService,
     private readonly handover: HandoverService,
   ) {}
@@ -143,6 +142,36 @@ export class SlotsController {
     return this.slots.assignProxy(id, cur.tenantId, body?.proxyId ?? null);
   }
 
+  // 2026-04-25 · D11-2 · 切换 slot 角色 (broadcast | customer_service)
+  // 后端硬约束: 每 tenant 至多 1 个 customer_service (DB partial unique index)
+  // 错误语义 (Codex 锁 4 边界 ②):
+  //   - 404 SlotNotFound · slot 不存在
+  //   - 400 InvalidRole · role 值不合法
+  //   - 409 ConflictCustomerService · 该 tenant 已有客服号
+  // 前端按 status code + body.code 派发不同提示
+  @Patch(':id/role')
+  @HttpCode(HttpStatus.OK)
+  async setRole(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { role?: string },
+  ): Promise<SlotResponseDto> {
+    const roleStr = body?.role;
+    if (roleStr !== 'broadcast' && roleStr !== 'customer_service') {
+      throw new BadRequestException({
+        code: 'INVALID_ROLE',
+        message: `role 必须是 'broadcast' 或 'customer_service' · got: "${roleStr ?? 'undefined'}"`,
+      });
+    }
+    const targetRole =
+      roleStr === 'customer_service'
+        ? AccountSlotRole.CustomerService
+        : AccountSlotRole.Broadcast;
+    const slot = await this.slots.setRole(id, cur.tenantId, targetRole);
+    // 重投影 toResponse · 走 findOne 路径拿全量字段
+    return this.slots.findOne(slot.id, cur.tenantId);
+  }
+
   // POST /slots/backfill-fingerprints — 一次性回填老数据的 fingerprint.json + DB
   // 幂等: 已存在文件/字段的不动, 只补 null 的
   @Post('backfill-fingerprints')
@@ -162,18 +191,20 @@ export class SlotsController {
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { phoneNumber?: string } = {},
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · 通过 SlotsService facade · RUNTIME_MODE 切 chromium 时走 RuntimeBridge
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.startBind(id, body.phoneNumber);
+    return this.slots.bindStartBind(id, body.phoneNumber);
   }
 
   @Get(':id/bind-existing/status')
   async bindStatus(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · facade · chromium runtime 直接返 backend 缓存
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.getStatus(id);
+    return this.slots.bindGetStatus(id);
   }
 
   @Post(':id/bind-existing/cancel')
@@ -181,12 +212,29 @@ export class SlotsController {
   async cancelBind(
     @CurrentUser() cur: RequestUser,
     @Param('id', ParseIntPipe) id: number,
-  ): Promise<BindStatusView> {
+  ): Promise<unknown> {
+    // 2026-04-25 · D8-3 · facade · 走 SlotsService 而非直接 BaileysService
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.cancelBind(id);
+    return this.slots.bindCancelBind(id);
+  }
+
+  // 2026-04-26 · P0.10 · 人工接管入口 · 把 slot 对应 Chromium 窗口提前台
+  // 设计: 5173 接管页只做"按钮入口" · 真操作面在桌面真 chrome 窗口里 (用户用 WA Web 自身 UI)
+  // 不做 iframe / screencast / 假 chat UI
+  @Post(':id/bring-to-front')
+  @HttpCode(HttpStatus.OK)
+  async bringToFront(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<unknown> {
+    await this.slots.findOne(id, cur.tenantId);
+    return this.slots.bringToFront(id);
   }
 
   // ── 消息收发 (M2 W2) ──────────────────────────────────
+  // 2026-04-25 · P0.1 集中补洞 · 路由改走 SlotsService facade
+  // 老路径 controller→BaileysService 在 RUNTIME_MODE=chromium 时 pool 永远空 · 必死
+  // SlotsService.sendText/sendMedia 内部按 mode 路由到对应 runtime + 持久化 chat_message
   @Post(':id/send')
   @HttpCode(HttpStatus.OK)
   async sendText(
@@ -195,7 +243,7 @@ export class SlotsController {
     @Body() dto: SendTextMessageDto,
   ) {
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.sendText(id, dto.to, dto.text);
+    return this.slots.sendText(id, dto.to, dto.text);
   }
 
   // W3: image/voice/file 发送, body 带 base64
@@ -207,7 +255,7 @@ export class SlotsController {
     @Body() dto: SendMediaMessageDto,
   ) {
     await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.sendMedia(id, dto.to, dto.type, dto.contentBase64, {
+    return this.slots.sendMedia(id, dto.to, dto.type, dto.contentBase64, {
       mimeType: dto.mimeType,
       filename: dto.filename,
       caption: dto.caption,
@@ -221,7 +269,7 @@ export class SlotsController {
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
     if (!slot.accountId) return [];
-    return this.baileys.listContacts(slot.accountId);
+    return this.slots.listContacts(slot.accountId);
   }
 
   @Get(':id/messages')
@@ -234,7 +282,7 @@ export class SlotsController {
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
     if (!slot.accountId) return [];
-    return this.baileys.listMessages(slot.accountId, {
+    return this.slots.listMessages(slot.accountId, {
       contactId: contactId || undefined,
       limit,
       beforeId,
@@ -247,7 +295,7 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ): Promise<{ online: boolean }> {
     await this.slots.findOne(id, cur.tenantId);
-    return { online: this.baileys.isInPool(id) };
+    return { online: this.slots.isInPool(id) };
   }
 
   // 2026-04-22 · 被封槽位手动重连 · 租户 UI 点按钮调
@@ -266,10 +314,10 @@ export class SlotsController {
     }
     // DB 置 active · 让后续 rehydrate 能跑 (markSlotSuspended 的逆操作)
     try {
-      await this.baileys.evictFromPool(id); // 先踢 · 清残留
+      await // 2026-04-28 · Phase D · runtime stop 由 reactivateAndRespawn 内部包
       await this.slots.findOne(id, cur.tenantId); // 确认还在
       // 直接 update (通过内部方法暴露)
-      await this.baileys.reactivateAndRespawn(id);
+      await this.slots.reactivateAndRespawn(id);
       return {
         ok: true,
         message: '已触发重连 · 请等 30 秒查看状态. 若仍封禁 · 点"诊断"看原因.',
@@ -289,6 +337,6 @@ export class SlotsController {
     @Param('id', ParseIntPipe) id: number,
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
-    return this.baileys.getConnectionDiagnosis(id, slot);
+    return this.slots.getConnectionDiagnosis(id, slot);
   }
 }

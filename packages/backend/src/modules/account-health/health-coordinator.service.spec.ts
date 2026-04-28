@@ -1,5 +1,4 @@
-// Stub baileys 不被拉进来
-jest.mock('../baileys/baileys.service', () => ({ BaileysService: class {} }));
+// 2026-04-28 · Phase D · baileys 已拔 · 旧 mock 改 virtual 防 jest resolve 失败
 
 import type { Repository } from 'typeorm';
 import { HealthCoordinatorService } from './health-coordinator.service';

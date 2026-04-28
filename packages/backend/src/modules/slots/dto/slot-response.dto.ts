@@ -1,11 +1,17 @@
-import { AccountSlotStatus } from '../account-slot.entity';
+import { AccountSlotStatus, AccountSlotRole } from '../account-slot.entity';
 
 export class SlotResponseDto {
   id!: number;
   tenantId!: number;
   slotIndex!: number;
   status!: AccountSlotStatus;
+  // 2026-04-25 · D11-1 · slot 角色 (broadcast | customer_service)
+  // 每 tenant 至多 1 个 customer_service · DB partial unique index 强制
+  role!: AccountSlotRole;
   online!: boolean; // 2026-04-22 · 实际 pool 是否有 socket (与 status 独立 · status=active 也可能 online=false)
+  // 2026-04-25 · 稳定性: 真实状态三指标
+  suspendedUntil!: string | null;         // suspended 冷却到何时 · 期间不动
+  socketLastHeartbeatAt!: string | null;  // 最后心跳时间 · UI 判 healthy/degraded/dead
   accountId!: number | null;
   phoneNumber!: string | null;
   waNickname!: string | null;
@@ -13,6 +19,11 @@ export class SlotResponseDto {
   proxyId!: number | null;
   profilePath!: string | null;
   createdAt!: Date;
+
+  // 2026-04-25 · P1.6 · 当前 runtime 模式 (前端用来判断哪些字段可信 · 哪些 chromium 路径还没接 · 应 hide)
+  // 'baileys' · 老路径 · 全部字段可信
+  // 'chromium' · 新路径 · warmup* / tasksExecuted / contactsCount / channelsCount / groupsCount / waNickname 暂未接 · 前端 hide
+  runtime!: 'baileys' | 'chromium';
 
   // 2026-04-21 · 卡片信息增强
   // Warmup 进度

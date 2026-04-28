@@ -1,0 +1,30 @@
+{
+  "name": "@wahubx/runtime-chromium",
+  "version": "0.0.1",
+  "description": "WAhubX SaaS Chromium per-slot runtime · 容器内跑 · WS 回连控制面",
+  "author": "Bryan Geh <bryangeh79@gmail.com>",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\" --fix"
+  },
+  "dependencies": {
+    "@wahubx/shared": "workspace:^",
+    "pino": "^9.0.0",
+    "puppeteer-core": "^22.13.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
+  }
+}

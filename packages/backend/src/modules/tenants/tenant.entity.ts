@@ -59,6 +59,10 @@ export class TenantEntity {
   @Column({ type: 'text', default: 'zh' })
   language!: string;
 
+  // 2026-04-25 · 绑号纪律 · 记录上次绑号时间 · 冷却期内拒绝新绑请求
+  @Column({ type: 'timestamptz', name: 'last_bind_at', nullable: true })
+  lastBindAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;
 

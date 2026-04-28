@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -15,16 +15,63 @@ import { ReplyExecutorService } from './reply-executor.service';
 
 // 硬编码常量 (不给租户改)
 const AGGREGATION_WINDOW_MS = 8000;
-const RATE_30MIN_MS = 30 * 60 * 1000;
-const RATE_24H_LIMIT = 3;
-const HANDOFF_KEYWORDS_LEVEL1 = [
+// 2026-04-28 · 限速放宽 · 老值太狠 turn-by-turn 客服对话被屏蔽
+//   老 30min 只回 1 次 · 客户连问 3 个问题只能答第 1 个 · 体验差
+//   新 3s · 仅 debounce 同一 burst (8s 聚合后正常回 turn-by-turn)
+//   老 24h 只回 3 次 · 真客户咨询场景动辄 5-10 轮 · 不够
+//   新 24h 30 条 · 配合 tenant_reply_settings.daily_ai_reply_limit (默认 200)
+//     双层保险: 单对话 30 + 全租户 daily limit
+const RATE_DEBOUNCE_MS = 3_000;
+const RATE_24H_LIMIT = 30;
+// 2026-04-29 · 任务 8 · Level 1 关键词扩展
+//   原: 投诉 / 退款 / 退货 / 律师 / 报警 / 骂 / 操 / 傻逼 / 滚 / 垃圾 / 骗子 / scam/refund/lawyer/sue
+//   加: 购买/下单/付款/付不了/付不出/账号异常/不能登录/登不上/老板/sales/agent
+//       人工/真人/客服/转人工/要人工/找人工 (客户主动要求人工)
+//       demo/演示/试用 (从 Level 2 升 Level 1 · 用户硬要求"客户要 demo 必须立即转人工")
+// 2026-04-29 · export 给 dry-run debug controller 复用 (不要重复定义)
+export const HANDOFF_KEYWORDS_LEVEL1 = [
+  // 投诉 / 情绪
   '投诉', '退款', '退货', '律师', '报警', '骂', '操', '傻逼', '滚', '垃圾', '骗子',
-  'scam', 'refund', 'lawyer', 'sue',
+  'scam', 'refund', 'lawyer', 'sue', 'cheat',
+  // 客户主动要求人工
+  '人工', '真人', '转人工', '要人工', '找人工', '转客服', '老板',
+  'sales', 'agent', 'human', 'real person', 'real human',
+  // demo / 购买 / 付款 / 退款 (任务 8 明确要求转人工)
+  'demo', '演示', '试一下', '试用',
+  '购买', '下单', '我要买', '想买', '要买', '怎么买', 'buy', 'purchase', 'order',
+  '报价', '合同', '签合同', '见面', '约见', '预约',
+  '付款', '付不了', '付不出', '付款失败', '不能付款', 'payment failed',
+  // 账号异常 / 技术问题
+  '账号异常', '不能登录', '登不上', '登录不了', '上不去', '出错', '报错',
+  '账号被封', '账号封', '号封了', 'account banned', 'cannot login',
+  // 2026-04-29 · V2.2 R4 · 技术问题 / 故障类抱怨 (用户硬要求)
+  //   触发: 客户在 WhatsApp 报系统故障 / 不能用 / 卡 / 收不到消息
+  //   行为: 直接转人工 · 不让 AI 自己解释技术故障
+  '系统有问题', '系统出错', '系统问题', '系统故障',
+  '不能用', '用不了', '没法用', '不好用',
+  '卡住', '很卡', '卡了', '卡死',
+  '崩溃', '挂了', '坏了',
+  '打不开', '打不开了',
+  '收不到', '收不到消息', '收不到回复',
+  '发不出', '发不出去', '发送失败',
+  '没有回复', '没人回', 'bot 没回', 'AI 没回',
+  '掉线', '断线', '断开了',
+  '需要技术', '技术支持', 'support', 'tech support',
 ];
-const HANDOFF_KEYWORDS_LEVEL2 = [
-  '多少钱', '报价', '套餐', '怎么收费', '价格', '价钱', '优惠', '折扣',
-  'demo', '试用', '试一下', '合同', '见面', '预约',
+// Level 2 (当前未直接 markHandoff · 仅作为 LLM intent 提示) — 留作未来用
+export const HANDOFF_KEYWORDS_LEVEL2 = [
+  '多少钱', '怎么收费', '价格', '价钱', '优惠', '折扣',
+  '套餐', '方案',
 ];
+
+// 2026-04-29 · 同款检查函数 · debug controller / decider 共用
+export function checkHandoffKeyword(text: string): string | null {
+  const lower = (text ?? '').toLowerCase();
+  for (const k of HANDOFF_KEYWORDS_LEVEL1) {
+    if (lower.includes(k.toLowerCase())) return k;
+  }
+  return null;
+}
 
 interface InboundEvent {
   accountId?: number;
@@ -34,14 +81,20 @@ interface InboundEvent {
   content?: string | null;
   messageId?: string;
   sentAt?: string;
+  // 2026-04-25 · D11-3 · slot 角色 · broadcast 号 inbound 不进 auto-reply
+  slotRole?: 'broadcast' | 'customer_service';
 }
 
 @Injectable()
-export class AutoReplyDeciderService {
+export class AutoReplyDeciderService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AutoReplyDeciderService.name);
 
   // Map<conversationId, Timeout> · 聚合窗计时器
   private aggTimers = new Map<number, NodeJS.Timeout>();
+
+  // 2026-04-28 · Codex 执行单 G · handoff 5min 超时自救扫描器
+  private handoffSweepTimer: NodeJS.Timeout | null = null;
+  private static readonly HANDOFF_SWEEP_INTERVAL_MS = 60_000; // 1min
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -53,6 +106,23 @@ export class AutoReplyDeciderService {
     private readonly executor: ReplyExecutorService,
   ) {}
 
+  onModuleInit(): void {
+    // G · 每分钟扫一次 · 找 5min 没人工回的 handoff_required conv 补通知
+    this.handoffSweepTimer = setInterval(() => {
+      void this.executor.runHandoffTimeoutSweep();
+    }, AutoReplyDeciderService.HANDOFF_SWEEP_INTERVAL_MS);
+    this.logger.log(
+      `handoff timeout sweep started · 每 ${AutoReplyDeciderService.HANDOFF_SWEEP_INTERVAL_MS / 1000}s 扫一次`,
+    );
+  }
+
+  onModuleDestroy(): void {
+    if (this.handoffSweepTimer) {
+      clearInterval(this.handoffSweepTimer);
+      this.handoffSweepTimer = null;
+    }
+  }
+
   @OnEvent('takeover.message.in')
   async onInbound(evt: InboundEvent): Promise<void> {
     try {
@@ -60,6 +130,18 @@ export class AutoReplyDeciderService {
       if (!evt?.remoteJid || !evt.accountId) return;
       if (evt.remoteJid.includes('@g.us')) return; // 群消息
       if (evt.msgType && evt.msgType !== 'text') return; // 先只处理 text
+
+      // 2026-04-25 · D11-3 · 角色路由门禁 (老 baileys 时代约束)
+      // 2026-04-28 · 解除 · chromium per-slot · 任何号都能跑独立 inbound watcher
+      // 老限制只放 customer_service · 用户明确要求所有号都可启用
+      // 实际是否启用由 tenant_reply_settings.mode 控制 (off/faq/smart)
+      // 若用户不想 broadcast 号触发自动回复 · 可在 UI 加 per-slot 开关 (V2)
+      if (!evt.slotRole) {
+        this.logger.log(
+          `auto-reply gate · skip · acc=${evt.accountId} · slotRole=unset (老数据)`,
+        );
+        return;
+      }
       const phone = this.jidToPhone(evt.remoteJid);
       if (!phone) return;
       const content = (evt.content ?? '').trim();
@@ -81,6 +163,9 @@ export class AutoReplyDeciderService {
       const conv = await this.ensureConversation(tenantId, slotId, phone);
 
       // 闸门 3 · 对话状态
+      // 2026-04-28 · HandoffRequired 也跳过 · 不再重复发 handoff 消息
+      //   bug: 老逻辑只跳 HumanTakeover/DoNotReply/Closed · handoff_required 仍触发
+      //        客户连发多条 · 每条都得到一份 "稍后让同事联系" 的 spam
       if (
         conv.stage === ConversationStage.HumanTakeover ||
         conv.stage === ConversationStage.DoNotReply ||
@@ -89,21 +174,73 @@ export class AutoReplyDeciderService {
         this.logger.debug(`conv ${conv.id} stage=${conv.stage} · 跳过`);
         return;
       }
+      // 2026-04-28 · Codex 执行单 G · handoff 后自救
+      //   stage=handoff_required 时不再 silent
+      //   规则: 30min 内只补 1 次"已记录·请稍候"通知 · 防 spam · 同时让客户知道收到了
+      if (conv.stage === ConversationStage.HandoffRequired) {
+        try {
+          const recentNotice = await this.dataSource.query<Array<{ id: number }>>(
+            `SELECT id FROM ai_reply_audit
+              WHERE conversation_id = $1
+                AND intent = 'system_notice_handoff_ack'
+                AND created_at >= NOW() - INTERVAL '30 minutes'
+              LIMIT 1`,
+            [conv.id],
+          );
+          if (recentNotice.length === 0) {
+            await this.executor.sendSystemNotice(
+              conv,
+              '您的问题已记录, 我们已转交真人客服, 请稍候, 我们会尽快回复您.',
+              'system_notice_handoff_ack',
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`handoff_ack notice failed: ${err instanceof Error ? err.message : err}`);
+        }
+        return;
+      }
 
       // 更新 last_inbound_at
       conv.lastInboundAt = new Date();
       await this.convRepo.save(conv);
 
       // 闸门 5 · 频率限流
-      if (conv.lastAiReplyAt && Date.now() - conv.lastAiReplyAt.getTime() < RATE_30MIN_MS) {
+      if (conv.lastAiReplyAt && Date.now() - conv.lastAiReplyAt.getTime() < RATE_DEBOUNCE_MS) {
         this.logger.debug(`conv ${conv.id} · 30min 内已回过 · 跳`);
         return;
       }
       if (conv.aiReplyCount24h >= RATE_24H_LIMIT) {
-        this.logger.debug(`conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff`);
+        this.logger.log(
+          `conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff (发最终通知 + 标 handoff)`,
+        );
+        // 2026-04-28 · Codex 执行单 E · 不 silent · 先发一次最终通知再 handoff
+        await this.executor.sendSystemNotice(
+          conv,
+          '今日咨询较多, 已为您转接真人客服, 请稍候, 我们会尽快回复您.',
+          'system_notice_conv_24h_cap',
+        );
         conv.stage = ConversationStage.HandoffRequired;
         await this.convRepo.save(conv);
         return;
+      }
+      // 2026-04-28 · Codex 执行单 F · tenant 级 daily limit
+      //   单 conv 30 条之外 · 还要查 tenant 24h 全量 · 默认 200
+      //   命中后先发租户级最终通知再 handoff
+      if (settings.dailyAiReplyLimit && settings.dailyAiReplyLimit > 0) {
+        const tenantCount = await this.executor.getTenantAiReplyCount24h(tenantId);
+        if (tenantCount >= settings.dailyAiReplyLimit) {
+          this.logger.log(
+            `tenant ${tenantId} · 24h 已 AI 回 ${tenantCount} 条 (上限 ${settings.dailyAiReplyLimit}) · conv ${conv.id} 触发 tenant 级 handoff`,
+          );
+          await this.executor.sendSystemNotice(
+            conv,
+            '今日咨询量较大, 已为您转接真人客服, 请稍候, 我们会尽快回复您.',
+            'system_notice_tenant_daily_cap',
+          );
+          conv.stage = ConversationStage.HandoffRequired;
+          await this.convRepo.save(conv);
+          return;
+        }
       }
 
       // 闸门 · 夜间静默

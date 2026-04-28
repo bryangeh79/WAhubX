@@ -163,12 +163,25 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       eligibleSlots = await this.matureSlots.findMatureSlots(campaign.tenantId);
     }
     if (eligibleSlots.length === 0) {
+      // 2026-04-28 · 0 合格槽位 · 大声 fail · stats.error 给 UI 显
+      // 常见原因: custom_slot_ids 指定的号都在 takeover / suspended / quarantine / role 不匹配
+      const reason = this.diagnoseNoEligibleSlots(campaign);
       await this.runRepo.update(run.id, {
         status: CampaignRunStatus.Cancelled,
         finishedAt: new Date(),
-        stats: { planned: phones.length, sent: 0, failed: 0, skipped: phones.length },
+        stats: {
+          planned: phones.length,
+          sent: 0,
+          failed: 0,
+          skipped: phones.length,
+          error: reason,
+        } as Record<string, unknown>,
       });
-      this.logger.warn(`campaign ${campaign.id} run ${run.id} · 0 eligible slots · cancelled`);
+      // 同步把 campaign 标 Cancelled · 不再卡在"进行中"状态
+      await this.campaignRepo.update(campaign.id, { status: CampaignStatus.Cancelled });
+      this.logger.warn(
+        `campaign ${campaign.id} run ${run.id} · 0 eligible slots · cancelled · reason=${reason}`,
+      );
       return;
     }
 
@@ -180,7 +193,12 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       slotCapacity.set(s.slotId, Math.max(0, throttleParams.dailyCap - already));
     }
 
-    // 4. round-robin 分配 + 时段打散
+    // 2026-04-28 · 立即开始 mode = 用户期望马上发 · 不打散不等节流时段窗口
+    // schedule.mode='immediate': 全部 target 用同 NOW · 第一个立即, 后续被 dispatcher 6 并发限流
+    // 其他 mode: 走老的 nextSendTime 节流打散
+    const isImmediateMode = (campaign.schedule as { mode?: string })?.mode === 'immediate';
+
+    // 4. round-robin 分配 + 时段打散 (immediate mode 跳打散)
     const targets: CampaignTargetEntity[] = [];
     const tasks: TaskEntity[] = [];
     let skipped = 0;
@@ -208,7 +226,10 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       }
 
       // 时段打散: 从 now 起, 每个目标推 gap_sec[0]..gap_sec[1] 的随机秒, 尊重 throttle windows
-      const scheduledAt = this.nextSendTime(now, throttleParams.windows, throttleParams.gapSec, targets.length);
+      // immediate mode: 全部 NOW · 让 dispatcher 调度 (并发 6 + per-account 互斥兜底)
+      const scheduledAt = isImmediateMode
+        ? now
+        : this.nextSendTime(now, throttleParams.windows, throttleParams.gapSec, targets.length);
 
       // 选广告
       const adId =
@@ -255,6 +276,8 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
           phone,
           adId,
           openingId,
+          // 立即开始 mode · 标 forceRun · dispatcher 跳过 night-window 检查
+          ...(isImmediateMode ? { forceRun: true } : {}),
         },
         status: TaskStatus.Pending,
         lastError: null,
@@ -264,11 +287,25 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (targets.length === 0) {
+      // 2026-04-28 · 0 targets 大声 fail · 给 UI 显原因
+      // 常见: 客户群所有号 send_status≠0 (前次失败标坏) · 或 daily cap 满
+      const reason =
+        phones.length === 0
+          ? '客户群所有号都被标"坏号" (send_status≠0) · 之前失败过 · 解: 客户群管理 重置号状态 OR 换人'
+          : `${phones.length} 个号都没分到 slot (常见: 槽位 daily cap 已满, 保守=20/天). 解: 等明天 OR 换更宽节流档`;
       await this.runRepo.update(run.id, {
-        status: CampaignRunStatus.Done,
+        status: CampaignRunStatus.Cancelled,
         finishedAt: new Date(),
-        stats: { planned: phones.length, sent: 0, failed: 0, skipped: phones.length },
+        stats: {
+          planned: phones.length,
+          sent: 0,
+          failed: 0,
+          skipped: phones.length,
+          error: reason,
+        } as Record<string, unknown>,
       });
+      await this.campaignRepo.update(campaign.id, { status: CampaignStatus.Cancelled });
+      this.logger.warn(`campaign ${campaign.id} run ${run.id} · 0 targets · cancelled · reason=${reason}`);
       return;
     }
 
@@ -333,5 +370,18 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       t = this.throttle.nextWindowStart(t, windows);
     }
     return t;
+  }
+
+  /**
+   * 2026-04-28 · 0 合格槽位时 · 给租户可读的原因
+   * 现有过滤维度: status (active/warmup) · takeover_active=false · account_id NOT NULL · role gate
+   */
+  private diagnoseNoEligibleSlots(campaign: CampaignEntity): string {
+    if (campaign.executionMode === ExecutionMode.CustomSlots) {
+      const ids = campaign.customSlotIds ?? [];
+      if (ids.length === 0) return '执行方式选自定义槽位但没勾任何号';
+      return `指定的 ${ids.length} 个槽位都不可用 (常见: 该号在"人工接管"中 / 已 suspended / 未绑账号). 解决: 释放接管 OR 切其他号 OR 改用"系统智能"模式`;
+    }
+    return '当前没有任何成熟号 (warmup phase=3) 可派发. 解决: 等养号完成 OR 用自定义槽位选未成熟号';
   }
 }

@@ -1,0 +1,30 @@
+{
+  "name": "@wahubx/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WAhubX shared types · runtime protocol + ISlotRuntime contract (Codex D9 锁定 · 仅 bind/status/send/event)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./runtime-protocol": {
+      "types": "./dist/runtime-protocol.d.ts",
+      "default": "./dist/runtime-protocol.js"
+    },
+    "./slot-runtime": {
+      "types": "./dist/slot-runtime.d.ts",
+      "default": "./dist/slot-runtime.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.4.0"
+  }
+}

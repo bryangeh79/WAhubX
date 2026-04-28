@@ -27,6 +27,9 @@ import { ExecutionGroupsModule } from './modules/execution-groups/execution-grou
 import { ChannelItemsModule } from './modules/channel-items/channel-items.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { IntelligentReplyModule } from './modules/intelligent-reply/intelligent-reply.module';
+import { RuntimeBridgeModule } from './modules/runtime-bridge/runtime-bridge.module';
+import { SlotRuntimeModule } from './modules/slot-runtime/slot-runtime.module';
+import { RuntimeProcessModule } from './modules/runtime-process/runtime-process.module';
 
 @Module({
   imports: [
@@ -58,6 +61,9 @@ import { IntelligentReplyModule } from './modules/intelligent-reply/intelligent-
     TasksModule,
     CampaignsModule,
     IntelligentReplyModule,
+    RuntimeBridgeModule,
+    SlotRuntimeModule,
+    RuntimeProcessModule,
     HealthModule,
   ],
   providers: [

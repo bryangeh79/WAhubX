@@ -5,6 +5,17 @@ import { ChatExecutor } from '../tasks/executors/chat.executor';
 import { TaskPausedError } from './takeover.errors';
 import type { TaskExecutorContext } from '../tasks/executor.interface';
 import { TaskEntity, TaskStatus, TaskTargetType } from '../tasks/task.entity';
+import type { SlotsService } from '../slots/slots.service';
+import type { Repository } from 'typeorm';
+import type { AccountSlotEntity } from '../slots/account-slot.entity';
+
+// 2026-04-26 · R9-bis · ChatExecutor constructor 现在需 (slots, slotRepo)
+const stubSlots = {
+  sendText: async () => ({ waMessageId: null }),
+} as unknown as SlotsService;
+const stubSlotRepo = {
+  findOne: async () => ({ id: 1, accountId: 101 } as AccountSlotEntity),
+} as unknown as Repository<AccountSlotEntity>;
 
 function buildTask(payload: Record<string, unknown> = { to: '60123456789', text: 'hi' }): TaskEntity {
   return {
@@ -36,7 +47,7 @@ function buildCtx(overrides: Partial<TaskExecutorContext>): TaskExecutorContext 
 
 describe('ChatExecutor · takeover pause hook', () => {
   it('正常路径: isPaused=false 不抛, return success', async () => {
-    const exec = new ChatExecutor();
+    const exec = new ChatExecutor(stubSlots, stubSlotRepo);
     let throws = 0;
     const ctx = buildCtx({
       isPaused: () => false,
@@ -50,7 +61,7 @@ describe('ChatExecutor · takeover pause hook', () => {
   });
 
   it('接管路径: throwIfPaused 第 1 个 breakpoint 抛 TaskPausedError · executor 中止', async () => {
-    const exec = new ChatExecutor();
+    const exec = new ChatExecutor(stubSlots, stubSlotRepo);
     const ctx = buildCtx({
       isPaused: () => true,
       throwIfPaused: () => {

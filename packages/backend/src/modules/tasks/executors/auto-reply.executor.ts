@@ -2,10 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
-import { ChatMessageEntity, MessageDirection } from '../../baileys/chat-message.entity';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
+import { ChatMessageEntity, MessageDirection } from '../../messaging/chat-message.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
 
 // 2026-04-22 · A7 · 自动回复 (被动)
 // 扫最近 N 小时内 · 有入境消息 · 我方没回过的 contact
@@ -26,7 +26,8 @@ export class AutoReplyExecutor implements TaskExecutor {
   private readonly logger = new Logger(AutoReplyExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · R9-bis · 改走 SlotsService.sendText facade · chromium-aware
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(ChatMessageEntity)
@@ -61,8 +62,7 @@ export class AutoReplyExecutor implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    const sock = this.baileys.getSocket(slot.id);
-    if (!sock) return { success: false, errorCode: 'NOT_ONLINE', errorMessage: '槽位 socket 未在线' };
+    // 2026-04-26 · R9-bis · 通过 SlotsService.sendText facade · chromium-aware
 
     const since = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
     // 查 · 最近 N 小时内有入境消息 · 但入境消息之后我方没回过 的 contact
@@ -106,7 +106,7 @@ export class AutoReplyExecutor implements TaskExecutor {
 
       const text = templates[Math.floor(Math.random() * templates.length)];
       try {
-        await sock.sendMessage(contact.remoteJid, { text });
+        await this.slots.sendText(slot.id, contact.remoteJid, text);
         replied++;
         ctx.log('auto-replied', true, { jid: contact.remoteJid, text });
       } catch (err) {

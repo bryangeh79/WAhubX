@@ -13,6 +13,7 @@ import {
   message,
   Modal,
   Popconfirm,
+  Progress,
   Radio,
   Row,
   Select,
@@ -108,10 +109,24 @@ const STATUS_CONFIG: Record<TaskStatus, { color: string; label: string; icon: st
   cancelled: { color: 'default', label: '已取消',   icon: '○' },
 };
 
+// 2026-04-26 · R11 · 养号计划 (group_warmup_plan)
+interface WarmupPlanItem {
+  id: number;
+  groupId: number;
+  template: string;
+  currentDay: number;
+  currentPhase: number;
+  startedAt: string;
+  paused: boolean;
+  matureLevel: string | null;
+  group?: { name: string };
+}
+
 export function SchedulerPage() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [slots, setSlots] = useState<SlotItem[]>([]);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [warmupPlans, setWarmupPlans] = useState<WarmupPlanItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -122,14 +137,17 @@ export function SchedulerPage() {
     setLoading(true);
     setError(null);
     try {
-      const [tRes, sRes, gRes] = await Promise.all([
+      const [tRes, sRes, gRes, pRes] = await Promise.all([
         api.get<TaskItem[]>('/tasks'),
         api.get<SlotItem[]>('/slots'),
         api.get<GroupSummary[]>('/execution-groups').catch(() => ({ data: [] as GroupSummary[] })),
+        // 2026-04-26 · R11 · 加载养号计划 · 任务调度页也要显
+        api.get<WarmupPlanItem[]>('/group-warmup').catch(() => ({ data: [] as WarmupPlanItem[] })),
       ]);
       setTasks(tRes.data);
       setSlots(sRes.data);
       setGroups(gRes.data);
+      setWarmupPlans(pRes.data);
     } catch (err) {
       setError(extractErrorMessage(err, '加载任务失败'));
     } finally {
@@ -373,6 +391,90 @@ export function SchedulerPage() {
       </Row>
 
       {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
+
+      {/* 2026-04-26 · R11 · 养号计划 (group_warmup_plan) · 长周期·跟单条 task 不同 · 单独区块显 */}
+      {warmupPlans.length > 0 && (
+        <Card size="small" style={{ marginBottom: 12 }} title={
+          <Space>
+            <span>📅 运行中的养号计划</span>
+            <Tag color="orange">{warmupPlans.length} 个</Tag>
+          </Space>
+        }>
+          <Table
+            rowKey="id"
+            size="small"
+            pagination={false}
+            dataSource={warmupPlans}
+            columns={[
+              { title: '计划 ID', dataIndex: 'id', width: 80, render: (id) => <Text strong>#{id}</Text> },
+              {
+                title: '执行组',
+                dataIndex: 'group',
+                render: (_: unknown, p: WarmupPlanItem) => {
+                  const g = groups.find((x) => x.id === p.groupId);
+                  return <Tag color="blue">📁 {g?.name ?? `group #${p.groupId}`} · {g?.memberCount ?? '?'} 号</Tag>;
+                },
+              },
+              {
+                title: '模板',
+                dataIndex: 'template',
+                width: 120,
+                render: (t: string) => <Tag>{t === 'v1_7day' ? '7 天养号' : t === 'v1_14day_full' ? '14 天托管' : t}</Tag>,
+              },
+              {
+                title: '进度',
+                width: 200,
+                render: (_: unknown, p: WarmupPlanItem) => {
+                  const total = p.template === 'v1_7day' ? 7 : 14;
+                  const pct = Math.min(100, Math.round((p.currentDay / total) * 100));
+                  return (
+                    <Space direction="vertical" size={0} style={{ width: 180 }}>
+                      <Text style={{ fontSize: 12 }}>Day {p.currentDay} / {total} · Phase {p.currentPhase}</Text>
+                      <Progress percent={pct} size="small" strokeColor={p.paused ? '#faad14' : '#25d366'} showInfo={false} />
+                    </Space>
+                  );
+                },
+              },
+              {
+                title: '状态',
+                width: 100,
+                render: (_: unknown, p: WarmupPlanItem) =>
+                  p.paused ? <Tag color="orange">⏸ 暂停</Tag>
+                  : p.matureLevel ? <Tag color="green">🌿 成熟期 · {p.matureLevel}</Tag>
+                  : <Tag color="processing">▶ 跑中</Tag>,
+              },
+              {
+                title: '启动时间',
+                dataIndex: 'startedAt',
+                width: 160,
+                render: (t: string) => <Text type="secondary" style={{ fontSize: 11 }}>{new Date(t).toLocaleString('zh-CN')}</Text>,
+              },
+              {
+                title: '操作',
+                width: 220,
+                render: (_: unknown, p: WarmupPlanItem) => (
+                  <Space size={4}>
+                    {p.paused ? (
+                      <Button size="small" type="link" onClick={async () => {
+                        await api.post(`/group-warmup/${p.id}/resume`).catch(() => {});
+                        void load();
+                      }}>恢复</Button>
+                    ) : (
+                      <Button size="small" type="link" onClick={async () => {
+                        await api.post(`/group-warmup/${p.id}/pause`).catch(() => {});
+                        void load();
+                      }}>暂停</Button>
+                    )}
+                  </Space>
+                ),
+              },
+            ]}
+          />
+          <div style={{ fontSize: 11, color: '#999', marginTop: 6 }}>
+            💡 养号计划是长周期 · 系统按 Day/Phase 自动排子任务到下方任务列. Day 1-2 孵化期默认只挂载 · 不产生子任务. Day 3 后开始排.
+          </div>
+        </Card>
+      )}
 
       <Card size="small">
         {tasks.length === 0 ? (
@@ -942,18 +1044,24 @@ function CreateTaskModal({
       onCancel={handleCancel}
       title="+ 创建自动化任务"
       width={720}
-      footer={[
-        <Button key="c" onClick={handleCancel}>取消</Button>,
-        <Button
-          key="s"
-          type="primary"
-          loading={submitting}
-          disabled={!taskType}
-          onClick={handleSubmit}
-        >
-          创建任务
-        </Button>,
-      ]}
+      footer={(() => {
+        // 2026-04-26 · plan 类任务用 modal 内的"启动计划"按钮 · footer "创建任务" 隐藏避免双按钮误导
+        const isPlanType = taskType ? TASK_TYPE_CONFIG[taskType]?.isPlan === true : false;
+        return [
+          <Button key="c" onClick={handleCancel}>取消</Button>,
+          !isPlanType && (
+            <Button
+              key="s"
+              type="primary"
+              loading={submitting}
+              disabled={!taskType}
+              onClick={handleSubmit}
+            >
+              创建任务
+            </Button>
+          ),
+        ].filter(Boolean);
+      })()}
       destroyOnClose
     >
       <Form form={form} layout="vertical" requiredMark={false} initialValues={{ slotSource: 'manual', priority: 5 }}>

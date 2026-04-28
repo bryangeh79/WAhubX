@@ -38,8 +38,10 @@ export type DispatchDecision =
   | { action: 'skip-night-window' }         // 夜间只放行 warmup/maintenance
   | { action: 'skip-health-high' }          // #6 M8 · 健康分 high 暂停主动任务
   | { action: 'skip-slot-offline' }         // 2026-04-22 · 槽位 suspended/empty · 留 pending 等 recover
+  | { action: 'skip-fresh-bind-quiet' }     // 2026-04-25 · 新绑号 24h 静默期 · 只允 warmup/maintenance
   | { action: 'soft-warn-warmup-stage' }    // #5 soft: warmup_stage 不够, 允许执行 + 记警告
-  | { action: 'leave-pending-unknown-type' }; // executor 未注册 → 不 reject 不 run, 保 pending
+  | { action: 'leave-pending-unknown-type' } // executor 未注册 → 不 reject 不 run, 保 pending
+  | { action: 'skip-role-mismatch'; reason: string }; // 2026-04-25 · D11-3 · slot.role 跟任务类型不匹配
 
 export interface DispatchContext {
   now: Date;
@@ -58,6 +60,45 @@ export const MIN_WARMUP_STAGE_BY_TASK_TYPE: Record<string, WarmupStage> = {
   auto_accept: WarmupStage.Prewarm,
   status: WarmupStage.Active,
 };
+
+// 2026-04-25 · 新绑号 24h 静默期 · 下列任务类型可以跑 · 其他类型全部拒
+export const QUIET_PERIOD_ALLOWED_TASK_TYPES = new Set<string>([
+  'warmup',
+  'maintenance',
+  'profile_refresh',
+]);
+export const FRESH_BIND_QUIET_PERIOD_MS = 24 * 60 * 60 * 1000;
+
+// 2026-04-25 · D11-3 · 任务类型 → slot 角色白名单 (Codex 锁: 只做白名单 · 不复杂策略)
+//
+// broadcast 号: 跑外发 · 短寿命 · 死了换 SIM
+// customer_service 号: 长养 · 不主动外发 (除了 maintenance/profile_refresh 这类无害任务)
+//
+// 规则:
+//   - 默认所有 task_type 视为 broadcast-only · 不允许 customer_service 跑
+//   - 但 'warmup' / 'maintenance' / 'profile_refresh' 是低强度 · 客服号也允 (保暖号)
+//
+// 不在白名单的 task_type 默认归 broadcast (防新加 task type 误派给客服号)
+export const TASK_TYPES_ALLOWED_FOR_CUSTOMER_SERVICE = new Set<string>([
+  'warmup',
+  'maintenance',
+  'profile_refresh',
+]);
+
+/**
+ * D11-3 · 判定任务能否派给给定角色的 slot
+ * @returns null = 通过 · 字符串 = 拒绝原因
+ */
+export function checkRoleGate(
+  slotRole: 'broadcast' | 'customer_service',
+  taskType: string,
+): string | null {
+  if (slotRole === 'customer_service' && !TASK_TYPES_ALLOWED_FOR_CUSTOMER_SERVICE.has(taskType)) {
+    return `customer_service 号不接外发任务 type="${taskType}" · 只允 warmup/maintenance/profile_refresh`;
+  }
+  // broadcast 号: 接所有任务 (含 cs 允许的)
+  return null;
+}
 
 @Injectable()
 export class DispatcherService implements OnModuleInit, OnModuleDestroy {
@@ -159,7 +200,13 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
     }
 
     // 夜间窗口 (02-06) 只放行 allowedInNightWindow=true 的 executor
-    if (this.isInNightWindow(now) && !this.registry.isAllowedInNightWindow(task.taskType)) {
+    // 2026-04-28 · payload.forceRun=true 跳过 (用户点 [立即执行] 显式覆盖 · runNowTarget 写)
+    const forceRun = !!(task.payload as { forceRun?: boolean } | null)?.forceRun;
+    if (
+      this.isInNightWindow(now) &&
+      !this.registry.isAllowedInNightWindow(task.taskType) &&
+      !forceRun
+    ) {
       return { action: 'skip-night-window' };
     }
 
@@ -177,9 +224,18 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       return { action: 'leave-pending-unknown-type' }; // 账号不存在或未挂槽, 保 pending 让人工排查
     }
 
-    // 2026-04-22 · Gap 1 · 槽位 suspended/empty 不分发 · 保 pending · 等 recover
-    if (slot.status === 'suspended' || slot.status === 'empty') {
+    // 2026-04-22 · Gap 1 · 槽位 suspended/empty/quarantine 不分发 · 保 pending
+    // 2026-04-25 · quarantine 加入 (440 明确判死)
+    if (slot.status === 'suspended' || slot.status === 'empty' || slot.status === 'quarantine') {
       return { action: 'skip-slot-offline' };
+    }
+
+    // 2026-04-25 · D11-3 · slot.role gate (Codex 锁: 白名单)
+    // customer_service 号只接 warmup/maintenance/profile_refresh · 拒所有其他外发
+    // broadcast 号接全部 (默认)
+    const roleGateReason = checkRoleGate(slot.role, task.taskType);
+    if (roleGateReason) {
+      return { action: 'skip-role-mismatch', reason: roleGateReason };
     }
 
     // #1 全局并发
@@ -217,6 +273,19 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       // 落 soft-warn 后仍 run, 不 reject
     }
 
+    // 2026-04-25 · 新绑号 24h 静默期 · 防刚绑就烧号
+    // 只允许 warmup / maintenance / profile_refresh 这类低强度任务
+    if (wa?.registeredAt) {
+      const boundAt = new Date(wa.registeredAt).getTime();
+      const ageMs = now.getTime() - boundAt;
+      if (ageMs < FRESH_BIND_QUIET_PERIOD_MS && !QUIET_PERIOD_ALLOWED_TASK_TYPES.has(task.taskType)) {
+        this.logger.log(
+          `task ${task.id} (${task.taskType}) acc ${accountId} · 新绑 ${Math.round(ageMs / 3600_000)}h < 24h 静默期 · 拒`,
+        );
+        return { action: 'skip-fresh-bind-quiet' };
+      }
+    }
+
     // #6 M8 · 健康分 gate. dry_run 不拦截, 只标记 meta
     const health = await this.dataSource
       .getRepository(AccountHealthEntity)
@@ -251,7 +320,14 @@ export class DispatcherService implements OnModuleInit, OnModuleDestroy {
       case 'skip-takeover-active':
       case 'skip-night-window':
       case 'skip-slot-offline':
+      case 'skip-fresh-bind-quiet':
         // 保 pending 让下一轮 tick 重新评估
+        return;
+      case 'skip-role-mismatch':
+        // D11-3 · 角色不匹配 · log 明确 reason (Codex 边界 ④ · 可观察)
+        this.logger.log(
+          `task ${task.id} (${task.taskType}) skip-role-mismatch · acc=${task.targetIds[0]} · ${decision.reason}`,
+        );
         return;
       case 'skip-health-high':
         // M8 · 健康分 high · 观察性 log (cascade [3] 验证 · 原无 log)

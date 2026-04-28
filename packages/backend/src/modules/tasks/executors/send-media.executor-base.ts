@@ -4,9 +4,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as fs from 'node:fs';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
-import { WaContactEntity } from '../../baileys/wa-contact.entity';
+import { WaContactEntity } from '../../messaging/wa-contact.entity';
 import { AssetPoolService } from '../../assets/asset-pool.service';
 import { AssetKind } from '../../scripts/asset.entity';
 
@@ -41,7 +41,7 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
   protected readonly logger = new Logger(this.constructor.name);
 
   constructor(
-    protected readonly baileys: BaileysService,
+    protected readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     protected readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WaContactEntity)
@@ -57,19 +57,9 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
 
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', errorMessage: '槽位未找到' };
-    // 2026-04-22 · sock 不在 pool 时尝试 respawn 一次 (DB=active 但 pool 空)
-    let sock = this.baileys.getSocket(slot.id);
-    if (!sock) {
-      ctx.log('sock-missing-respawn', true, {});
-      try {
-        await this.baileys.reactivateAndRespawn(slot.id);
-        await new Promise((r) => setTimeout(r, 3000));
-        sock = this.baileys.getSocket(slot.id);
-      } catch (err) {
-        ctx.log('respawn-failed', false, { err: err instanceof Error ? err.message : String(err) });
-      }
-    }
-    if (!sock) {
+
+    // 2026-04-28 · Phase D · chromium-only · video/voice 已 B1+B2 解锁
+    if (!(await this.slots.isOnline(slot.id))) {
       return {
         success: false,
         errorCode: 'NOT_ONLINE',
@@ -129,7 +119,9 @@ export abstract class SendMediaExecutorBase implements TaskExecutor {
       try {
         const buf = fs.readFileSync(absPath);
         const base64 = buf.toString('base64');
-        await this.baileys.sendMedia(slot.id, jid, this.mediaType, base64, {
+        // 2026-04-26 · Class A · 走 SlotsService.sendMedia facade · chromium-aware
+        // 注: chromium 模式下 voice/video 已在顶部 / facade 内部统一抛错
+        await this.slots.sendMedia(slot.id, jid, this.mediaType, base64, {
           caption: payload.caption,
         });
         sent++;

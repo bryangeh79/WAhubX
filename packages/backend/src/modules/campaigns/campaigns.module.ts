@@ -2,9 +2,9 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppSettingEntity } from '../../common/app-setting.entity';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
-import { WaContactEntity } from '../baileys/wa-contact.entity';
+import { WaContactEntity } from '../messaging/wa-contact.entity';
 import { TaskEntity } from '../tasks/task.entity';
-import { BaileysModule } from '../baileys/baileys.module';
+import { SlotsModule } from '../slots/slots.module';
 
 import { AdvertisementEntity } from './entities/advertisement.entity';
 import { OpeningLineEntity } from './entities/opening-line.entity';
@@ -50,7 +50,7 @@ import { SendAdExecutor } from './executors/send-ad.executor';
       CampaignRunEntity,
       CampaignTargetEntity,
     ]),
-    BaileysModule,
+    SlotsModule,
   ],
   controllers: [
     AdvertisementsController,

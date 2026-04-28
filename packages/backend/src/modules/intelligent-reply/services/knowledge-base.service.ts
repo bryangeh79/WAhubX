@@ -13,6 +13,13 @@ import { KbFaqEntity, FaqSource, FaqStatus } from '../entities/kb-faq.entity';
 import { KbProtectedEntity, ProtectedEntityType } from '../entities/kb-protected.entity';
 import { FileParserService } from './file-parser.service';
 import { PlatformAiService } from './platform-ai.service';
+import { AiTextService } from '../../ai/ai-text.service';
+import {
+  STARTER_COMMON_FAQ,
+  COMMON_KB_META,
+  resolveStarterTemplate,
+} from '../data/starter-common-faq';
+import { TenantEntity } from '../../tenants/tenant.entity';
 
 const DEFAULT_FAQ_QUOTA_PER_MONTH = 20;
 
@@ -31,8 +38,11 @@ export class KnowledgeBaseService {
     private readonly faqRepo: Repository<KbFaqEntity>,
     @InjectRepository(KbProtectedEntity)
     private readonly protectedRepo: Repository<KbProtectedEntity>,
+    @InjectRepository(TenantEntity)
+    private readonly tenantRepo: Repository<TenantEntity>,
     private readonly parser: FileParserService,
     private readonly platformAi: PlatformAiService,
+    private readonly tenantAi: AiTextService,
   ) {}
 
   // ── CRUD ────────────────────────────────────────
@@ -352,24 +362,84 @@ export class KnowledgeBaseService {
     const material = sampleChunks.map((c) => c.text).join('\n\n---\n\n');
     const goal = kb.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
 
-    const systemPrompt = `你是产品运营专家. 根据提供的产品资料, 生成客户最可能在 WhatsApp 咨询中问的问题 + 回答.`;
+    // 2026-04-29 · 任务 1+3+10 · FAQ 生成 prompt 升级
+    //   - 输出结构化 JSON (canonical_question / variants / intent / handoff_action / follow_up_question / risk_level / tags)
+    //   - 区分公司通用 KB 跟产品 KB · 通用 KB 出客服话术 (问候/转人工/价格反问/营业时间), 产品 KB 出产品专属 FAQ
+    //   - 风格: 口语化 + 销售引导 + 不报价
+    //   - 兼容存储: variants/intent/handoff_action/follow_up_question/risk_level 全部塞 tags 字段
+    //     格式: ['intent:pricing', 'handoff:if_no_price', 'risk:medium', 'fu:具体哪方面价格?', 'var:多少钱', 'var:报价', 'var:价位怎么样', 'product_intro']
+    //     (上面这些只是数据格式示例 · 实际 LLM 生成的 var/fu 内容由当前 KB 资料决定 · 不绑定 WAhubX 平台)
+    //     reply-executor.matchFaq 解析时把 var: 前缀的当 variant 参与匹配
+    // 2026-04-29 · SaaS 边界修正:
+    //   去掉 "会不会被封 / VPN / IP / 数据安全" 这种 WhatsApp/Facebook 自动化
+    //   产品特有疑虑. 改成通用模板 (常见疑虑由 LLM 看 ${kb.name} 实际资料推断).
+    //   适用场景包括: 美容/课程/地产/SaaS 软件/电商等任意行业.
+    const isCompanyCommonKb = kb.isDefault;
+    const kbScopeBlock = isCompanyCommonKb
+      ? `**这是公司通用 KB · 你要生成"客服通用话术 FAQ"** (不是产品介绍):
+- 问候 (你好 / 晚上好 / 在吗)
+- 自我介绍 / 这是哪家公司
+- 营业时间 / 客服在不在
+- 联系方式 / 怎么找你们
+- 价格反问 (客户没说哪个产品就问"多少钱" → 反问哪个产品)
+- 介绍一下 (客户没指定产品 → 引导先选产品)
+- 转人工 ("人工" / "真人" / "客服")
+- 闲聊兜底 (吃饭了吗 / 天气 / 累不累 → 简短陪聊 + 拉回业务)
+- 道别 / 感谢
+**不要生成产品具体功能 FAQ** (那是产品 KB 的工作)`
+      : `**这是产品 KB ("${kb.name}") · 你要生成"该产品专属 FAQ"**:
+- 这个产品/服务是做什么的 / 主要价值
+- 适合什么客户 / 典型使用场景
+- 套餐 / 方案 / 包装区别 (如果资料里有)
+- 流程: 怎么开始 / 怎么使用 / 多久见效或上手
+- 客户常见疑虑 (从资料推断 · 例如效果 / 周期 / 成本 / 服务范围 / 售后保障 / 风险)
+- 注意: 不要从其他行业经验照搬话题 · 严格根据下面的"参考资料"生成
+**不要生成通用客服 FAQ** (问候 / 营业时间 / 联系方式 → 公司通用 KB 的工作)`;
+
+    const systemPrompt = `你是资深 WhatsApp 客服话术设计师, 帮 SaaS 公司生成"成交型 FAQ" (不是说明书摘抄).
+你支持任意行业租户 (美容 / 课程 / 地产 / SaaS / 电商等), 客户问题和答案要严格基于本次提供的"参考资料", 不要套用其他行业模板.
+风格底线:
+- 中文口语化 · 像真人客服微信聊天
+- 答完带一个自然追问 (推动客户继续说话)
+- 可用少量 emoji (😊 ~ 不滥用)
+- 不官方腔 / 不机械
+- 不承诺 100% / 保证 / 绝对
+- 资料里有的联系方式原样保留
+- 资料里没有的价格 → 引导留联系方式 + 转人工 (不能编)
+- 销售导向: 客户一表现兴趣就引导留联系方式 (具体问什么 — 例如班次 / 项目预算 / 使用规模 / 客户人数 — 由资料决定)`;
+
     const userPrompt = `
 业务目标: ${goal}
 
-产品资料:
+${kbScopeBlock}
+
+参考资料:
 """
 ${material.slice(0, 8000)}
 """
 
-要求:
-1. 生成 ${count} 条高质量 Q/A · 覆盖产品功能/价格/售后/联系方式等维度
-2. Q 口语化 (像客户真的问出来, 15 字以内)
-3. A 友善简洁 · 100 字内 · 可带 emoji
-4. 保留资料里出现的电话/网站/邮箱等联系方式 (原样引用)
-5. 不编造资料里没有的信息 · 不承诺具体价格数字
+输出要求:
+生成 ${count} 条 FAQ · **严格 JSON 格式**, 每条:
+{
+  "canonical_question": "标准问题 (15 字以内 · 口语化)",
+  "variants": ["客户可能这样问 1", "客户可能这样问 2", "客户可能这样问 3"],
+  "answer": "亲切口语化答案 (≤120 字 · 含 emoji · 末尾带追问)",
+  "intent": "greeting | product_intro | pricing | package | demo | setup | risk | technical_support | refund | payment | complaint | human_agent | off_topic | unclear | lead_collection",
+  "handoff_action": "none | always | if_no_price | if_uncertain",
+  "follow_up_question": "答完之后的自然追问",
+  "risk_level": "low | medium | high",
+  "tags": ["关键词 1", "关键词 2"]
+}
 
-返回 JSON (严格格式):
-{"faqs":[{"q":"问题","a":"回答","tags":["标签"]}]}
+要求:
+- variants 至少 3 个 · 涵盖客户真实可能的问法 (不是改写 canonical_question · 是不同表达)
+- 价格相关问题 handoff_action 设 "if_no_price"
+- demo / 购买 / 投诉 / 退款 / 付款 / 服务出问题 类 handoff_action 设 "always"
+- 风险/疑虑话题 (具体例子 由"参考资料"决定 · 不要套用其他行业的疑虑) risk_level 设 "high"
+- 销售场景 (客户表达兴趣 / 询价) intent 设 "lead_collection" 或 "pricing"
+
+返回:
+{"faqs":[{...}, {...}, ...]}
 `.trim();
 
     const res = await this.platformAi.llm(
@@ -377,29 +447,73 @@ ${material.slice(0, 8000)}
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      { temperature: 0.5, maxTokens: 4096, jsonMode: true },
+      { temperature: 0.6, maxTokens: 8192, jsonMode: true },
     );
 
     if (!res.ok) {
       throw new BadRequestException(`AI 调用失败: ${res.error ?? 'unknown'}`);
     }
 
-    let faqs: Array<{ q: string; a: string; tags?: string[] }> = [];
+    // 解析新格式 · 兼容老格式 (q/a/tags · 没 variants)
+    type NewFaq = {
+      canonical_question?: string;
+      q?: string;
+      variants?: string[];
+      answer?: string;
+      a?: string;
+      intent?: string;
+      handoff_action?: string;
+      follow_up_question?: string;
+      risk_level?: string;
+      tags?: string[];
+    };
+    let faqs: NewFaq[] = [];
     try {
-      const parsed = JSON.parse(res.text) as { faqs?: Array<{ q: string; a: string; tags?: string[] }> };
+      const parsed = JSON.parse(res.text) as { faqs?: NewFaq[] };
       faqs = parsed.faqs ?? [];
     } catch {
       throw new BadRequestException('AI 返回格式不正确 · 稍后重试');
     }
 
-    // 去重 + 存 draft
+    // 把 variants/intent/handoff_action/follow_up_question/risk_level 全塞进 tags · 用前缀区分
+    // matchFaq() 在 reply-executor 端解析 var: 前缀当 variant 参与 Jaccard
+    const buildTags = (f: NewFaq): string[] => {
+      const tags: string[] = [];
+      if (f.intent) tags.push(`intent:${f.intent.trim()}`);
+      if (f.handoff_action) tags.push(`handoff:${f.handoff_action.trim()}`);
+      if (f.risk_level) tags.push(`risk:${f.risk_level.trim()}`);
+      if (f.follow_up_question?.trim()) {
+        // fu 可能含逗号 · base64-safe-ish · 直接塞 (Postgres text[] 单元素能容忍特殊字符)
+        tags.push(`fu:${f.follow_up_question.trim().slice(0, 200)}`);
+      }
+      if (Array.isArray(f.variants)) {
+        for (const v of f.variants) {
+          const vt = (v ?? '').trim();
+          if (vt && vt.length <= 100) tags.push(`var:${vt}`);
+        }
+      }
+      // 普通关键词 tags 也塞 (但跳掉跟前缀冲突的)
+      if (Array.isArray(f.tags)) {
+        for (const t of f.tags) {
+          const tt = (t ?? '').trim();
+          if (!tt) continue;
+          if (/^(intent|handoff|risk|fu|var):/.test(tt)) continue;
+          if (tt.length > 30) continue;
+          tags.push(tt);
+        }
+      }
+      // Postgres text[] 单元素长度没硬限 · 但全表 tag 数量保守上限 30
+      return tags.slice(0, 30);
+    };
+
+    // 去重 (用 canonical_question · 同义 variants 不算重)
     const existing = await this.faqRepo.find({ where: { kbId }, select: ['question'] });
     const existSet = new Set(existing.map((e) => e.question.trim().toLowerCase()));
     let skipped = 0;
     const rows: KbFaqEntity[] = [];
     for (const f of faqs) {
-      const q = (f.q ?? '').trim();
-      const a = (f.a ?? '').trim();
+      const q = ((f.canonical_question ?? f.q) ?? '').trim();
+      const a = ((f.answer ?? f.a) ?? '').trim();
       if (!q || !a) continue;
       if (existSet.has(q.toLowerCase())) {
         skipped++;
@@ -411,7 +525,7 @@ ${material.slice(0, 8000)}
           kbId,
           question: q,
           answer: a,
-          tags: Array.isArray(f.tags) ? f.tags.slice(0, 5) : [],
+          tags: buildTags(f),
           status: 'draft', // 默认待审核 · 租户一键通过或逐条编辑
           source: 'ai_generated',
         }),
@@ -420,12 +534,10 @@ ${material.slice(0, 8000)}
     if (rows.length > 0) await this.faqRepo.save(rows);
 
     this.logger.log(
-      `generateFaqs · tenant=${tenantId} · kb=${kbId} · 生成 ${rows.length} / 请求 ${count} · 跳重 ${skipped} · tokens=${res.promptTokens}+${res.completionTokens}`,
+      `generateFaqs · tenant=${tenantId} · kb=${kbId} (${isCompanyCommonKb ? '公司通用' : '产品'}) · 生成 ${rows.length} / 请求 ${count} · 跳重 ${skipped} · tokens=${res.promptTokens}+${res.completionTokens}`,
     );
 
-    // 引用 quota 避免 lint warning (TODO 实现时用)
     void quota;
-
     return { generated: rows.length, skippedDup: skipped };
   }
 
@@ -468,5 +580,247 @@ ${material.slice(0, 8000)}
     const faqDraft = await this.faqRepo.count({ where: { kbId, status: 'draft' } });
     const faqEnabled = await this.faqRepo.count({ where: { kbId, status: 'enabled' } });
     return { sources, chunks, faqs, faqDraft, faqEnabled, entities };
+  }
+
+  // ── 通用 FAQ starter ────────────────────────────────────
+  // 2026-04-28 · 用户高频用 · 必须可重新种子化 · 也支持 AI 优化
+
+  /**
+   * 给 KB 灌 starter FAQ (52 条问候/身份/转人工等通用问答)
+   * idempotent · 已存在的 question 不重复插
+   * 如果该 tenant 还没 default KB · 自动建一个并设为 default
+   *
+   * 返回: { kbId, inserted, skipped, created (true=新建了 KB) }
+   */
+  async seedCommonFaqs(
+    tenantId: number,
+    targetKbId?: number,
+  ): Promise<{ kbId: number; inserted: number; skipped: number; created: boolean }> {
+    let kbId = targetKbId ?? 0;
+    let created = false;
+
+    if (!kbId) {
+      // 找 tenant 的 default KB
+      const def = await this.kbRepo.findOne({ where: { tenantId, isDefault: true } });
+      if (def) {
+        kbId = def.id;
+      } else {
+        // 没 default · 看有没有同名 KB
+        const sameName = await this.kbRepo.findOne({
+          where: { tenantId, name: COMMON_KB_META.name },
+        });
+        if (sameName) {
+          sameName.isDefault = true;
+          await this.kbRepo.save(sameName);
+          kbId = sameName.id;
+        } else {
+          // 真新建
+          const newKb = await this.kbRepo.save(
+            this.kbRepo.create({
+              tenantId,
+              name: COMMON_KB_META.name,
+              description: COMMON_KB_META.description,
+              goalPrompt: COMMON_KB_META.goalPrompt,
+              language: COMMON_KB_META.language,
+              isDefault: true,
+              status: KbStatus.Enabled,
+            }),
+          );
+          kbId = newKb.id;
+          created = true;
+        }
+      }
+    } else {
+      // 验 KB 归属
+      await this.get(tenantId, kbId);
+    }
+
+    // 2026-04-29 · V2.2 R2 · 取 tenant 名做占位符替换 context
+    const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+    const ctx = {
+      tenantName: tenant?.name ?? null,
+      companyName: tenant?.name ?? null, // V1 没单独 companyName 字段, 用 tenant.name
+      botName: 'AI 智能客服',              // V1 没单独 botName 字段, 默认值
+    };
+
+    // 灌 FAQ · 跳已存在 question
+    let inserted = 0;
+    let skipped = 0;
+    for (const faq of STARTER_COMMON_FAQ) {
+      const exist = await this.faqRepo.findOne({ where: { kbId, question: faq.question } });
+      if (exist) {
+        skipped++;
+        continue;
+      }
+      // 2026-04-29 · V2.2 R2: answer 替换 {{companyName}} / {{tenantName}} / {{botName}}
+      const resolvedAnswer = resolveStarterTemplate(faq.answer, ctx);
+      // 2026-04-29 · V2.2 R3: variants 转 'var:xxx' tag (跟 generateFaqs 同款格式)
+      const variantTags = (faq.variants ?? []).map((v) => `var:${v.trim()}`).filter((t) => t.length > 4);
+      const finalTags = [...faq.tags, ...variantTags];
+      await this.faqRepo.save(
+        this.faqRepo.create({
+          kbId,
+          question: faq.question,
+          answer: resolvedAnswer,
+          tags: finalTags,
+          status: 'enabled' as FaqStatus,
+          source: 'manual_bulk' as FaqSource,
+        }),
+      );
+      inserted++;
+    }
+
+    this.logger.log(
+      `seedCommonFaqs · tenant=${tenantId} kb=${kbId} created=${created} inserted=${inserted} skipped=${skipped}`,
+    );
+    return { kbId, inserted, skipped, created };
+  }
+
+  /**
+   * 用 AI (租户配的 provider) 把 starter FAQ 改写得贴合 tenant 自己的业务
+   * - 拉 tenant 的产品 KB description / goal_prompt 作为 context
+   * - 对每条带 'starter' tag 的 FAQ · 让 AI 改写 answer
+   * - 改完 tag 加上 'starter-customized' (UI 显蓝色"AI 优化"标)
+   *
+   * 返回: { processed, updated, skipped, failed }
+   */
+  async customizeStarterFaqs(
+    tenantId: number,
+    kbId: number,
+  ): Promise<{ processed: number; updated: number; skipped: number; failed: number }> {
+    await this.get(tenantId, kbId); // 验权限
+
+    // 1. 收集业务 context (tenant 其他 product KB 的 description + goal)
+    const productKbs = await this.kbRepo.find({
+      where: { tenantId },
+    });
+    const businessContext = productKbs
+      .filter((k) => k.id !== kbId) // 排除当前通用 KB 自己
+      .map((k) => `[KB: ${k.name}] ${k.description ?? ''}\n目标: ${k.goalPrompt ?? ''}`)
+      .join('\n\n');
+
+    if (!businessContext.trim()) {
+      throw new BadRequestException(
+        '没有产品 KB 可作为业务上下文 · 请先建 1 个产品 KB 并填描述',
+      );
+    }
+
+    // 2. 拉本 KB 的 starter FAQ (tags 含 'starter' · 排除已 customized 的)
+    const allFaqs = await this.faqRepo.find({ where: { kbId } });
+    const starterFaqs = allFaqs.filter(
+      (f) =>
+        Array.isArray(f.tags) &&
+        f.tags.includes('starter') &&
+        !f.tags.includes('starter-customized'),
+    );
+
+    if (starterFaqs.length === 0) {
+      return { processed: 0, updated: 0, skipped: 0, failed: 0 };
+    }
+
+    // 2026-04-29 · V2.2 R2 · 拿 tenant 名 + 准备占位符 ctx
+    //   AI 改写后仍可能写死产品名 (LLM 不一定遵守"通用风格" 指令)
+    //   双层保险:
+    //   1. system prompt 严格禁止写死产品名 (用通用代词或占位符)
+    //   2. 改写后做 sanity check: 答案含产品名时拒绝替换 · 保留原 starter
+    const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+    const tenantNameForCtx = tenant?.name ?? '本公司';
+    const productNamesInTenant = productKbs
+      .filter((k) => k.id !== kbId)
+      .map((k) => k.name.trim())
+      .filter((n) => n.length >= 2);
+
+    let updated = 0;
+    let failed = 0;
+    let rejectedHardcoded = 0; // 因写死产品名被拒的 FAQ 数
+
+    // 3. 对每条 FAQ 调 AI 改写 (单条单调用 · 控成本 + 容错)
+    for (const faq of starterFaqs) {
+      const systemPrompt = `你是一个 SaaS 客服 FAQ 优化助手 · 帮 "${tenantNameForCtx}" 把通用 FAQ 答案改写得更贴合该公司业务.
+
+== 风格 ==
+- 友善亲切 · 口语化
+- 不超过 80 字
+- 保留关键引导信息 (如让用户提供订单号 / 转人工等)
+- 自然不生硬 · 不要太营销
+
+== 严格禁止 ==
+- **不要硬写具体产品名** · 用 "我们的产品" / "我们的服务" / "本公司" 等通用词代替
+- 即使业务上下文提到了多个产品名 · 也不要把产品名写进通用 FAQ 答案
+  (因为这条是通用 FAQ · 客户可能问任何产品)
+- 不报具体价格数字
+- 不承诺 100% / 保证 / 绝对
+
+== 输出 ==
+直接输出新答案文本 · 不要解释 · 不要 JSON`;
+
+      const userPrompt = `公司业务上下文 (仅供参考语气和定位 · 不要直接写进答案):
+${businessContext.slice(0, 2000)}
+
+通用 FAQ 问题: ${faq.question}
+默认答案: ${faq.answer}
+
+请改写答案 (直接输出文本 · 不要写死任何产品名):`;
+
+      try {
+        const r = await this.tenantAi.chatWithTenant({
+          systemPrompt,
+          userPrompt,
+          maxTokens: 200,
+          timeoutMs: 30_000,
+        });
+        if (!r.ok) {
+          failed++;
+          this.logger.warn(`customizeStarterFaqs · faq ${faq.id} · AI 失败: ${r.errorCode}`);
+          continue;
+        }
+        let newAnswer = (r.text ?? '').trim();
+        // 简单 sanity: 长度 + 防 AI 输出明显格式错误
+        if (newAnswer.length < 5 || newAnswer.length > 500) {
+          failed++;
+          continue;
+        }
+        // 2026-04-29 · V2.2 R2 · sanity check: 防 AI 写死具体产品名
+        //   AI 偶尔不遵守"通用代词"指令 · 把 "FAhubX/WAhubX/M33" 写进答案
+        //   sanity: 答案含任何 productKbs[].name 关键词 → 拒绝替换 · 保留原 starter
+        const containsHardcodedProduct = productNamesInTenant.some((pn) => {
+          const lo = newAnswer.toLowerCase();
+          const lpn = pn.toLowerCase();
+          return lpn.length >= 3 && lo.includes(lpn);
+        });
+        if (containsHardcodedProduct) {
+          rejectedHardcoded++;
+          this.logger.warn(
+            `customizeStarterFaqs · faq ${faq.id} · AI 输出含硬编码产品名 · 拒绝替换 · 保留原 starter answer`,
+          );
+          continue;
+        }
+        // 截 200 字防 guardrail
+        if (newAnswer.length > 200) newAnswer = newAnswer.slice(0, 200);
+
+        // 更新 FAQ · 加 starter-customized tag · 保留原 starter tag 兼容
+        const newTags = Array.from(new Set([...(faq.tags ?? []), 'starter-customized']));
+        await this.faqRepo.update(faq.id, {
+          answer: newAnswer,
+          tags: newTags,
+        });
+        updated++;
+      } catch (err) {
+        failed++;
+        this.logger.warn(
+          `customizeStarterFaqs · faq ${faq.id} · 异常: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} processed=${starterFaqs.length} updated=${updated} failed=${failed} rejectedHardcoded=${rejectedHardcoded}`,
+    );
+    return {
+      processed: starterFaqs.length,
+      updated,
+      skipped: starterFaqs.length - updated - failed,
+      failed,
+    };
   }
 }

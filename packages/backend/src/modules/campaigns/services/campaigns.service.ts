@@ -400,7 +400,11 @@ export class CampaignsService {
   /**
    * 复制为新投放 · 保留文案/开场白/客户群/执行模式/节流档 · schedule 改 immediate · 新 Draft 状态
    */
-  async clone(tenantId: number, sourceId: number): Promise<CampaignEntity> {
+  async clone(
+    tenantId: number,
+    sourceId: number,
+    createdBy: string | null,
+  ): Promise<CampaignEntity> {
     const src = await this.findById(tenantId, sourceId);
     // 生成新名
     const baseName = `${src.name} (副本)`;
@@ -414,7 +418,10 @@ export class CampaignsService {
       tenantId,
       name: newName,
       schedule: { mode: 'immediate' } as CampaignEntity['schedule'],
-      targets: src.targets,
+      targets: {
+        groupIds: [...(src.targets.groupIds ?? [])],
+        extraPhones: [...(src.targets.extraPhones ?? [])],
+      },
       adStrategy: src.adStrategy,
       adIds: [...src.adIds],
       openingStrategy: src.openingStrategy,
@@ -425,6 +432,7 @@ export class CampaignsService {
       safetyStatus: SafetyStatus.Green,
       safetySnapshot: null,
       status: CampaignStatus.Draft,
+      createdBy,
     });
     return this.campaignRepo.save(cloned);
   }
@@ -604,7 +612,129 @@ export class CampaignsService {
     return { pushed };
   }
 
+  /**
+   * 2026-04-28 · 强推单个 target · 把这一个 target 对应 task 的 scheduled_at 改成 NOW
+   * 跳过节流窗口 · 立即让 dispatcher 捡起来执行
+   * 仅作用于 task.status='pending' 的任务 · 已 done/failed/in-progress 的不动
+   * UI 设计: targets 表每行的"立即执行"按钮调这个 (per-task 不是 per-campaign)
+   */
+  async runNowTarget(
+    tenantId: number,
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ pushed: boolean; reason?: string }> {
+    await this.findById(tenantId, campaignId);
+    // 验 target 属于本 campaign 且状态是 dispatched
+    const target = await this.targetRepo.findOne({
+      where: { id: targetId, campaignId },
+    });
+    if (!target) {
+      throw new NotFoundException(`目标 ${targetId} 不存在或不属于该投放`);
+    }
+    if (target.taskId === null) {
+      return { pushed: false, reason: '该目标未派发任务 (尚未生成 task)' };
+    }
+    if (target.status !== 1) {
+      // 0=pending 1=dispatched 2=sent 3=failed 4=skipped
+      return {
+        pushed: false,
+        reason: `目标状态 ${target.status} · 仅 dispatched 可强推`,
+      };
+    }
+    // 2026-04-28 · 立即执行 · 同时写 payload.forceRun=true · dispatcher 看到该 flag
+    // 跳过 night-window 检查 (用户已确认 modal 风险, 夜间窗口该让位给 user override)
+    const result = (await this.targetRepo.query(
+      `UPDATE task SET
+         scheduled_at = NOW(),
+         payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{forceRun}', 'true'::jsonb)
+       WHERE id = $1 AND status = 'pending'
+       RETURNING id as task_id`,
+      [target.taskId],
+    )) as Array<{ task_id: number }>;
+    if (result.length === 0) {
+      return { pushed: false, reason: 'task 状态已非 pending (可能已在执行或完成)' };
+    }
+    this.logger.log(
+      `runNowTarget · campaign ${campaignId} · target ${targetId} · task ${target.taskId} 强推 scheduled_at=NOW`,
+    );
+    return { pushed: true };
+  }
+
+  /**
+   * 2026-04-28 · 删除单个 target · 取消未执行的 task + 标 target 跳过
+   * UI: targets 表每行的"删除"按钮调这个
+   * 行为:
+   *   - 若 task 仍 pending: UPDATE task SET status='cancelled'
+   *   - target.status = 4 (Skipped)
+   *   - errorCode/errorMsg 标记 'CANCELLED_BY_USER'
+   *   - 不物理 DELETE row (保留审计 + 报告统计)
+   */
+  async cancelTarget(
+    tenantId: number,
+    campaignId: number,
+    targetId: string,
+  ): Promise<{ cancelled: boolean; taskCancelled: boolean }> {
+    await this.findById(tenantId, campaignId);
+    const target = await this.targetRepo.findOne({
+      where: { id: targetId, campaignId },
+    });
+    if (!target) {
+      throw new NotFoundException(`目标 ${targetId} 不存在或不属于该投放`);
+    }
+    let taskCancelled = false;
+    if (target.taskId !== null) {
+      const r = (await this.targetRepo.query(
+        `UPDATE task SET status = 'cancelled', last_error = 'cancelled by user'
+         WHERE id = $1 AND status = 'pending'
+         RETURNING id`,
+        [target.taskId],
+      )) as Array<{ id: number }>;
+      taskCancelled = r.length > 0;
+    }
+    await this.targetRepo.update(target.id, {
+      status: 4, // Skipped
+      errorCode: 'CANCELLED_BY_USER',
+      errorMsg: '用户在 UI 删除',
+    });
+    this.logger.log(
+      `cancelTarget · campaign ${campaignId} · target ${targetId} · taskCancelled=${taskCancelled}`,
+    );
+    return { cancelled: true, taskCancelled };
+  }
+
+  /**
+   * 2026-04-28 · 真删除 · 物理 DELETE 整个 campaign + children
+   * 之前是 soft-cancel 保留审计 · 用户明确要求"删除就消失"
+   * 顺序: cancel pending tasks → DELETE targets → DELETE runs → DELETE campaign
+   */
   async cancel(tenantId: number, id: number): Promise<void> {
+    await this.findById(tenantId, id); // verify ownership
+
+    // 1. 取消所有还 pending 的 task (避免 dispatcher 在 row 删后还跑)
+    await this.targetRepo.query(
+      `UPDATE task SET status = 'cancelled', last_error = 'campaign deleted by user'
+       WHERE id IN (
+         SELECT ct.task_id::int FROM campaign_target ct
+         WHERE ct.campaign_id = $1 AND ct.task_id IS NOT NULL
+       )
+       AND status = 'pending'`,
+      [id],
+    );
+
+    // 2. 物理删 children
+    await this.targetRepo.delete({ campaignId: id });
+    await this.runRepo.delete({ campaignId: id });
+    // 3. 删 campaign 主行
+    await this.campaignRepo.delete(id);
+
+    this.logger.log(`hard-delete · campaign ${id} · DELETE 物理完成 (含 children)`);
+  }
+
+  /**
+   * 老的软取消 · 仅 status=Cancelled · 不删 row
+   * 当前 cancel() 已是 hardDelete · 这个保留供未来需要"暂停式取消"时调
+   */
+  async softCancel(tenantId: number, id: number): Promise<void> {
     const row = await this.findById(tenantId, id);
     row.status = CampaignStatus.Cancelled;
     await this.campaignRepo.save(row);

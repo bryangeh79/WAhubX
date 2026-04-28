@@ -46,6 +46,10 @@ export interface TakeoverMessageEvent {
   sentAt: string;
   // 手动发标记 (script_run_id IS NULL)
   manual: boolean;
+  // 2026-04-25 · D11-3 · slot 角色 (broadcast | customer_service)
+  // 业务订阅者按这字段 gate · broadcast 号 inbound log only · 不进 auto-reply / takeover 链
+  // (Codex 边界 3: 不直接吞没 · 仍 emit · 但订阅者按 role 决定是否处理)
+  slotRole?: 'broadcast' | 'customer_service';
 }
 
 export interface TakeoverIdleEvent {

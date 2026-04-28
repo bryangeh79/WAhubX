@@ -2,7 +2,7 @@
 //
 // 依赖:
 //   - AiModule (AiEncryptionService + MASTER_KEY_PROVIDER + Env/MachineBound provider classes)
-//   - BaileysModule (evictFromPool for per-slot restore / import)
+//   - RuntimeProcessModule (stop runtime for per-slot restore / import · Phase D)
 //   - AuthModule (Roles guard)
 
 import { Global, Module } from '@nestjs/common';
@@ -11,7 +11,7 @@ import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { AppSettingEntity } from '../../common/app-setting.entity';
 import { AiProviderEntity } from '../ai/ai-provider.entity';
 import { AuthModule } from '../auth/auth.module';
-import { BaileysModule } from '../baileys/baileys.module';
+import { RuntimeProcessModule } from '../runtime-process/runtime-process.module';
 import { BackupService } from './backup.service';
 import { BackupExportService } from './backup-export.service';
 import { BackupImportService } from './backup-import.service';
@@ -26,7 +26,7 @@ import { BackupController } from './backup.controller';
   imports: [
     TypeOrmModule.forFeature([AccountSlotEntity, AppSettingEntity, AiProviderEntity]),
     AuthModule,
-    BaileysModule,
+    RuntimeProcessModule,
     // AiModule 是 @Global · 不需 import 也可 inject EnvMasterKey / MachineBoundMasterKey
   ],
   controllers: [BackupController],

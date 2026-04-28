@@ -1,6 +1,7 @@
-// Stub baileys.service (transitively imports ESM @whiskeysockets/baileys — jest/ts-jest can't parse)
-jest.mock('../baileys/baileys.service', () => ({
-  BaileysService: class {},
+// 2026-04-28 · Phase D · baileys 已拔 · 旧 mock 移除
+// 2026-04-26 · R9 · script-runner 改走 SlotsService.sendText facade · 同样 stub
+jest.mock('../slots/slots.service', () => ({
+  SlotsService: class {},
 }));
 
 import type { Repository } from 'typeorm';
@@ -10,7 +11,7 @@ import type { RewriteCacheEntity } from './rewrite-cache.entity';
 import type { AssetEntity } from './asset.entity';
 import type { AccountSlotEntity } from '../slots/account-slot.entity';
 import type { WaAccountEntity } from '../slots/wa-account.entity';
-import type { BaileysService } from '../baileys/baileys.service';
+import type { SlotsService } from '../slots/slots.service';
 import type { AiTextService } from '../ai/ai-text.service';
 import type { AiSettingsService } from '../ai/ai-settings.service';
 import type { RewriteResult } from '../ai/adapters/provider.interface';
@@ -96,11 +97,12 @@ function buildRunner(opts: {
       }) as WaAccountEntity,
   } as unknown as Repository<WaAccountEntity>;
 
-  const baileys = {
+  const slots = {
     sendText: async (slotId: number, recipient: string, text: string) => {
       sent.push({ slotId, recipient, text });
+      return { waMessageId: null };
     },
-  } as unknown as BaileysService;
+  } as unknown as SlotsService;
 
   const aiText = {
     rewrite: async (input: { originalText: string }) =>
@@ -117,7 +119,7 @@ function buildRunner(opts: {
       assetRepo,
       slotRepo,
       accountRepo,
-      baileys,
+      slots,
       aiText,
       aiSettings,
     ),
@@ -266,14 +268,15 @@ describe('ScriptRunnerService.run', () => {
         ],
       },
     });
-    // 打桩 baileys 让 turn 2 抛
+    // 打桩 slots 让 turn 2 抛 · R9 后走 SlotsService.sendText facade
     let call = 0;
-    (service as unknown as { baileys: BaileysService }).baileys = {
+    (service as unknown as { slots: SlotsService }).slots = {
       sendText: async () => {
         call++;
         if (call === 2) throw new Error('wa session dead');
+        return { waMessageId: null };
       },
-    } as unknown as BaileysService;
+    } as unknown as SlotsService;
 
     const result = await service.run({ scriptId: 1, roleAaccountId: 1, roleBaccountId: 2, fastMode: true });
     expect(result.turnsExecuted).toBe(2);

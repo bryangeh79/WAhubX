@@ -24,7 +24,7 @@ import { promisify } from 'node:util';
 import * as yauzl from 'yauzl';
 import { MASTER_KEY_PROVIDER, type MasterKeyProvider } from '../ai/master-key.provider';
 import { getSlotDir } from '../../common/storage';
-import { BaileysService } from '../baileys/baileys.service';
+import { RuntimeProcessManagerService } from '../runtime-process/runtime-process-manager.service';
 import { decodeWab, parseWabHeader, type WabManifest } from './wab-codec';
 import { BackupExportService } from './backup-export.service';
 
@@ -53,7 +53,7 @@ export class BackupImportService {
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(MASTER_KEY_PROVIDER) private readonly masterKey: MasterKeyProvider,
     private readonly exportSvc: BackupExportService,
-    private readonly baileys: BaileysService,
+    private readonly runtimeProcess: RuntimeProcessManagerService,
   ) {}
 
   /**
@@ -125,7 +125,7 @@ export class BackupImportService {
           'SELECT id FROM account_slot WHERE slot_index = $1 LIMIT 1',
           [idx],
         );
-        if (slot?.[0]?.id) await this.baileys.evictFromPool(slot[0].id);
+        if (slot?.[0]?.id) await this.runtimeProcess.stop(slot[0].id, { graceful: true, timeoutMs: 5000 }).catch(() => {});
       }
 
       return {

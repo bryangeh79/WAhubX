@@ -32,17 +32,46 @@ export class FileParserService {
   }
 
   private async parsePdf(buffer: Buffer): Promise<string> {
+    let parser: { getText: () => Promise<{ text: string }>; destroy: () => Promise<void> } | null = null;
     try {
-      // 动态 import, 避免启动时加载内部样例数据
-      // pdf-parse 0.x package 包装了 pdfjs-dist
-      const mod = await import('pdf-parse');
-      const pdfParse = (mod as unknown as { default: (b: Buffer) => Promise<{ text: string }> }).default
-        ?? (mod as unknown as (b: Buffer) => Promise<{ text: string }>);
-      const data = await pdfParse(buffer);
-      return this.cleanText(data.text ?? '');
+      // 2026-04-28 · pdf-parse v2.4.5 API 已彻底变 (老 default fn → 新 PDFParse class)
+      //   老: import pdfParse from 'pdf-parse'; await pdfParse(buffer)
+      //   新: import { PDFParse } from 'pdf-parse'; new PDFParse({ data: buffer }).getText()
+      //   bug: 老兼容写法 mod.default ?? mod 都不命中 fn (新 mod 没 default 也不是 fn) → "pdfParse is not a function"
+      const mod = (await import('pdf-parse')) as unknown as {
+        PDFParse?: new (opts: { data: Buffer | Uint8Array }) => {
+          getText: () => Promise<{ text: string }>;
+          destroy: () => Promise<void>;
+        };
+        default?: (b: Buffer) => Promise<{ text: string }>;
+      };
+
+      // 优先新 API (v2+)
+      if (typeof mod.PDFParse === 'function') {
+        parser = new mod.PDFParse({ data: buffer });
+        const result = await parser.getText();
+        return this.cleanText(result.text ?? '');
+      }
+
+      // 回退老 API (v1/v0 默认 fn 兼容)
+      if (typeof mod.default === 'function') {
+        const data = await mod.default(buffer);
+        return this.cleanText((data as unknown as { text?: string }).text ?? '');
+      }
+
+      throw new Error('pdf-parse 模块没有 PDFParse class 也没有 default 函数 · 版本不兼容');
     } catch (err) {
       this.logger.warn(`parsePdf failed: ${err instanceof Error ? err.message : err}`);
       throw new BadRequestException(`PDF 解析失败 · ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // 释放 pdfjs worker · 防内存泄
+      if (parser) {
+        try {
+          await parser.destroy();
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 

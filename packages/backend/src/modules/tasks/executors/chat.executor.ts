@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { TaskExecutor, TaskExecutorContext, TaskExecutorResult } from '../executor.interface';
-import { BaileysService } from '../../baileys/baileys.service';
+import { SlotsService } from '../../slots/slots.service';
 import { AccountSlotEntity } from '../../slots/account-slot.entity';
 
 // 2026-04-21 · 重写: 从 M3 stub 升级到真接 Baileys sendText / sendMedia
@@ -30,7 +30,8 @@ export class ChatExecutor implements TaskExecutor {
   private readonly logger = new Logger(ChatExecutor.name);
 
   constructor(
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · R9-bis · 改走 SlotsService facade · chromium 模式不再撞 baileys pool
+    private readonly slots: SlotsService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
   ) {}
@@ -57,12 +58,17 @@ export class ChatExecutor implements TaskExecutor {
         if (!payload.text) {
           return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'text 必填' };
         }
-        await this.baileys.sendText(slot.id, payload.to, payload.text);
+        // 2026-04-26 · R9-bis · 改走 SlotsService.sendText facade (chromium-aware)
+        await this.slots.sendText(slot.id, payload.to, payload.text);
       } else {
         if (!payload.mediaBase64) {
           return { success: false, errorCode: 'INVALID_PAYLOAD', errorMessage: 'mediaBase64 必填' };
         }
-        await this.baileys.sendMedia(slot.id, payload.to, contentType, payload.mediaBase64, {
+        if (contentType === 'video') {
+          // chromium 路径 sendMedia 当前仅支 image/voice/file (D11+ 扩 video)
+          return { success: false, errorCode: 'NOT_SUPPORTED', errorMessage: 'video 类型 chromium 路径暂不支持 (留 D11+)' };
+        }
+        await this.slots.sendMedia(slot.id, payload.to, contentType, payload.mediaBase64, {
           mimeType: payload.mimeType,
           filename: payload.filename,
           caption: payload.caption,

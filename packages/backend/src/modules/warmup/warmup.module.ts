@@ -23,7 +23,7 @@ import { WarmupController } from './warmup.controller';
 import { GroupWarmupController } from './group-warmup.controller';
 import { StatusPostSeedsController } from './status-post-seeds.controller';
 import { AdminDebugController } from './admin-debug.controller';
-import { BaileysModule } from '../baileys/baileys.module';
+import { SlotsModule } from '../slots/slots.module';
 
 @Module({
   imports: [
@@ -39,7 +39,7 @@ import { BaileysModule } from '../baileys/baileys.module';
       ScriptPackEntity,
       AssetEntity,
     ]),
-    BaileysModule,
+    SlotsModule,
   ],
   controllers: [WarmupController, GroupWarmupController, StatusPostSeedsController, AdminDebugController],
   providers: [

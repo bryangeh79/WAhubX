@@ -5,7 +5,7 @@ import { Repository } from 'typeorm';
 import { ScriptEntity } from './script.entity';
 import { RewriteCacheEntity } from './rewrite-cache.entity';
 import { AssetEntity } from './asset.entity';
-import { BaileysService } from '../baileys/baileys.service';
+import { SlotsService } from '../slots/slots.service';
 import { AccountSlotEntity } from '../slots/account-slot.entity';
 import { WaAccountEntity } from '../slots/wa-account.entity';
 import { AiTextService } from '../ai/ai-text.service';
@@ -63,7 +63,9 @@ export class ScriptRunnerService {
     @InjectRepository(AssetEntity) private readonly assetRepo: Repository<AssetEntity>,
     @InjectRepository(AccountSlotEntity) private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(WaAccountEntity) private readonly accountRepo: Repository<WaAccountEntity>,
-    private readonly baileys: BaileysService,
+    // 2026-04-26 · script_chat 在 chromium 模式经 SlotsService 路由 (P0.1 同款 facade)
+    // 老路径直调 baileys.sendText · 走 pool 检查 · chromium 模式 pool 永远空 → 必死 "未在线 (pool"
+    private readonly slots: SlotsService,
     // M6 · AiModule 是 Global, runtime 必有. @Optional 用来给 M4 spec fixture 的无 AI 场景留路
     @Optional() private readonly aiText?: AiTextService,
     @Optional() private readonly aiSettings?: AiSettingsService,
@@ -158,7 +160,7 @@ export class ScriptRunnerService {
         return false;
       }
       // 经 slot 发
-      await this.baileys.sendText(senderSlot.id, recipient, text);
+      await this.slots.sendText(senderSlot.id, recipient, text);
     } else if (turn.type === 'voice' || turn.type === 'image' || turn.type === 'file') {
       const asset = await this.pickAsset(turn.asset_pool);
       if (!asset) {
@@ -173,13 +175,13 @@ export class ScriptRunnerService {
           this.logger.warn(`script ${script.scriptId} turn ${turn.turn} 无资源又无 caption_fallback, skip`);
           return false;
         }
-        await this.baileys.sendText(senderSlot.id, recipient, fallback);
+        await this.slots.sendText(senderSlot.id, recipient, fallback);
       } else {
         // 真有资源时走 sendMedia (M4 scope: 代码路径通, asset 表暂无数据 → 基本走 fallback)
         // M7 asset-studio 真填进表后, 这里会 readFileSync(asset.filePath) → base64 → sendMedia
         this.logger.warn(`script ${script.scriptId} turn ${turn.turn} 资源路径暂未实装, 走 fallback`);
         if (turn.caption_fallback) {
-          await this.baileys.sendText(senderSlot.id, recipient, turn.caption_fallback);
+          await this.slots.sendText(senderSlot.id, recipient, turn.caption_fallback);
         } else {
           return false;
         }

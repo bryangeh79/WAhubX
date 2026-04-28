@@ -10,8 +10,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AccountSlotEntity } from './account-slot.entity';
-import { WaContactEntity } from '../baileys/wa-contact.entity';
-import { ChatMessageEntity } from '../baileys/chat-message.entity';
+import { WaContactEntity } from '../messaging/wa-contact.entity';
+import { ChatMessageEntity } from '../messaging/chat-message.entity';
 
 @Injectable()
 export class HandoverService {
