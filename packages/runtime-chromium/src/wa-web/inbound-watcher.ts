@@ -129,19 +129,54 @@ export async function installInboundWatcher(
       // 简化: 取 row.textContent 前 80 字符作 preview
       const text = (row.textContent ?? '').trim().slice(0, 200);
       if (!text) return null;
-      // unread badge: span[aria-label*="unread"] / span[data-testid="icon-unread-count"]
+      // 2026-04-28 · 收紧 unread badge 检测 · 排除系统消息噪声
+      //   老 selector `span[role="status"]` 太宽 · WA 系统消息 (verified business / online status) 都命中
+      //   现在只信: span[aria-label*="unread"] (含数字) + 严格的纯数字 badge
       let unread = 0;
-      const badge =
-        row.querySelector('span[aria-label*="unread"]') ||
-        row.querySelector('span[data-testid="icon-unread-count"]') ||
-        row.querySelector('span[role="status"]');
-      if (badge) {
-        const t = (badge.textContent ?? '').trim();
-        const n = parseInt(t, 10);
-        if (Number.isFinite(n)) unread = n;
+      // 策略 A · aria-label 含 "unread" 关键字 (最权威 · WA accessibility 用)
+      const aA = row.querySelector('span[aria-label*="unread" i]');
+      if (aA) {
+        const al = aA.getAttribute('aria-label') ?? '';
+        const m = al.match(/(\d+)\s*unread/i);
+        if (m) unread = parseInt(m[1], 10);
         else unread = 1;
       }
+      // 策略 B · data-testid 显式 (老版 WA Web)
+      if (unread <= 0) {
+        const aB = row.querySelector('span[data-testid="icon-unread-count"]');
+        if (aB) {
+          const n = parseInt((aB.textContent ?? '').trim(), 10);
+          if (Number.isFinite(n) && n > 0) unread = n;
+        }
+      }
+      // 策略 C · 找 row 内圆形 badge (绿色圈 · 通常是纯数字)
+      //   严格: span 必须 textContent 是 1-3 位纯数字 · 防 "verified" / "·" / "online" 等
+      if (unread <= 0) {
+        const candidates = row.querySelectorAll('span[aria-hidden="true"], span:not([role])');
+        for (let i = 0; i < candidates.length; i++) {
+          const t = (candidates[i].textContent ?? '').trim();
+          if (/^\d{1,3}$/.test(t)) {
+            unread = parseInt(t, 10);
+            break;
+          }
+        }
+      }
       if (unread <= 0) return null; // 没未读 = 不上报
+
+      // 2026-04-28 · 系统/官方消息黑名单 · 即便有 unread 也跳 (避免误回)
+      const SYSTEM_BLACKLIST = [
+        'WhatsApp',
+        'Meta Verified',
+        'Meta AI',
+        'Sync your contacts',
+        'This business is now using',
+        'Your messages are end-to-end',
+        'Welcome to WhatsApp',
+      ];
+      const lcText = text.toLowerCase();
+      for (const sys of SYSTEM_BLACKLIST) {
+        if (lcText.includes(sys.toLowerCase())) return null;
+      }
 
       // ─── 多策略身份提取 (B 路线 · 优先级: phone > jid-attr > displayName) ───
       let phone: string | null = null;
@@ -241,6 +276,30 @@ export async function installInboundWatcher(
         }
       }
 
+      // 2026-04-28 · 关键修 · displayName 看起来像 phone 时也提取 phone
+      //   bug: 客户号 "+60 18-688 8168" 被当 displayName · 没存 phone
+      //        auto-reply-decider jidToPhone() 在 synthetic JID 上返 null · 退出
+      //        客户没回应
+      //   修: 任何字段 (displayName 优先 · 然后 text) 含 8+ 位连续数字串 · 提为 phone
+      if (!phone && displayName) {
+        const m = displayName.match(/\+?\s*(\d[\d\s\-()]{6,18}\d)/);
+        if (m) {
+          phone = m[1].replace(/[^\d]/g, '');
+          if (phone.length >= 8 && phone.length <= 15) {
+            identitySource = 'phone';
+          } else {
+            phone = null;
+          }
+        }
+      }
+      // 兜底: 从 row.textContent 抓
+      if (!phone) {
+        const m = text.match(/\+?(\d{8,15})/);
+        if (m) {
+          phone = m[1];
+          identitySource = 'phone';
+        }
+      }
       if (!phone && displayName) {
         identitySource = 'displayName';
       } else if (!phone && !displayName) {
