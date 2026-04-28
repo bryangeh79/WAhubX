@@ -84,7 +84,12 @@ export class ReplyExecutorService {
       const kbNorm = normalizeForKbName(k.name);
       return kbNorm.length >= 3 && qNorm.includes(kbNorm);
     });
-    if (hitKbsByName.length > 0) {
+    // 2026-04-28 · isKbExplicitlyTargeted · 客户消息含产品名时设 true
+    //   后续低 RAG 分时不走 clarify · 仍喂该 KB chunks 给 LLM 答
+    //   原因: KB 内文可能用旧产品名 (e.g. "Facebook Auto Bot") · 客户用新名问 ("fahubx") · cosine 低
+    //   既然 keyword 已锁定 KB · LLM 直接答比 clarify 体验好
+    const isKbExplicitlyTargeted = hitKbsByName.length > 0;
+    if (isKbExplicitlyTargeted) {
       primaryKbIds = hitKbsByName.map((k) => k.id);
       this.logger.log(
         `conv ${conv.id} · 产品名 keyword pre-filter 命中 · 限定 primary 到 [${hitKbsByName.map((k) => `${k.id}:${k.name}`).join(', ')}]`,
@@ -221,10 +226,12 @@ export class ReplyExecutorService {
       usedKb = await this.kbRepo.findOne({ where: { id: primaryKbIds[0] ?? secondaryKbId ?? 0 } });
     }
 
-    if (topScore < RAG_CONF_LOW) {
+    if (topScore < RAG_CONF_LOW && !isKbExplicitlyTargeted) {
       // 2026-04-28 · 低置信度 · 不再"懒散转人工" · 让 AI 主动澄清引导
-      // 老逻辑: 一句 "稍后让同事联系" + markHandoff (永久屏蔽后续问)  → 客服体验差
-      // 新: AI 看资料不够时 · 礼貌追问引导客户给更多信息 · 不 markHandoff · 让下条能继续答
+      //   bug: 老逻辑只看 score · 即使客户明确说了产品名 (KB pre-filter 命中) · 仍走 clarify
+      //        实测: 客户问 "fahubx" · KB 锁到 FAhubX · 但 chunks 内文是 "Facebook Auto Bot" → cosine 低 → clarify
+      //   修: isKbExplicitlyTargeted=true 时绕过这条 · 继续往下走 RAG 答路径
+      //       LLM 用该 KB top chunks · system prompt 提示别名 · 自行组织
       const clarifySystemPrompt = `你是该公司 WhatsApp 客服 · 友善亲切口语化 · 80 字以内`;
       const clarifyUserPrompt = `客户问: "${mergedQuestion}"
 
@@ -267,6 +274,12 @@ export class ReplyExecutorService {
     const goal = usedKb?.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
     const blackList = (settings.blacklistKeywords ?? []).join('; ');
 
+    // 2026-04-28 · 当前命中 KB 的 name (产品别名提示用)
+    let targetedKbName = usedKb?.name ?? '';
+    if (!targetedKbName && primaryKbIds.length > 0) {
+      const firstKb = await this.kbRepo.findOne({ where: { id: primaryKbIds[0] } });
+      targetedKbName = firstKb?.name ?? '';
+    }
     const systemPrompt = `你是该公司的 WhatsApp 客服代表. 保持友善/简洁/口语化.
 业务目标: ${goal}
 重要规则:
@@ -276,6 +289,11 @@ export class ReplyExecutorService {
 - 不承诺 "100%" / "保证" / "绝对"
 - 回复 ${MAX_REPLY_LENGTH} 字以内
 - 不提及竞品${blackList ? `\n- 禁止话题: ${blackList}` : ''}
+${
+  targetedKbName
+    ? `- 当前产品 = "${targetedKbName}" · 资料里可能用旧名/英文名/简称 (例如 "${targetedKbName}" 在资料中可能写作不同名字) · 答客户时统一用客户的称呼 "${targetedKbName}", 内容以资料为准`
+    : ''
+}
 
 输出严格 JSON: {"reply": "回复文字", "intent": "curious|interested|buying|complaint|handoff", "handoff": true|false}`;
 
