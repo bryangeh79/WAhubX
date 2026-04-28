@@ -417,6 +417,76 @@ ${menuLines}
       return;
     }
 
+    // 1A' · 2026-04-29 · V2.3 · 已绑产品 KB + 泛功能问题 → 路由产品介绍 FAQ
+    //   bug 复现 (真实对话 audit 191):
+    //     conv.kbId=11 (WAhubX, 客户已选产品) · msg="有什么功能"
+    //     1A FAQ 在 WAhubX KB 找不到 "有什么功能" canonical (Jaccard 不够)
+    //     1B 通用 FAQ 也没 (无意义) · RAG 信心低 → clarify "抱歉暂时无法直接回答"
+    //     体验差: 客户刚选完产品, AI 立刻说不知道
+    //   修:
+    //     检测泛功能问题 ("有什么功能" / "怎么用" / "可以做什么" 等)
+    //     当 primaryKbIds 仅锁单个产品 KB 时, 直接拉该 KB 的"产品介绍" FAQ 答
+    //     这不是跨 KB RAG 兜底 (R1 不做) · 只是已绑产品时的产品介绍路由
+    //   边界:
+    //     - 客户没绑产品 (primaryKbIds=多个产品) → 不触发 · 让 1B/menu 走通常路径
+    //     - 客户绑了 default KB (无产品意图) → 不触发
+    //     - 产品 KB 没"产品介绍" tag FAQ → 不触发, 继续往下走
+    const isGenericProductQ = ReplyExecutorService.isGenericProductQuestion(mergedQuestion);
+    if (
+      isGenericProductQ &&
+      primaryKbIds.length === 1 &&
+      primaryKbIds[0] !== defaultKbId
+    ) {
+      const productKbId = primaryKbIds[0];
+      const introFaq = await this.faqRepo
+        .createQueryBuilder('f')
+        .where('f.kbId = :kbId', { kbId: productKbId })
+        .andWhere('f.status = :status', { status: 'enabled' })
+        .andWhere(
+          `(f.tags @> ARRAY['产品介绍']::text[]
+           OR f.tags @> ARRAY['功能介绍']::text[]
+           OR f.tags @> ARRAY['产品功能']::text[])`,
+        )
+        .orderBy('f.id', 'ASC')
+        .getOne();
+      if (introFaq) {
+        this.logger.log(
+          `conv ${conv.id} · 已绑产品 KB ${productKbId} · 泛功能问题 "${mergedQuestion.slice(0, 30)}" → 路由产品介绍 FAQ ${introFaq.id}`,
+        );
+        const replyText = this.applyGuardrail(introFaq.answer, mergedQuestion, productKbId);
+        const faqMeta = ReplyExecutorService.extractFaqMeta(introFaq.tags);
+        await this.send(conv, replyText, {
+          mode: 'faq',
+          kbId: productKbId,
+          matchedFaqId: introFaq.id,
+          confidence: 1.0,
+          intent: 'product_intro_route',
+          handoff: false,
+          metadata: {
+            faq_intent: faqMeta.intent,
+            mode_resolved: 'product_intro_route',
+            generic_product_question: true,
+            generic_q_pattern: ReplyExecutorService.GENERIC_PRODUCT_QUESTIONS.find(
+              (p) => mergedQuestion.toLowerCase().includes(p.toLowerCase()),
+            ),
+          },
+        }, options);
+        await this.faqRepo.increment({ id: introFaq.id }, 'hitCount', 1);
+        if (trace) {
+          trace.steps?.push(
+            `1A' product intro route · kb=${productKbId} · faq=${introFaq.id}`,
+          );
+        }
+        return;
+      }
+      // 没找到产品介绍 FAQ · 继续往下走 (1B / RAG)
+      if (trace) {
+        trace.steps?.push(
+          `1A' generic-Q matched but no '产品介绍' FAQ in kb=${productKbId} · 继续 1B/RAG`,
+        );
+      }
+    }
+
     // 1B · 双层 fallback · FAQ 匹配 (通用 KB)
     // 2026-04-29 · 真租户验收 D3 修 · isKbExplicitlyTargeted=true 时 skip 1B
     //   bug: 客户问 "M33 多少钱" · KB pre-filter 锁 M33 · 但 M33 KB 没专属"多少钱" FAQ
@@ -838,6 +908,29 @@ ${context.slice(0, 4000)}
       else out.plainTags.push(t);
     }
     return out;
+  }
+
+  // 2026-04-29 · V2.3 · 泛功能问题模式 (客户已绑产品 KB 时, 这些问题路由到产品介绍 FAQ)
+  //   触发场景: 客户问 "有什么功能" / "怎么用" 而 conv.kbId 已锁单个产品 KB
+  //   处理: 拉该 KB 的"产品介绍" tag FAQ 直接回答 · 不走 RAG clarify
+  //   注意: 仅当 primaryKbIds.length === 1 且 != defaultKbId 时触发
+  static readonly GENERIC_PRODUCT_QUESTIONS = [
+    '有什么功能', '功能有哪些', '介绍功能', '功能介绍',
+    '这个有什么用', '可以做什么', '能做什么',
+    '有什么服务', '提供什么', '都有什么',
+    '怎么用', '怎么使用', '如何使用',
+    '适合谁用', '适合谁', '适合什么人',
+    '介绍一下', '介绍下',
+    '什么用', '有什么用',
+  ];
+
+  static isGenericProductQuestion(q: string | null | undefined): boolean {
+    if (!q) return false;
+    const lower = q.toLowerCase().trim();
+    if (lower.length === 0) return false;
+    return ReplyExecutorService.GENERIC_PRODUCT_QUESTIONS.some((p) =>
+      lower.includes(p.toLowerCase()),
+    );
   }
 
   // 2026-04-28 · Codex D · 语言检测 (粗规则 · 跑 hot path · 不调外部)

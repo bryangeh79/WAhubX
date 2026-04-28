@@ -148,11 +148,17 @@ export const STARTER_COMMON_FAQ: StarterFaqEntry[] = [
   { question: '好的', answer: '收到. 还有问题随时说哦.', tags: ['starter', 'ack', 'zh'], variants: ['嗯', '嗯嗯', '👍', '可以'] },
 
   // ─── 13. R3 闲聊兜底 (3 条 · 客户跑题时简短拉回业务) ────
+  // 2026-04-29 · V2.3 R3' 真实对话补丁: tenant 5 客户问 "你吃饱了吗" 没命中 →
+  //   现已扩充 variants 覆盖 "吃饱了"/"吃了没"/"你忙吗" 等真实口语
   {
     question: '你吃饭了吗',
     answer: '哈哈, 我是 {{companyName}} 的 {{botName}} 😊 您是想了解产品功能、价格、开通流程, 还是需要我帮您转人工呢?',
     tags: ['starter', 'off_topic', 'zh'],
-    variants: ['吃饭了吗', '你吃了吗', '吃了吗', '吃饭没', '吃了没'],
+    variants: [
+      '吃饭了吗', '你吃了吗', '吃了吗', '吃饭没', '吃了没',
+      // V2.3 R3' 补丁 (2026-04-29 真实对话审计): "你吃饱了吗" 没命中
+      '你吃饱了吗', '吃饱了吗', '吃饱了没', '你吃了没', '你吃饭了没', '吃饭了没',
+    ],
   },
   {
     question: '今天天气怎样',
@@ -164,7 +170,11 @@ export const STARTER_COMMON_FAQ: StarterFaqEntry[] = [
     question: '可以聊天吗',
     answer: '我主要是 {{companyName}} 的 {{botName}}, 帮您解答产品咨询哦 😊 想了解什么直接说就行!',
     tags: ['starter', 'off_topic', 'zh'],
-    variants: ['和你聊', '聊聊', '陪我聊', '哈哈哈', '哈哈'],
+    variants: [
+      '和你聊', '聊聊', '陪我聊', '哈哈哈', '哈哈',
+      // V2.3 R3' 补丁 (2026-04-29): "你忙吗"/"在忙吗" 真实口语 · 简短陪聊后拉回
+      '你忙吗', '在忙吗', '忙吗', '现在忙吗',
+    ],
   },
 ];
 
