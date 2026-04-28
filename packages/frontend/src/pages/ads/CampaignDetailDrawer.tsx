@@ -446,8 +446,19 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
                     {
                       title: '统计',
                       dataIndex: 'stats',
-                      render: (s: CampaignRun['stats']) =>
-                        `发:${s.sent ?? 0} 失:${s.failed ?? 0} 跳:${s.skipped ?? 0} / 计划${s.planned ?? 0}`,
+                      render: (s: CampaignRun['stats']) => {
+                        const err = (s as { error?: string })?.error;
+                        return (
+                          <Space direction="vertical" size={0}>
+                            <span>{`发:${s.sent ?? 0} 失:${s.failed ?? 0} 跳:${s.skipped ?? 0} / 计划${s.planned ?? 0}`}</span>
+                            {err && (
+                              <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                                ⚠ {err}
+                              </Typography.Text>
+                            )}
+                          </Space>
+                        );
+                      },
                     },
                   ]}
                   pagination={false}

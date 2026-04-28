@@ -163,12 +163,25 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       eligibleSlots = await this.matureSlots.findMatureSlots(campaign.tenantId);
     }
     if (eligibleSlots.length === 0) {
+      // 2026-04-28 · 0 合格槽位 · 大声 fail · stats.error 给 UI 显
+      // 常见原因: custom_slot_ids 指定的号都在 takeover / suspended / quarantine / role 不匹配
+      const reason = this.diagnoseNoEligibleSlots(campaign);
       await this.runRepo.update(run.id, {
         status: CampaignRunStatus.Cancelled,
         finishedAt: new Date(),
-        stats: { planned: phones.length, sent: 0, failed: 0, skipped: phones.length },
+        stats: {
+          planned: phones.length,
+          sent: 0,
+          failed: 0,
+          skipped: phones.length,
+          error: reason,
+        } as Record<string, unknown>,
       });
-      this.logger.warn(`campaign ${campaign.id} run ${run.id} · 0 eligible slots · cancelled`);
+      // 同步把 campaign 标 Cancelled · 不再卡在"进行中"状态
+      await this.campaignRepo.update(campaign.id, { status: CampaignStatus.Cancelled });
+      this.logger.warn(
+        `campaign ${campaign.id} run ${run.id} · 0 eligible slots · cancelled · reason=${reason}`,
+      );
       return;
     }
 
@@ -343,5 +356,18 @@ export class CampaignSchedulerService implements OnModuleInit, OnModuleDestroy {
       t = this.throttle.nextWindowStart(t, windows);
     }
     return t;
+  }
+
+  /**
+   * 2026-04-28 · 0 合格槽位时 · 给租户可读的原因
+   * 现有过滤维度: status (active/warmup) · takeover_active=false · account_id NOT NULL · role gate
+   */
+  private diagnoseNoEligibleSlots(campaign: CampaignEntity): string {
+    if (campaign.executionMode === ExecutionMode.CustomSlots) {
+      const ids = campaign.customSlotIds ?? [];
+      if (ids.length === 0) return '执行方式选自定义槽位但没勾任何号';
+      return `指定的 ${ids.length} 个槽位都不可用 (常见: 该号在"人工接管"中 / 已 suspended / 未绑账号). 解决: 释放接管 OR 切其他号 OR 改用"系统智能"模式`;
+    }
+    return '当前没有任何成熟号 (warmup phase=3) 可派发. 解决: 等养号完成 OR 用自定义槽位选未成熟号';
   }
 }

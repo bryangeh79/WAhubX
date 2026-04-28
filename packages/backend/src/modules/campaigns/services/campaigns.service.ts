@@ -702,7 +702,39 @@ export class CampaignsService {
     return { cancelled: true, taskCancelled };
   }
 
+  /**
+   * 2026-04-28 · 真删除 · 物理 DELETE 整个 campaign + children
+   * 之前是 soft-cancel 保留审计 · 用户明确要求"删除就消失"
+   * 顺序: cancel pending tasks → DELETE targets → DELETE runs → DELETE campaign
+   */
   async cancel(tenantId: number, id: number): Promise<void> {
+    await this.findById(tenantId, id); // verify ownership
+
+    // 1. 取消所有还 pending 的 task (避免 dispatcher 在 row 删后还跑)
+    await this.targetRepo.query(
+      `UPDATE task SET status = 'cancelled', last_error = 'campaign deleted by user'
+       WHERE id IN (
+         SELECT ct.task_id::int FROM campaign_target ct
+         WHERE ct.campaign_id = $1 AND ct.task_id IS NOT NULL
+       )
+       AND status = 'pending'`,
+      [id],
+    );
+
+    // 2. 物理删 children
+    await this.targetRepo.delete({ campaignId: id });
+    await this.runRepo.delete({ campaignId: id });
+    // 3. 删 campaign 主行
+    await this.campaignRepo.delete(id);
+
+    this.logger.log(`hard-delete · campaign ${id} · DELETE 物理完成 (含 children)`);
+  }
+
+  /**
+   * 老的软取消 · 仅 status=Cancelled · 不删 row
+   * 当前 cancel() 已是 hardDelete · 这个保留供未来需要"暂停式取消"时调
+   */
+  async softCancel(tenantId: number, id: number): Promise<void> {
     const row = await this.findById(tenantId, id);
     row.status = CampaignStatus.Cancelled;
     await this.campaignRepo.save(row);
