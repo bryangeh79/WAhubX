@@ -63,13 +63,14 @@ export class AutoReplyDeciderService {
       if (evt.remoteJid.includes('@g.us')) return; // 群消息
       if (evt.msgType && evt.msgType !== 'text') return; // 先只处理 text
 
-      // 2026-04-25 · D11-3 · 角色路由门禁 (Codex 边界 ②④)
-      // 仅 customer_service 槽位的账号触发 auto-reply · broadcast 号 log skip
-      // role=undefined (老数据未补) 兜底跳 · 防误触发
-      if (evt.slotRole !== 'customer_service') {
+      // 2026-04-25 · D11-3 · 角色路由门禁 (老 baileys 时代约束)
+      // 2026-04-28 · 解除 · chromium per-slot · 任何号都能跑独立 inbound watcher
+      // 老限制只放 customer_service · 用户明确要求所有号都可启用
+      // 实际是否启用由 tenant_reply_settings.mode 控制 (off/faq/smart)
+      // 若用户不想 broadcast 号触发自动回复 · 可在 UI 加 per-slot 开关 (V2)
+      if (!evt.slotRole) {
         this.logger.log(
-          `auto-reply gate · skip-role-mismatch · acc=${evt.accountId} · slotRole="${evt.slotRole ?? 'unset'}" · ` +
-            `仅 customer_service 槽位接 auto-reply`,
+          `auto-reply gate · skip · acc=${evt.accountId} · slotRole=unset (老数据)`,
         );
         return;
       }

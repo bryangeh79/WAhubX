@@ -320,8 +320,39 @@ export async function installInboundWatcher(
       }
     }, 500);
 
-    // 把 observer ref 暴露给 uninstall 用
-    (window as unknown as { __wahubxObserver?: MutationObserver | null }).__wahubxObserver = observer;
+    // 2026-04-28 · 5s poll 兜底 (即使 MutationObserver 没 attach 也兜得住)
+    //   bug: WA Web 频繁改 DOM · selectors 失效 · MO 静默挂掉
+    //   poll: 主动每 5s 扫所有 row · 命中 unread → 触发 cb (JS 侧 dedupe 处理重复)
+    const pollScan = () => {
+      try {
+        const p = findPane();
+        if (!p) return;
+        const rows = p.querySelectorAll('[role="listitem"], div[data-testid*="cell"]');
+        rows.forEach((row) => {
+          const hint = extractHint(row);
+          if (hint) {
+            try {
+              cb(hint);
+            } catch {
+              /* ignore */
+            }
+          }
+        });
+      } catch {
+        /* ignore · poll 错误不致命 */
+      }
+    };
+    const pollTimer = setInterval(pollScan, 5_000);
+
+    // 把 observer + poll ref 暴露给 uninstall 用
+    (window as unknown as {
+      __wahubxObserver?: MutationObserver | null;
+      __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+    }).__wahubxObserver = observer;
+    (window as unknown as {
+      __wahubxObserver?: MutationObserver | null;
+      __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+    }).__wahubxPollTimer = pollTimer;
   }, callbackName);
 
   opts.log.info('D10 inbound watcher installed · MutationObserver on chat-list pane');
@@ -329,10 +360,17 @@ export async function installInboundWatcher(
   const uninstall = async (): Promise<void> => {
     try {
       await page.evaluate(() => {
-        const w = window as unknown as { __wahubxObserver?: MutationObserver | null };
+        const w = window as unknown as {
+          __wahubxObserver?: MutationObserver | null;
+          __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+        };
         if (w.__wahubxObserver) {
           w.__wahubxObserver.disconnect();
           w.__wahubxObserver = null;
+        }
+        if (w.__wahubxPollTimer) {
+          clearInterval(w.__wahubxPollTimer);
+          w.__wahubxPollTimer = null;
         }
       });
     } catch {
