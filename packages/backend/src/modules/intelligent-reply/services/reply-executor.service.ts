@@ -162,6 +162,100 @@ export class ReplyExecutorService {
       trace.steps?.push(`early common FAQ probe · 跳过 (客户消息含产品名 · 让主路径 KB pre-filter 锁产品 KB)`);
     }
 
+    // 2026-04-29 · V2.5 · 产品列表 intent · 优先级高于 early common FAQ probe
+    //   bug 复现 (真实测试): 客户问 "你有什么产品" · 命中 starter "有什么产品" canonical
+    //     答案被 AI customize 成 "我们提供多种解决方案, 具体产品信息请咨询客服"
+    //     这是泛文案 · 不读 tenant 实际产品列表
+    //   修: 检测产品列表问句 (有什么产品 / 你们有哪些产品 / 有什么服务 / 都卖什么 / ...)
+    //       动态读 tenant.product_kbs 列出菜单 (>=2 走菜单 · 1 个直接介绍 · 0 走老路径)
+    //   边界:
+    //     - 仅当 conv 没绑产品 (isUnboundOrDefault=true) 时触发 · 已绑产品的"有什么功能"
+    //       走 1A' product_intro_route (V2.3 加的) · 不被这里拦
+    //     - 不 hardcode 任何产品名 · 全从 allProductKbsForMenu 动态生成
+    const isProductListQ =
+      isUnboundOrDefault &&
+      ReplyExecutorService.isProductListQuestion(mergedQuestion);
+
+    if (isProductListQ && allProductKbsForMenu.length >= 1) {
+      const tenantName = await this.getTenantDisplayName(conv.tenantId);
+
+      if (allProductKbsForMenu.length === 1) {
+        // 单一产品: 直接介绍 · 从该 KB 拉 '产品介绍' FAQ · 否则用 description
+        const onlyKb = allProductKbsForMenu[0];
+        const introFaq = await this.faqRepo
+          .createQueryBuilder('f')
+          .where('f.kbId = :kbId', { kbId: onlyKb.id })
+          .andWhere('f.status = :status', { status: 'enabled' })
+          .andWhere(
+            `(f.tags @> ARRAY['产品介绍']::text[]
+             OR f.tags @> ARRAY['功能介绍']::text[]
+             OR f.tags @> ARRAY['产品功能']::text[])`,
+          )
+          .orderBy('f.id', 'ASC')
+          .getOne();
+
+        const introBody = introFaq?.answer ??
+          (onlyKb.description ?? '是 ' + tenantName + ' 提供的核心产品');
+        const replyText =
+          `您好 😊 ${tenantName} 目前主要的产品是 ${onlyKb.name}.\n\n${introBody}\n\n请问您想了解功能、价格还是开通流程? 也可以直接说您的需求.`;
+
+        this.fillTrace(trace, {
+          modeResolved: 'product_list_single',
+          kbId: onlyKb.id,
+          kbName: onlyKb.name,
+        });
+        if (trace) {
+          trace.steps?.push(`product_list intent · 仅 1 个产品 · 直接介绍 kb=${onlyKb.id}`);
+        }
+        await this.send(conv, replyText, {
+          mode: 'faq',
+          kbId: onlyKb.id,
+          matchedFaqId: introFaq?.id ?? null,
+          confidence: 1.0,
+          intent: 'product_list_single',
+          handoff: false,
+          metadata: {
+            mode_resolved: 'product_list_single',
+            product_list_intent: true,
+            product_kb_count: 1,
+          },
+        }, options);
+        if (introFaq) await this.faqRepo.increment({ id: introFaq.id }, 'hitCount', 1);
+        return;
+      }
+
+      // 多产品 (>= 2): 列动态菜单
+      const menuLines = allProductKbsForMenu
+        .map((k, i) => `${i + 1}. ${k.name}${k.description ? ' — ' + k.description.slice(0, 40) : ''}`)
+        .join('\n');
+      const menuText = `您好 😊 ${tenantName} 目前有以下几个产品:\n\n${menuLines}\n\n请问您想先了解哪一个? 您可以直接回复编号或产品名称.`;
+
+      this.fillTrace(trace, {
+        modeResolved: 'product_list_menu',
+        productMenuShown: true,
+      });
+      if (trace) {
+        trace.steps?.push(`product_list intent · ${allProductKbsForMenu.length} 个产品 · 列菜单`);
+      }
+      await this.send(conv, menuText, {
+        mode: 'faq',
+        kbId: defaultKbIdEarly ?? null,
+        confidence: 1.0,
+        // 复用 product_menu_shown intent · 让后续菜单回复解析 (1/2/3) 仍能命中已有逻辑
+        intent: 'product_menu_shown',
+        handoff: false,
+        metadata: {
+          mode_resolved: 'product_list_menu',
+          product_list_intent: true,
+          product_menu_shown: true,
+          product_kb_count: allProductKbsForMenu.length,
+          available_kb_ids: allProductKbsForMenu.map((k) => k.id),
+        },
+      }, options);
+      return;
+    }
+    // 注: 0 个产品 KB 的 tenant · 不走此路径 · 让后续 starter FAQ "有什么产品" 兜底
+
     let earlyCommonFaqMatch: { faq: KbFaqEntity; score: number; matchedVariant?: string } | null = null;
     if (!earlyKbHit && allProductKbsForMenu.length >= 2 && isUnboundOrDefault && defaultKbIdEarly) {
       earlyCommonFaqMatch = await this.matchFaq(defaultKbIdEarly, mergedQuestion);
@@ -929,6 +1023,39 @@ ${context.slice(0, 4000)}
     const lower = q.toLowerCase().trim();
     if (lower.length === 0) return false;
     return ReplyExecutorService.GENERIC_PRODUCT_QUESTIONS.some((p) =>
+      lower.includes(p.toLowerCase()),
+    );
+  }
+
+  // 2026-04-29 · V2.5 · 产品列表问句模式
+  //   场景: 客户问"你们有什么产品"/"有哪些服务" → 应动态列 tenant.product_kbs 菜单
+  //   触发: conv 还没绑产品 (isUnboundOrDefault=true) · 不抢已绑 conv 的"有什么功能"
+  //   注意 vs GENERIC_PRODUCT_QUESTIONS 区别:
+  //     - GENERIC ("有什么功能"): 客户已绑产品后问该产品功能 · 走 1A' 产品介绍路由
+  //     - PRODUCT_LIST ("有什么产品"): 客户没绑 · 想看清单 · 走动态菜单
+  //   两者不重叠 · 严格区分
+  static readonly PRODUCT_LIST_QUESTIONS = [
+    // 产品类
+    '有什么产品', '有哪些产品', '产品有哪些', '产品有什么',
+    '什么产品', '哪些产品', '都有什么产品', '都有哪些产品',
+    '介绍你们的产品', '介绍一下你们的产品', '介绍下你们的产品',
+    '了解你们的产品', '想了解你们的产品', '看看你们的产品',
+    // 服务类
+    '有什么服务', '有哪些服务', '服务有哪些', '服务有什么',
+    '什么服务', '哪些服务',
+    // 卖/做什么
+    '都卖什么', '你卖什么', '你们卖什么', '卖什么的',
+    '你们做什么', '都做什么', '主要做什么', '做什么业务',
+    // 概览类
+    '介绍一下产品', '推荐产品', '产品介绍一下',
+  ];
+
+  static isProductListQuestion(q: string | null | undefined): boolean {
+    if (!q) return false;
+    const lower = q.toLowerCase().trim();
+    if (lower.length === 0) return false;
+    // 注意: 这里是 includes 而不是 equals · 兼容 "想了解一下你有什么产品" 这类长句
+    return ReplyExecutorService.PRODUCT_LIST_QUESTIONS.some((p) =>
       lower.includes(p.toLowerCase()),
     );
   }
