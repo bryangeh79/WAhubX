@@ -28,7 +28,8 @@ const RATE_24H_LIMIT = 30;
 //   加: 购买/下单/付款/付不了/付不出/账号异常/不能登录/登不上/老板/sales/agent
 //       人工/真人/客服/转人工/要人工/找人工 (客户主动要求人工)
 //       demo/演示/试用 (从 Level 2 升 Level 1 · 用户硬要求"客户要 demo 必须立即转人工")
-const HANDOFF_KEYWORDS_LEVEL1 = [
+// 2026-04-29 · export 给 dry-run debug controller 复用 (不要重复定义)
+export const HANDOFF_KEYWORDS_LEVEL1 = [
   // 投诉 / 情绪
   '投诉', '退款', '退货', '律师', '报警', '骂', '操', '傻逼', '滚', '垃圾', '骗子',
   'scam', 'refund', 'lawyer', 'sue', 'cheat',
@@ -45,10 +46,19 @@ const HANDOFF_KEYWORDS_LEVEL1 = [
   '账号被封', '账号封', '号封了', 'account banned', 'cannot login',
 ];
 // Level 2 (当前未直接 markHandoff · 仅作为 LLM intent 提示) — 留作未来用
-const HANDOFF_KEYWORDS_LEVEL2 = [
+export const HANDOFF_KEYWORDS_LEVEL2 = [
   '多少钱', '怎么收费', '价格', '价钱', '优惠', '折扣',
   '套餐', '方案',
 ];
+
+// 2026-04-29 · 同款检查函数 · debug controller / decider 共用
+export function checkHandoffKeyword(text: string): string | null {
+  const lower = (text ?? '').toLowerCase();
+  for (const k of HANDOFF_KEYWORDS_LEVEL1) {
+    if (lower.includes(k.toLowerCase())) return k;
+  }
+  return null;
+}
 
 interface InboundEvent {
   accountId?: number;

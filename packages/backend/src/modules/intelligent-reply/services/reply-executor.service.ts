@@ -20,6 +20,40 @@ const RAG_CONF_HIGH = 0.75;
 const RAG_CONF_LOW = 0.45;
 const MAX_REPLY_LENGTH = 200;
 
+// 2026-04-29 · 任务 · AI 客服 dry-run debug 链路
+//   handle() / send() 加 options.dryRun · 跳过 slots.sendText 真发
+//   handle() 内各分支往 traceRef 填决策详情 · debug controller 完事后读
+//   生产 caller (decider.flushConversation) 不传 options · 行为完全不变
+export interface DryRunTrace {
+  modeResolved?: string;            // faq_hit_primary | faq_hit_secondary | product_menu_shown | ...
+  replyText?: string;
+  kbId?: number | null;
+  kbName?: string;
+  matchedFaqId?: number | null;
+  matchedVariant?: string | null;
+  intent?: string | null;
+  confidence?: number | null;
+  handoffTriggered?: boolean;
+  handoffReason?: string;
+  productMenuShown?: boolean;
+  usedCommonKbEarly?: boolean;
+  ragChunks?: Array<{ chunkId: number; kbId: number; score: number; preview: string }>;
+  llmProvider?: string;
+  llmModel?: string;
+  auditId?: number | null;
+  steps?: string[];                 // 决策路径 (按时序 push)
+  primaryKbIds?: number[];
+  secondaryKbId?: number | null;
+  isKbExplicitlyTargeted?: boolean;
+}
+
+export interface HandleOptions {
+  /** dry-run · 跳过 slots.sendText 真发, audit draft=true */
+  dryRun?: boolean;
+  /** 收集决策路径详情 (handle 内各分支会填) */
+  traceRef?: DryRunTrace;
+}
+
 @Injectable()
 export class ReplyExecutorService {
   private readonly logger = new Logger(ReplyExecutorService.name);
@@ -44,9 +78,26 @@ export class ReplyExecutorService {
     private readonly tenantAi: AiTextService,
   ) {}
 
-  async handle(conversationId: number, mergedQuestion: string, _messageIds: string[]): Promise<void> {
+  async handle(
+    conversationId: number,
+    mergedQuestion: string,
+    _messageIds: string[],
+    options?: HandleOptions,
+  ): Promise<void> {
+    const trace = options?.traceRef;
+    const dryRun = options?.dryRun ?? false;
+    if (trace) {
+      trace.steps ??= [];
+      trace.steps.push(`handle start · convId=${conversationId} · dryRun=${dryRun}`);
+    }
     const conv = await this.convRepo.findOne({ where: { id: conversationId } });
-    if (!conv) return;
+    if (!conv) {
+      if (trace) {
+        trace.steps?.push('conv not found');
+        trace.modeResolved = 'skipped';
+      }
+      return;
+    }
     // 再次检查 stage (flush 期间可能被人工接管 / 已 handoff)
     // 2026-04-28 · HandoffRequired 也跳 · 已转人工不再 AI 回复
     if (
@@ -91,6 +142,11 @@ export class ReplyExecutorService {
     let earlyCommonFaqMatch: { faq: KbFaqEntity; score: number; matchedVariant?: string } | null = null;
     if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault && defaultKbIdEarly) {
       earlyCommonFaqMatch = await this.matchFaq(defaultKbIdEarly, mergedQuestion);
+      if (trace) {
+        trace.steps?.push(
+          `early common FAQ probe · kb=${defaultKbIdEarly} · match=${earlyCommonFaqMatch ? `faqId=${earlyCommonFaqMatch.faq.id} score=${earlyCommonFaqMatch.score.toFixed(2)}` : 'null'}`,
+        );
+      }
       if (earlyCommonFaqMatch && earlyCommonFaqMatch.score >= FAQ_MATCH_THRESHOLD) {
         this.logger.log(
           `conv ${conv.id} · 早期通用 FAQ 命中 kb=${defaultKbIdEarly} · score=${earlyCommonFaqMatch.score.toFixed(2)} · 跳过菜单 · 直接答 (问候/闲聊路径)`,
@@ -101,6 +157,12 @@ export class ReplyExecutorService {
           mergedQuestion,
           defaultKbIdEarly,
         );
+        this.fillTrace(trace, {
+          modeResolved: 'common_kb_faq_early',
+          usedCommonKbEarly: true,
+          kbName: 'default common KB',
+          matchedVariant: earlyCommonFaqMatch.matchedVariant ?? null,
+        });
         await this.send(conv, replyText, {
           mode: 'faq',
           kbId: defaultKbIdEarly,
@@ -115,10 +177,10 @@ export class ReplyExecutorService {
             mode_resolved: 'common_kb_faq_early',
             early_match_skip_menu: true,
           },
-        });
+        }, options);
         await this.faqRepo.increment({ id: earlyCommonFaqMatch.faq.id }, 'hitCount', 1);
         if (faqMeta.handoffAction === 'always') {
-          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`, options);
         }
         return;
       }
@@ -149,7 +211,7 @@ export class ReplyExecutorService {
             intent: 'product_menu_picked',
             handoff: false,
             metadata: { kb_bound_now: true, kb_switched: false, picked_kb_id: picked.id },
-          });
+          }, options);
           return;
         }
         // 没 parse 出来 · 不发第二次菜单 · 继续走主流程 (FAQ/RAG 兜底)
@@ -158,15 +220,32 @@ export class ReplyExecutorService {
       //   - 客户消息没产品名
       //   - 客户消息不像问候 / 转人工 / 价格反问 (这些走通用 FAQ 答更自然)
       //   - 上一条 reply 不是菜单 (避免连发 2 次菜单)
-      const qNormForMenu = mergedQuestion.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // 2026-04-29 · 复用主路径同款 normalize + 子串扫描 · 中文产品名也能命中
+      //   bug 修: 老 normalize 只保留 a-z0-9, "祛痘护理配套" → "" → "我想了解祛痘"
+      //          没匹中产品名 → 发菜单 (实际客户已经明说要"祛痘")
+      const qNormForMenu = mergedQuestion.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
       const containsProductName = allProductKbsForMenu.some((k) => {
-        const n = k.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        return n.length >= 3 && qNormForMenu.includes(n);
+        const n = k.name.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
+        if (n.length < 2 || qNormForMenu.length < 2) return false;
+        if (qNormForMenu.includes(n) || n.includes(qNormForMenu)) return true;
+        // 子串扫描 (跟主路径 kbNameMatchesQuery 等价)
+        const maxLen = Math.min(n.length, 8);
+        for (let len = maxLen; len >= 2; len--) {
+          for (let i = 0; i + len <= n.length; i++) {
+            if (qNormForMenu.includes(n.substring(i, i + len))) return true;
+          }
+        }
+        return false;
       });
       const looksLikeGreeting = this.isGreetingOrSimple(mergedQuestion);
       const shouldShowMenu =
         !containsProductName && !looksLikeGreeting && !lastNotice;
       if (shouldShowMenu) {
+        this.fillTrace(trace, {
+          modeResolved: 'product_menu_shown',
+          productMenuShown: true,
+          usedCommonKbEarly: false,
+        });
         const tenantName = await this.getTenantDisplayName(conv.tenantId);
         const menuLines = allProductKbsForMenu
           .map((k, i) => `${i + 1}. ${k.name}${k.description ? ' - ' + k.description.slice(0, 30) : ''}`)
@@ -187,7 +266,7 @@ ${menuLines}
             product_menu_shown: true,
             available_kb_ids: allProductKbsForMenu.map((k) => k.id),
           },
-        });
+        }, options);
         return;
       }
     }
@@ -263,7 +342,7 @@ ${menuLines}
 
     if (primaryKbIds.length === 0 && !secondaryKbId) {
       this.logger.debug(`conv ${conv.id} · tenant 没任何 KB · handoff`);
-      await this.markHandoff(conv, '租户无可用 KB');
+      await this.markHandoff(conv, '租户无可用 KB', options);
       return;
     }
 
@@ -306,11 +385,11 @@ ${menuLines}
           faq_risk_level: faqMeta.riskLevel,
           mode_resolved: 'primary_kb_faq',
         },
-      });
+      }, options);
       await this.faqRepo.increment({ id: bestPrimary.faq.id }, 'hitCount', 1);
       // 任务 8 · faq tag handoff_action='always' → 直接 mark handoff
       if (faqMeta.handoffAction === 'always') {
-        await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+        await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`, options);
       }
       return;
     }
@@ -342,10 +421,10 @@ ${menuLines}
             faq_risk_level: faqMeta.riskLevel,
             mode_resolved: 'secondary_common_kb_faq',
           },
-        });
+        }, options);
         await this.faqRepo.increment({ id: faqMatch2.faq.id }, 'hitCount', 1);
         if (faqMeta.handoffAction === 'always') {
-          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`, options);
         }
         return;
       }
@@ -373,7 +452,7 @@ ${menuLines}
           faq_only_fallback: true,
           primary_kb_ids: primaryKbIds,
         },
-      });
+      }, options);
       // 不 markHandoff · 客户回复编号能继续走 (4=转人工 由后续消息匹配 handoff 关键词触发)
       return;
     }
@@ -381,14 +460,14 @@ ${menuLines}
     // 2. (smart 模式) AI RAG · embedding 用平台 · LLM 用租户自己配的 provider
     if (!this.platformAi.isEmbedAvailable()) {
       // embedding 不可用 → handoff
-      await this.markHandoff(conv, '平台 embedding 未配置');
+      await this.markHandoff(conv, '平台 embedding 未配置', options);
       return;
     }
 
     // 对问题做 embedding
     const embedRes = await this.platformAi.embed([mergedQuestion]);
     if (!embedRes.ok || embedRes.vectors.length === 0) {
-      await this.markHandoff(conv, 'embedding 失败');
+      await this.markHandoff(conv, 'embedding 失败', options);
       return;
     }
     const qVec = embedRes.vectors[0];
@@ -474,7 +553,7 @@ ${menuLines}
         confidence: topScore,
         intent: 'clarify_low_confidence',
         handoff: false,
-      });
+      }, options);
       // 不调 markHandoff · conv stage 保持 'new' · 下条消息能继续答
       return;
     }
@@ -571,9 +650,9 @@ ${context.slice(0, 4000)}
       );
       // 租户 AI 没配 → 提醒去配置 + handoff
       if (llmRes.errorCode === 'NO_PROVIDER') {
-        await this.markHandoff(conv, '租户未配置 AI · 请去 设置→AI 配置 填 key');
+        await this.markHandoff(conv, '租户未配置 AI · 请去 设置→AI 配置 填 key', options);
       } else {
-        await this.markHandoff(conv, `LLM 失败: ${llmRes.errorCode}`);
+        await this.markHandoff(conv, `LLM 失败: ${llmRes.errorCode}`, options);
       }
       return;
     }
@@ -588,7 +667,7 @@ ${context.slice(0, 4000)}
 
     let replyText = (parsed.reply ?? '').trim();
     if (!replyText) {
-      await this.markHandoff(conv, 'LLM 返回空');
+      await this.markHandoff(conv, 'LLM 返回空', options);
       return;
     }
 
@@ -617,11 +696,11 @@ ${context.slice(0, 4000)}
       // 租户 AI 目前没返 token 统计 · 留 0
       costTokensIn: 0,
       costTokensOut: 0,
-    });
+    }, options);
 
     // 意图驱动状态机
     if (parsed.handoff) {
-      await this.markHandoff(conv, `intent=${parsed.intent}`);
+      await this.markHandoff(conv, `intent=${parsed.intent}`, options);
     } else if (parsed.intent === 'buying') {
       conv.stage = ConversationStage.HotLead;
       await this.convRepo.save(conv);
@@ -864,25 +943,23 @@ ${context.slice(0, 4000)}
       costTokensIn?: number;
       costTokensOut?: number;
       // 2026-04-29 · 任务 9 · 增强 audit metadata · 复用 jsonb guardrail_edits
-      //   字段: matched_variant / product_menu_shown / kb_bound_now / kb_switched
-      //         handoff_reason / was_off_topic / faq_only_fallback / primary_kb_ids 等
       metadata?: Record<string, unknown>;
     },
+    options?: HandleOptions,
   ): Promise<void> {
     const settings = await this.settings.get(conv.tenantId);
+    const dryRun = options?.dryRun ?? false;
     let sentMessageId: string | null = null;
 
-    // 2026-04-24 · FAQ / smart 都真发 · off 模式由上游过滤 (这里走不到)
-    if (settings.mode === 'faq' || settings.mode === 'smart') {
-      // 真发
+    // 2026-04-29 · dry-run · 跳过 slots.sendText 真发 + audit draft=true
+    //   不更新 conv.lastAiReplyAt / ai_reply_count_24h (避免污染真客服计数)
+    if (!dryRun && (settings.mode === 'faq' || settings.mode === 'smart')) {
       try {
         const slot = await this.slotRepo.findOne({ where: { id: conv.slotId } });
         if (!slot) throw new Error('slot 不存在');
         const jid = `${conv.phoneE164}@s.whatsapp.net`;
-        // 2026-04-26 · R9-bis · 走 SlotsService facade · chromium-aware
         const sendRes = await this.slots.sendText(conv.slotId, jid, replyText);
         sentMessageId = sendRes.waMessageId;
-        // 更新 conversation 计数 (system_notice/menu 类不算 AI 答 · intent 含 system_notice/product_menu 跳过)
         const intentRaw = meta.intent ?? '';
         const isSystemNotice =
           intentRaw.startsWith('system_notice_') || intentRaw === 'product_menu_shown';
@@ -895,14 +972,19 @@ ${context.slice(0, 4000)}
       } catch (err) {
         this.logger.warn(`sendText failed: ${err instanceof Error ? err.message : err}`);
       }
+    } else if (dryRun) {
+      this.logger.debug?.(`conv ${conv.id} · dry-run · 跳过 slots.sendText · audit draft=true`);
     }
 
-    // 审计 · metadata 写 guardrail_edits jsonb (复用现有字段 · 零 migration)
-    await this.auditRepo.save(
+    // 审计 · dryRun=true 时 draft=true · metadata 加 dryRun 标记
+    const guardrailEdits: Record<string, unknown> | null = meta.metadata
+      ? { ...meta.metadata, dryRun }
+      : (dryRun ? { dryRun } : null);
+    const audit = await this.auditRepo.save(
       this.auditRepo.create({
         tenantId: conv.tenantId,
         conversationId: conv.id,
-        inboundMessage: null, // handle() 入口未传 · 后续可补
+        inboundMessage: null,
         replyText,
         mode: meta.mode,
         kbId: meta.kbId ?? null,
@@ -912,15 +994,33 @@ ${context.slice(0, 4000)}
         model: meta.model ?? null,
         intent: meta.intent ?? null,
         handoffTriggered: meta.handoff,
-        guardrailEdits: meta.metadata
-          ? (meta.metadata as Record<string, unknown>)
-          : null,
+        guardrailEdits,
         sentMessageId,
-        draft: false,
+        draft: dryRun,
         costTokensIn: meta.costTokensIn ?? 0,
         costTokensOut: meta.costTokensOut ?? 0,
       }),
     );
+
+    // dry-run trace · 填 reply 详情 + audit id
+    if (options?.traceRef) {
+      options.traceRef.replyText = replyText;
+      options.traceRef.auditId = audit.id;
+      options.traceRef.intent ??= meta.intent ?? null;
+      options.traceRef.confidence ??= meta.confidence ?? null;
+      options.traceRef.kbId ??= meta.kbId ?? null;
+      options.traceRef.matchedFaqId ??= meta.matchedFaqId ?? null;
+      options.traceRef.handoffTriggered ??= meta.handoff;
+    }
+  }
+
+  // 2026-04-29 · trace helper · 各分支调一行就能填决策详情
+  private fillTrace(trace: DryRunTrace | undefined, fields: Partial<DryRunTrace>): void {
+    if (!trace) return;
+    Object.assign(trace, fields);
+    if (fields.steps) {
+      trace.steps = (trace.steps ?? []).concat(fields.steps);
+    }
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -981,10 +1081,17 @@ ${context.slice(0, 4000)}
     }
   }
 
-  private async markHandoff(conv: CustomerConversationEntity, reason?: string): Promise<void> {
-    conv.stage = ConversationStage.HandoffRequired;
-    await this.convRepo.save(conv);
-    // 写审计
+  private async markHandoff(
+    conv: CustomerConversationEntity,
+    reason?: string,
+    options?: HandleOptions,
+  ): Promise<void> {
+    const dryRun = options?.dryRun ?? false;
+    if (!dryRun) {
+      conv.stage = ConversationStage.HandoffRequired;
+      await this.convRepo.save(conv);
+    }
+    // 写审计 · dry-run 时 draft=true · 不污染真客服 handoff 计数
     await this.auditRepo.save(
       this.auditRepo.create({
         tenantId: conv.tenantId,
@@ -992,9 +1099,16 @@ ${context.slice(0, 4000)}
         mode: 'handoff',
         handoffTriggered: true,
         intent: reason ?? 'handoff',
+        draft: dryRun,
+        guardrailEdits: dryRun ? { dryRun: true, handoff_reason: reason } : null,
       }),
     );
-    this.logger.log(`conv ${conv.id} · handoff (${reason ?? 'unknown'})`);
+    this.logger.log(`conv ${conv.id} · handoff (${reason ?? 'unknown'})${dryRun ? ' [DRY-RUN]' : ''}`);
+    if (options?.traceRef) {
+      options.traceRef.handoffTriggered = true;
+      options.traceRef.handoffReason = reason ?? 'unknown';
+      options.traceRef.steps?.push(`markHandoff: ${reason ?? 'unknown'}`);
+    }
   }
 
   // 供 handoff UI 取 Pending 列表
