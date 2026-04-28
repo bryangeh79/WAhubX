@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -45,11 +45,15 @@ interface InboundEvent {
 }
 
 @Injectable()
-export class AutoReplyDeciderService {
+export class AutoReplyDeciderService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AutoReplyDeciderService.name);
 
   // Map<conversationId, Timeout> · 聚合窗计时器
   private aggTimers = new Map<number, NodeJS.Timeout>();
+
+  // 2026-04-28 · Codex 执行单 G · handoff 5min 超时自救扫描器
+  private handoffSweepTimer: NodeJS.Timeout | null = null;
+  private static readonly HANDOFF_SWEEP_INTERVAL_MS = 60_000; // 1min
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -60,6 +64,23 @@ export class AutoReplyDeciderService {
     private readonly settings: TenantReplySettingsService,
     private readonly executor: ReplyExecutorService,
   ) {}
+
+  onModuleInit(): void {
+    // G · 每分钟扫一次 · 找 5min 没人工回的 handoff_required conv 补通知
+    this.handoffSweepTimer = setInterval(() => {
+      void this.executor.runHandoffTimeoutSweep();
+    }, AutoReplyDeciderService.HANDOFF_SWEEP_INTERVAL_MS);
+    this.logger.log(
+      `handoff timeout sweep started · 每 ${AutoReplyDeciderService.HANDOFF_SWEEP_INTERVAL_MS / 1000}s 扫一次`,
+    );
+  }
+
+  onModuleDestroy(): void {
+    if (this.handoffSweepTimer) {
+      clearInterval(this.handoffSweepTimer);
+      this.handoffSweepTimer = null;
+    }
+  }
 
   @OnEvent('takeover.message.in')
   async onInbound(evt: InboundEvent): Promise<void> {
@@ -107,10 +128,34 @@ export class AutoReplyDeciderService {
       if (
         conv.stage === ConversationStage.HumanTakeover ||
         conv.stage === ConversationStage.DoNotReply ||
-        conv.stage === ConversationStage.Closed ||
-        conv.stage === ConversationStage.HandoffRequired
+        conv.stage === ConversationStage.Closed
       ) {
         this.logger.debug(`conv ${conv.id} stage=${conv.stage} · 跳过`);
+        return;
+      }
+      // 2026-04-28 · Codex 执行单 G · handoff 后自救
+      //   stage=handoff_required 时不再 silent
+      //   规则: 30min 内只补 1 次"已记录·请稍候"通知 · 防 spam · 同时让客户知道收到了
+      if (conv.stage === ConversationStage.HandoffRequired) {
+        try {
+          const recentNotice = await this.dataSource.query<Array<{ id: number }>>(
+            `SELECT id FROM ai_reply_audit
+              WHERE conversation_id = $1
+                AND intent = 'system_notice_handoff_ack'
+                AND created_at >= NOW() - INTERVAL '30 minutes'
+              LIMIT 1`,
+            [conv.id],
+          );
+          if (recentNotice.length === 0) {
+            await this.executor.sendSystemNotice(
+              conv,
+              '您的问题已记录, 我们已转交真人客服, 请稍候, 我们会尽快回复您.',
+              'system_notice_handoff_ack',
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`handoff_ack notice failed: ${err instanceof Error ? err.message : err}`);
+        }
         return;
       }
 
@@ -125,14 +170,36 @@ export class AutoReplyDeciderService {
       }
       if (conv.aiReplyCount24h >= RATE_24H_LIMIT) {
         this.logger.log(
-          `conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff (一次性提示 + 标 handoff)`,
+          `conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff (发最终通知 + 标 handoff)`,
+        );
+        // 2026-04-28 · Codex 执行单 E · 不 silent · 先发一次最终通知再 handoff
+        await this.executor.sendSystemNotice(
+          conv,
+          '今日咨询较多, 已为您转接真人客服, 请稍候, 我们会尽快回复您.',
+          'system_notice_conv_24h_cap',
         );
         conv.stage = ConversationStage.HandoffRequired;
         await this.convRepo.save(conv);
-        // 不 silent · 礼貌一次性提示 (不会再答下一条 · stage 已 handoff_required)
-        // 用 emit takeover.handoff 让 ReplyExecutor 实装 (本服务不直接发 · 简单做就同事会跟进)
-        // 这里 V1 简单 · 后续优化为 send 一次"今日咨询频繁 · 已转专人 · 请稍候" 再 handoff
         return;
+      }
+      // 2026-04-28 · Codex 执行单 F · tenant 级 daily limit
+      //   单 conv 30 条之外 · 还要查 tenant 24h 全量 · 默认 200
+      //   命中后先发租户级最终通知再 handoff
+      if (settings.dailyAiReplyLimit && settings.dailyAiReplyLimit > 0) {
+        const tenantCount = await this.executor.getTenantAiReplyCount24h(tenantId);
+        if (tenantCount >= settings.dailyAiReplyLimit) {
+          this.logger.log(
+            `tenant ${tenantId} · 24h 已 AI 回 ${tenantCount} 条 (上限 ${settings.dailyAiReplyLimit}) · conv ${conv.id} 触发 tenant 级 handoff`,
+          );
+          await this.executor.sendSystemNotice(
+            conv,
+            '今日咨询量较大, 已为您转接真人客服, 请稍候, 我们会尽快回复您.',
+            'system_notice_tenant_daily_cap',
+          );
+          conv.stage = ConversationStage.HandoffRequired;
+          await this.convRepo.save(conv);
+          return;
+        }
       }
 
       // 闸门 · 夜间静默

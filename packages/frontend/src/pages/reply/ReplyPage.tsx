@@ -107,6 +107,34 @@ export function ReplyPage() {
 
   const noKbYet = kbs.length === 0;
 
+  // 2026-04-28 · Codex 执行单 H · 老租户也要被 wizard 抓住
+  //   触发条件:
+  //   - mode = off
+  //   - 或没有 defaultKbId (= 通用 FAQ KB 没设)
+  //   - 或没有产品 KB (kbs.filter(k => !k.isDefault).length === 0)
+  //   显眼 banner + 首次进自动弹 wizard (sessionStorage 防 loop)
+  const productKbCount = useMemo(
+    () => kbs.filter((k) => !k.isDefault).length,
+    [kbs],
+  );
+  const needsWizard = useMemo(() => {
+    if (!settings) return false;
+    if (settings.mode === 'off') return true;
+    if (!settings.defaultKbId) return true;
+    if (productKbCount === 0) return true;
+    return false;
+  }, [settings, productKbCount]);
+
+  // 首次进自动弹 wizard (但不要 loop · 用 sessionStorage 标记本次 session 已弹)
+  useEffect(() => {
+    if (!needsWizard) return;
+    if (wizardOpen) return;
+    const flag = sessionStorage.getItem('wahubx-reply-wizard-auto-shown');
+    if (flag === '1') return;
+    sessionStorage.setItem('wahubx-reply-wizard-auto-shown', '1');
+    setWizardOpen(true);
+  }, [needsWizard, wizardOpen]);
+
   const handleOpenWizard = () => {
     setWizardOpen(true);
   };
@@ -244,6 +272,35 @@ export function ReplyPage() {
           </Button>
         )}
       </div>
+
+      {/* 2026-04-28 · Codex H · needsWizard banner · 显眼提示老租户继续配置 */}
+      {needsWizard && !noKbYet && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={
+            <span>
+              <Text strong>智能客服尚未配置完成</Text>
+              {' · '}
+              {settings?.mode === 'off' && '当前模式 = 关闭 · '}
+              {!settings?.defaultKbId && '未设默认知识库 · '}
+              {productKbCount === 0 && '尚未上传任何产品介绍 · '}
+              客户消息可能无法自动回复.
+            </span>
+          }
+          action={
+            <Button
+              size="small"
+              type="primary"
+              onClick={handleOpenWizard}
+              style={{ background: BRAND, borderColor: BRAND }}
+            >
+              继续向导
+            </Button>
+          }
+        />
+      )}
 
       {/* 2026-04-26 · P0.9 · 强制绑 CS slot 的只读说明 · 防止用户以为可选 */}
       <Alert

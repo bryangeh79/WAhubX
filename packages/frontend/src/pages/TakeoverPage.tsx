@@ -36,6 +36,7 @@ interface SlotOption {
 //
 // 用 sessionStorage 不是 localStorage · 只在当前浏览器 tab 有效
 // 关闭 tab/窗口 = 自动清 (避免跨日跨会话误激活 · 老 bug 用户被静默接管 slot)
+const TAKEOVER_STORAGE_KEY = 'wahubx-takeover-active-slot-id';
 
 function loadActiveSlotIdFromStorage(): number | null {
   try {
@@ -339,15 +340,19 @@ export function TakeoverPage() {
               系统内接管窗口区域
             </Title>
             <Paragraph style={{ fontSize: 12, color: '#bbb', margin: 0, marginBottom: 4 }}>
-              {!activeSlotId
-                ? slots.length === 0
-                  ? '暂无已绑定号 · 请先去 "账号槽位" 扫码绑定'
-                  : '从上方下拉选一个号开始接管'
-                : !activeSlot
-                  ? '该号已下线 · 请重选'
-                  : !activeSlot.online
-                    ? '该号离线 · 等 rehydrate 或重扫'
-                    : '准备中...'}
+              {(() => {
+                if (!activeSlotId) {
+                  return slots.length === 0
+                    ? '暂无已绑定号 · 请先去 "账号槽位" 扫码绑定'
+                    : '从上方下拉选一个号开始接管';
+                }
+                // 注: 这里 activeSlot 已被外层 canTakeover && activeSlot 三元 narrow 成 null
+                // 所以重新 find 一次拿真实状态 (TS narrowing edge case)
+                const slot = slots.find((s) => s.id === activeSlotId);
+                if (!slot) return '该号已下线 · 请重选';
+                if (!slot.online) return '该号离线 · 等 rehydrate 或重扫';
+                return '准备中...';
+              })()}
             </Paragraph>
           </div>
         )}

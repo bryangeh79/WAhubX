@@ -329,15 +329,61 @@ ${context.slice(0, 4000)}
     const qTokens = this.tokenize(question);
     if (qTokens.size === 0) return null;
 
+    // 2026-04-28 · Codex 执行单 D · 多语言 FAQ 优先
+    //   bug: 客户问 "Hi" · 跟英文 + 中文 FAQ 都低 jaccard · 排序不稳
+    //   fix: 同语言 FAQ score × 1.20 boost · 不同语言 score × 0.80 降权
+    //        "Hi" → en boost · 优先命中 "Hi! Thanks for reaching out..."
+    //        "你好" → zh boost · 不会跑去英文 FAQ
+    const qLang = this.detectLang(question);
+
     let best: { faq: KbFaqEntity; score: number } | null = null;
     for (const f of faqs) {
       const fTokens = this.tokenize(f.question);
-      const score = this.jaccard(qTokens, fTokens);
+      let score = this.jaccard(qTokens, fTokens);
+      // 语言加权 · 同语言 +20% · 异语言 -20% · mixed/未知 不动
+      if (qLang !== 'mixed' && qLang !== 'unknown') {
+        const fLangs = this.faqLangs(f);
+        if (fLangs.has(qLang)) {
+          score *= 1.2;
+        } else if (fLangs.size > 0 && !fLangs.has('mixed')) {
+          score *= 0.8;
+        }
+      }
+      // 限上限 1.0 (保留 threshold 语义)
+      if (score > 1) score = 1;
       if (!best || score > best.score) {
         best = { faq: f, score };
       }
     }
     return best;
+  }
+
+  // 2026-04-28 · Codex D · 语言检测 (粗规则 · 跑 hot path · 不调外部)
+  private detectLang(s: string): 'zh' | 'en' | 'mixed' | 'unknown' {
+    const hasHan = /\p{Script=Han}/u.test(s);
+    const hasLatin = /[a-zA-Z]/.test(s);
+    if (hasHan && hasLatin) return 'mixed';
+    if (hasHan) return 'zh';
+    if (hasLatin) return 'en';
+    return 'unknown';
+  }
+
+  // 2026-04-28 · Codex D · 从 FAQ tags/question 推语言集
+  private faqLangs(f: KbFaqEntity): Set<'zh' | 'en' | 'mixed'> {
+    const out = new Set<'zh' | 'en' | 'mixed'>();
+    const tags = (f.tags ?? []).map((t) => t.toLowerCase());
+    if (tags.includes('zh')) out.add('zh');
+    if (tags.includes('en')) out.add('en');
+    if (out.size === 0) {
+      // 没 tag · 看 question 文本
+      const qLang = this.detectLang(f.question);
+      if (qLang === 'zh') out.add('zh');
+      else if (qLang === 'en') out.add('en');
+      else if (qLang === 'mixed') out.add('mixed');
+    } else if (out.size === 2) {
+      out.add('mixed');
+    }
+    return out;
   }
 
   private tokenize(s: string): Set<string> {
@@ -506,5 +552,105 @@ ${context.slice(0, 4000)}
       // 重置 AI 计数 (给后续人工回复空间)
     }
     return this.convRepo.save(row);
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // 2026-04-28 · Codex 执行单 E/F/G · 系统通知 + 真 24h count + handoff 自救
+  // ════════════════════════════════════════════════════════════════
+
+  /**
+   * 发系统通知 (一次性) · 不计入 ai_reply_audit 的"日上限计数"
+   *   intent 字段标 'system_notice_*' · F 计数器查 24h 时 EXCLUDE 这类 intent
+   *
+   * 用途:
+   *   - E: 单 conv 30 条上限通知
+   *   - F: tenant daily limit 通知
+   *   - G: handoff 后客户再发 · 一次性提醒
+   *   - G: 5min 超时自救
+   */
+  async sendSystemNotice(
+    conv: CustomerConversationEntity,
+    text: string,
+    intent: string,
+  ): Promise<void> {
+    let sentMessageId: string | null = null;
+    try {
+      const slot = await this.slotRepo.findOne({ where: { id: conv.slotId } });
+      if (!slot) throw new Error('slot 不存在');
+      const jid = `${conv.phoneE164}@s.whatsapp.net`;
+      const sendRes = await this.slots.sendText(conv.slotId, jid, text);
+      sentMessageId = sendRes.waMessageId;
+    } catch (err) {
+      this.logger.warn(
+        `sendSystemNotice failed (conv=${conv.id} intent=${intent}): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    // 审计 · 但不计入 daily limit (通过 intent='system_notice_*' 区分)
+    await this.auditRepo.save(
+      this.auditRepo.create({
+        tenantId: conv.tenantId,
+        conversationId: conv.id,
+        replyText: text,
+        mode: 'handoff',
+        kbId: null,
+        intent,
+        handoffTriggered: false,
+        sentMessageId,
+        draft: false,
+        costTokensIn: 0,
+        costTokensOut: 0,
+      }),
+    );
+    this.logger.log(`conv ${conv.id} · system notice sent · intent=${intent}`);
+  }
+
+  /**
+   * F · 真 24h tenant 级 ai_reply 数 (EXCLUDE 系统通知)
+   *   只数 intent 不是 system_notice_* 的
+   */
+  async getTenantAiReplyCount24h(tenantId: number): Promise<number> {
+    const row = await this.auditRepo
+      .createQueryBuilder('a')
+      .where('a.tenant_id = :t', { t: tenantId })
+      .andWhere('a.created_at >= NOW() - INTERVAL \'24 hours\'')
+      .andWhere('(a.intent IS NULL OR a.intent NOT LIKE :sys)', { sys: 'system_notice_%' })
+      .andWhere('a.sent_message_id IS NOT NULL') // 真发出去的才数
+      .getCount();
+    return row;
+  }
+
+  /**
+   * G · 5min 自救扫描 · 找超 5min 没人工跟的 handoff_required conv · 补一次通知
+   *   定时器由 onModuleInit 启 (每分钟跑)
+   */
+  async runHandoffTimeoutSweep(): Promise<void> {
+    try {
+      // 找 handoff_required 且 lastInboundAt 超 5min · 且最近 5min 没系统通知/真人回复
+      const candidates = await this.convRepo
+        .createQueryBuilder('c')
+        .where('c.stage = :s', { s: ConversationStage.HandoffRequired })
+        .andWhere('c.last_inbound_at >= NOW() - INTERVAL \'24 hours\'') // 只看 24h 内还活的
+        .andWhere('c.last_inbound_at <= NOW() - INTERVAL \'5 minutes\'')
+        .getMany();
+      for (const conv of candidates) {
+        // 看最近 5min 有没有发过 timeout_followup
+        const recent = await this.auditRepo
+          .createQueryBuilder('a')
+          .where('a.conversation_id = :c', { c: conv.id })
+          .andWhere('a.intent = :i', { i: 'system_notice_handoff_timeout' })
+          .andWhere('a.created_at >= NOW() - INTERVAL \'30 minutes\'')
+          .getCount();
+        if (recent > 0) continue;
+        await this.sendSystemNotice(
+          conv,
+          '我们已记录您的问题, 真人客服会在工作时间内尽快回复您, 请稍候.',
+          'system_notice_handoff_timeout',
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `runHandoffTimeoutSweep failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 }

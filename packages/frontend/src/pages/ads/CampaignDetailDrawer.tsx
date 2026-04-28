@@ -59,40 +59,8 @@ export function CampaignDetailDrawer({ campaignId, onClose, onChanged }: Props) 
   const pollRef = useRef<number | null>(null);
 
   // 2026-04-27 · 强推该投放下所有 pending task 立即执行
-  const doRunNow = () => {
-    if (!campaignId) return;
-    modal.confirm({
-      title: '立即执行',
-      content: (
-        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-          <div>
-            将该投放下所有<strong>等待中</strong>的任务的执行时间改为<strong>现在</strong>,
-            跳过节流窗口立即派发.
-          </div>
-          <div style={{ marginTop: 8, color: '#fa8c16' }}>
-            ⚠️ 立即执行会使任务集中在短时间内发送, 可能增加封号风险. 仅建议测试或紧急投放使用.
-          </div>
-        </div>
-      ),
-      okText: '立即执行',
-      okButtonProps: { style: { background: '#fa8c16', borderColor: '#fa8c16' } },
-      cancelText: '取消',
-      onOk: async () => {
-        try {
-          const res = await campaignsApi.runNow(campaignId);
-          if (res.pushed > 0) {
-            message.success(`已强推 ${res.pushed} 个任务立即执行`);
-          } else {
-            message.info('当前没有等待中的任务可强推');
-          }
-          await fetchData(true);
-          onChanged?.();
-        } catch (err) {
-          message.error(extractErrorMessage(err, '强推失败'));
-        }
-      },
-    });
-  };
+  // 2026-04-28 · 抽屉 UI 拆掉 "立即执行" 大按钮 (改 per-task 行内按钮 in TaskList)
+  // 此处 doRunNow 函数已废弃 · per-task 立即执行在 CampaignTargetTable 实装
 
   const doClone = async () => {
     if (!campaignId) return;

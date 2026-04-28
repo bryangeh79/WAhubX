@@ -607,10 +607,17 @@ export class SlotsService {
         return;
       }
       // role gate
+      // 2026-04-28 · Codex 执行单 三 · Option C 决策
+      //   slot1 客服号: 完整 smart · 产品 KB + 通用 KB · 走完整 decider/executor
+      //   slot2-6 广告号: 不跑产品 KB / 不跑复杂 AI / inbound silent (现状)
+      //   理由:
+      //     - 客服号 (P0 watcher/reader/decider) 都还在稳定中 · 广告号开放只会放大噪声
+      //     - 广告号客户回复多是"在不在 / 不要发了" 等 · 转人工最稳
+      //     - 等客服号稳定 · V2 再决定要不要给广告号开"低噪声兜底+handoff" 路径
       if (slot.role !== AccountSlotRole.CustomerService) {
-        // broadcast 号 · 收到回复不入库 · 仅 log 留痕
+        // broadcast 号 · 收到回复不入库 · 仅 log 留痕 (Option C 当前实施)
         this.logger.log(
-          `slot ${evt.slotId} (broadcast) inbound 丢弃 · count=${evt.messages?.length ?? 0}`,
+          `slot ${evt.slotId} (broadcast/Option C silent) inbound 丢弃 · count=${evt.messages?.length ?? 0}`,
         );
         return;
       }
@@ -633,15 +640,21 @@ export class SlotsService {
             this.logger.debug?.(`slot ${evt.slotId} (CS) hifi inbound · direction=out · skip (outbound 路径已写库)`);
             continue;
           }
-          // 提 phone 真号 (从 senderJid '60186888168@c.us' 抽)
+          // 2026-04-28 · Codex P0-4 · 提 phone 真号
+          //   优先 senderJid (chat-reader 用 phoneHint 拼出来)
+          //   退化 · 用 senderDisplay 数字 (老 fallback 老 reader 兼容)
           const jidMatch = (hifi.senderJid ?? '').match(/^(\d{8,15})@(c\.us|s\.whatsapp\.net|lid)$/);
-          if (!jidMatch) {
+          let phone: string | null = jidMatch ? jidMatch[1] : null;
+          if (!phone && hifi.senderDisplay) {
+            const m = hifi.senderDisplay.match(/(\d{8,15})/);
+            if (m) phone = m[1];
+          }
+          if (!phone) {
             this.logger.warn(
-              `slot ${evt.slotId} (CS) hifi inbound · senderJid 形态异常 · ${hifi.senderJid} · 跳`,
+              `slot ${evt.slotId} (CS) hifi inbound · senderJid+senderDisplay 都没抽到 phone · senderJid=${hifi.senderJid} senderDisplay="${hifi.senderDisplay}" · 跳`,
             );
             continue;
           }
-          const phone = jidMatch[1];
           const remoteJid = `${phone}@s.whatsapp.net`; // 内部存 标准 jid
           // dedupe 用 wa_message_id (DB 现已有 wa_message_id 字段 · DB UNIQUE 约束兜底)
           // 但应用层先查 · 防止重复 INSERT 抛异常
@@ -716,6 +729,32 @@ export class SlotsService {
           remoteJid = `synthetic-${slug}@local.synthetic`;
           identityLog = `displayName="${hint.displayName}" jid=${remoteJid}`;
           identitySource = 'displayName';
+
+          // 2026-04-28 · Codex P0-4 · synthetic dedupe
+          //   防同一 WA 消息被 watcher 在两次 fire 里分别抓 real jid + synthetic
+          //   规则: 5s 内同 account_id + content · 库里若已有 real jid (非 synthetic) 入库 · 跳本条
+          const previewContent = hint.lastMessagePreview ?? hint.preview ?? '';
+          if (previewContent) {
+            try {
+              const cnt = await this.dataSource
+                .getRepository('chat_message' as never)
+                .createQueryBuilder('m')
+                .where('m.account_id = :acc', { acc: slot.accountId })
+                .andWhere('m.direction = :dir', { dir: 'in' })
+                .andWhere('m.content = :c', { c: previewContent })
+                .andWhere('m.remote_jid NOT LIKE :synthetic', { synthetic: 'synthetic-%' })
+                .andWhere('m.sent_at >= NOW() - INTERVAL \'5 seconds\'')
+                .getCount();
+              if (cnt > 0) {
+                this.logger.log(
+                  `slot ${evt.slotId} (CS) inbound synthetic skip · 5s 内已有 real jid 入同 content · jid=${remoteJid} content="${previewContent.slice(0, 40)}"`,
+                );
+                continue;
+              }
+            } catch {
+              /* 查不到也继续走 · 不阻塞 */
+            }
+          }
         } else {
           // 全失败 · 真没 identity · 跳 (这种是 watcher 极端边界 · 应几乎不发生)
           this.logger.warn(

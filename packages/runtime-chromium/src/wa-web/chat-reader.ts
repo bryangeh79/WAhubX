@@ -10,23 +10,30 @@
 //   ✗ 撤回 / 编辑 · 不处理
 //   ✗ 群消息 · 单聊先通 · 群留 M11
 //   ✗ 长按 unread · WA Web 没有真"标已读 toggle" · 进 chat 自动标 · 接受 trade-off
+//
+// 2026-04-28 · Codex 执行单 P0-2 · 修 WA Web DOM 漂移:
+//   - readLatestMessages 改用 [data-testid^="conv-msg-"] / [role="row"] · 不再依赖 'false_/true_' data-id 前缀
+//   - 方向从 .message-in / .message-out 判
+//   - 文本从 [data-testid="selectable-text"]
+//   - waMessageId 拼成 "<dir>_<phoneE164>@s.whatsapp.net_<hash>" · phone 由 caller 传入 (hint 抽出)
+//   - enterChat 接受 `__SEL__:<css>` 形态 · 命中 row root 时再下钻 gridcell click
 
 import type { ElementHandle, Page } from 'puppeteer-core';
 import type { Logger } from 'pino';
 import { WA_SELECTORS } from './wa-web-selectors';
 
 export interface HighFidelityMessage {
-  /** WA 真 messageId · 从 message bubble data-id 抽 · 形如 'false_60186888168@c.us_3EB0...HASH' */
+  /** WA 真 messageId · 拼成 '<dir>_<phoneE164>@s.whatsapp.net_<hash>' */
   waMessageId: string;
-  /** 'in' (对方发) / 'out' (我方发) · 从 data-id 前缀 'false_'/'true_' 判 */
+  /** 'in' (对方发) / 'out' (我方发) · 由 .message-in / .message-out class 判 */
   direction: 'in' | 'out';
-  /** 消息原文 · 从 [data-testid="msg-text"] / .selectable-text 拿 */
+  /** 消息原文 · 从 [data-testid="selectable-text"] / .selectable-text 拿 */
   text: string;
   /** 发送时间 ms · 从 data-pre-plain-text 解析 · 失败用 Date.now() */
   timestamp: number;
-  /** 对方 jid · 从 data-id 中段抽 · 形如 '60186888168@c.us' */
+  /** 对方 jid · 由 caller 传入的 phoneE164 拼 · 形如 '60186888168@s.whatsapp.net' */
   senderJid: string;
-  /** 对方显示名 · 从 data-pre-plain-text "[HH:MM, DD/MM/YYYY] DisplayName: " 拿 */
+  /** 对方显示名 · 由 caller 传入 (chat-list hint 抽出) */
   senderDisplay: string;
 }
 
@@ -71,31 +78,52 @@ export async function enterChat(
 ): Promise<{ ok: boolean; error?: string }> {
   // 找 row
   // rowDataIdOrSelector 可能是:
+  //   - "__SEL__:<css>" → 显式 CSS selector 路径 (Codex P0-1 · row.testid 不是 jid 时)
   //   - data-id 值 (e.g. "60186888168@c.us") → 用 [data-id="..."]
-  //   - 完整 CSS selector
+  //   - 完整 CSS selector (老路径 · 不带 __SEL__: prefix · 兼容)
   let rowEl: ElementHandle | null = null;
+  let usedSelector = '';
   try {
-    if (rowDataIdOrSelector.includes('@')) {
-      // data-id 值
-      rowEl = await page.$(`[data-id="${rowDataIdOrSelector}"]`);
+    if (rowDataIdOrSelector.startsWith('__SEL__:')) {
+      // 显式 selector 路径
+      const sel = rowDataIdOrSelector.slice('__SEL__:'.length);
+      usedSelector = sel;
+      rowEl = await page.$(sel);
+      // 万一 selector 命中了 row 而非 gridcell · 再往里找一次 gridcell
+      if (rowEl) {
+        const inner = await rowEl.$('div[role="gridcell"][tabindex="0"]');
+        if (inner) {
+          await rowEl.dispose();
+          rowEl = inner;
+          usedSelector += ' (drilled to gridcell)';
+        }
+      }
+    } else if (rowDataIdOrSelector.includes('@') && !rowDataIdOrSelector.includes(' ')) {
+      // 看起来是 JID (含 @ 且无空格 · 排除 selector 误判)
+      usedSelector = `[data-id="${rowDataIdOrSelector}"]`;
+      rowEl = await page.$(usedSelector);
       if (!rowEl) {
         // fallback: 模糊匹配
-        rowEl = await page.$(`[data-id*="${rowDataIdOrSelector.split('@')[0]}"]`);
+        const phoneOnly = rowDataIdOrSelector.split('@')[0];
+        usedSelector = `[data-id*="${phoneOnly}"]`;
+        rowEl = await page.$(usedSelector);
       }
     } else {
+      // 老路径 · 直接当 CSS selector
+      usedSelector = rowDataIdOrSelector;
       rowEl = await page.$(rowDataIdOrSelector);
     }
   } catch (err) {
     return { ok: false, error: `find row failed: ${err instanceof Error ? err.message : err}` };
   }
   if (!rowEl) {
-    return { ok: false, error: `chat row not found · key=${rowDataIdOrSelector}` };
+    return { ok: false, error: `chat row not found · usedSelector=${usedSelector}` };
   }
 
   // click row
   try {
     await rowEl.click({ delay: 30 });
-    log.debug?.({ key: rowDataIdOrSelector }, `${LOG_PREFIX} · row clicked`);
+    log.debug?.({ key: rowDataIdOrSelector, usedSelector }, `${LOG_PREFIX} · row clicked`);
   } catch (err) {
     await rowEl.dispose();
     return { ok: false, error: `row click failed: ${err instanceof Error ? err.message : err}` };
@@ -112,10 +140,10 @@ export async function enterChat(
     timeoutMs,
   );
   if (!detail) {
-    return { ok: false, error: `chat detail not visible after ${timeoutMs}ms` };
+    return { ok: false, error: `chat detail not visible after ${timeoutMs}ms · usedSelector=${usedSelector}` };
   }
   await detail.dispose();
-  log.info({ key: rowDataIdOrSelector }, `${LOG_PREFIX} · enterChat ok`);
+  log.info({ key: rowDataIdOrSelector, usedSelector }, `${LOG_PREFIX} · enterChat ok`);
   return { ok: true };
 }
 
@@ -126,9 +154,11 @@ export async function enterChat(
 export async function readLatestMessages(
   page: Page,
   log: Logger,
-  opts: { count?: number } = {},
+  opts: { count?: number; phoneE164?: string | null; displayName?: string | null } = {},
 ): Promise<HighFidelityMessage[]> {
   const N = opts.count ?? 5;
+  const phoneHint = (opts.phoneE164 ?? '').replace(/[^\d]/g, '') || null;
+  const displayHint = opts.displayName ?? null;
 
   const result = await page.evaluate(
     (selectors: typeof WA_SELECTORS, take: number): unknown[] => {
@@ -139,75 +169,102 @@ export async function readLatestMessages(
         if (listEl) break;
       }
       if (!listEl) {
-        // fallback · 大盘扫所有 [data-id] 含 jid 形态
+        // fallback · 大盘扫
         listEl = document.body;
       }
 
       // 2. 找所有 message bubble
-      const bubbles: Element[] = [];
-      // 优先 testid · 不行回退到任何带 data-id 的非 listitem 元素
-      const sel = 'div[data-testid*="msg-container"], div[data-id]:not([role="listitem"]), div[role="row"]';
-      const all = listEl.querySelectorAll(sel);
-      for (let i = 0; i < all.length; i++) {
-        const el = all[i];
-        const dataId = el.getAttribute('data-id') ?? '';
-        // 只要有 data-id · 跳掉 chat-list row (含 @c.us 没有 _ 前缀)
-        if (dataId && (dataId.startsWith('false_') || dataId.startsWith('true_'))) {
-          bubbles.push(el);
-        }
+      // 2026-04-28 · Codex P0-2 · 新 DOM:
+      //   外层 row: div[role="row"]
+      //   内层壳:   div[data-testid^="conv-msg-"][data-id="<HASH>"]
+      //   方向:     .message-in / .message-out (在 row 或某祖父节点上)
+      //   文本:     [data-testid="selectable-text"]
+      //   data-id 现在只有 HASH · 不再有 false_/true_ 前缀
+      //
+      // 兼容老 DOM: 仍尝试 data-id 含 @ 的旧形态 (有些 fork / sticker bubble)
+      const candidates: Element[] = [];
+      const newShells = listEl.querySelectorAll('div[data-testid^="conv-msg-"][data-id]');
+      newShells.forEach((el) => candidates.push(el));
+      // 老形态 fallback (直接在 row 上有 data-id)
+      const oldRows = listEl.querySelectorAll('div[role="row"][data-id]');
+      oldRows.forEach((el) => {
+        // 避免重复 (新壳被嵌在 row 里)
+        if (!candidates.includes(el)) candidates.push(el);
+      });
+      // 还有更老 · 任何 data-id (扣除 chat-list listitem) 当 fallback
+      if (candidates.length === 0) {
+        const fallback = listEl.querySelectorAll('div[data-id]');
+        fallback.forEach((el) => {
+          if (el.closest('[role="listitem"]')) return;
+          candidates.push(el);
+        });
       }
 
-      // 3. 取最后 N 条 (DOM 顺序 = 时间顺序)
-      const tail = bubbles.slice(-take);
+      // 3. 方向判断: row 或 ancestor 上的 .message-in/out class
+      const directionOf = (el: Element): 'in' | 'out' => {
+        // 自身
+        if (el.classList.contains('message-out')) return 'out';
+        if (el.classList.contains('message-in')) return 'in';
+        // ancestor (找最近的 row)
+        const row = el.closest('[role="row"], div[class*="message-"]');
+        if (row) {
+          if (row.classList.contains('message-out')) return 'out';
+          if (row.classList.contains('message-in')) return 'in';
+          // 找内部
+          if (row.querySelector('.message-out')) return 'out';
+          if (row.querySelector('.message-in')) return 'in';
+        }
+        // 老形态 · data-id 前缀
+        const dataId = el.getAttribute('data-id') ?? '';
+        if (dataId.startsWith('true_')) return 'out';
+        if (dataId.startsWith('false_')) return 'in';
+        // 默认 in (保守 · inbound 路径不会走错)
+        return 'in';
+      };
 
-      // 4. 每条提取
+      // 4. 取最后 N 条 (DOM 顺序 = 时间顺序)
+      const tail = candidates.slice(-take);
+
+      // 5. 每条提取
       const out: unknown[] = [];
       for (const b of tail) {
         const dataId = b.getAttribute('data-id') ?? '';
         if (!dataId) continue;
-        // 解析 data-id: 'false_60186888168@c.us_3EB0...HASH'  / 'true_<jid>_<hash>'
-        const direction: 'in' | 'out' = dataId.startsWith('true_') ? 'out' : 'in';
-        // 提 jid (中间段)
-        // false_60186888168@c.us_3EB0...HASH
-        // ↑      ↑                 ↑
-        // dir    jid               hash
-        const dataIdParts = dataId.split('_');
-        // 至少 3 段才像合法
-        const senderJid = dataIdParts.length >= 3 ? dataIdParts[1] : '';
+        const direction = directionOf(b);
 
-        // 5. 提取 text (优先 [data-testid=msg-text] · 退到 .selectable-text · 退到 textContent)
+        // 6. 提取 text (优先 [data-testid="selectable-text"] · 退到 .selectable-text · 退到 textContent)
         let text = '';
-        const textEl = b.querySelector('[data-testid="msg-text"]')
-          || b.querySelector('span.selectable-text')
-          || b.querySelector('span[class*="selectable-text"]');
+        const textEl =
+          b.querySelector('[data-testid="selectable-text"]') ||
+          b.querySelector('[data-testid="msg-text"]') ||
+          b.querySelector('span.selectable-text') ||
+          b.querySelector('span[class*="selectable-text"]');
         if (textEl) {
           text = (textEl.textContent ?? '').trim();
         } else {
           // 没文本元素 · 可能是媒体 / 撤回 / 系统消息 · 用占位
-          // 检测有没有 image / video / audio
           if (b.querySelector('img')) text = '[image]';
           else if (b.querySelector('audio')) text = '[audio]';
           else if (b.querySelector('video')) text = '[video]';
           else text = '[non-text or unsupported]';
         }
 
-        // 6. 提取 sender display name + timestamp · 从 data-pre-plain-text
+        // 7. 提取 sender display name + timestamp · 从 data-pre-plain-text
         // WA Web 标准格式: '[HH:MM, DD/MM/YYYY] DisplayName: '
         let senderDisplay = '';
         let timestamp = Date.now();
-        const prePlain = b.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text')
-          ?? b.getAttribute('data-pre-plain-text')
-          ?? '';
+        const prePlain =
+          b.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') ??
+          b.getAttribute('data-pre-plain-text') ??
+          '';
         if (prePlain) {
           // 形如 "[10:30, 4/26/2026] Bryan Ng: "
           const m = prePlain.match(/^\[([^,]+),\s*([^\]]+)\]\s*(.*?):/);
           if (m) {
-            const timeStr = m[1].trim(); // "10:30" or "10:30 PM"
-            const dateStr = m[2].trim(); // "4/26/2026"
+            const timeStr = m[1].trim();
+            const dateStr = m[2].trim();
             senderDisplay = m[3].trim();
-            // 解析时间
             try {
-              // 'D/M/YYYY' or 'M/D/YYYY' 看 locale · 这里粗暴接受 native parse
               const parsed = new Date(`${dateStr} ${timeStr}`);
               if (!Number.isNaN(parsed.getTime())) {
                 timestamp = parsed.getTime();
@@ -217,17 +274,24 @@ export async function readLatestMessages(
             }
           }
         }
-        // direction=out 时 senderDisplay = 自己 · 我们的 senderDisplay 占位
-        if (direction === 'out' && !senderDisplay) {
-          senderDisplay = '(self)';
+
+        // dataId 提 hash · 老形态 'false_<jid>_<HASH>' · 新形态直接是 HASH
+        let hashOnly = dataId;
+        if (dataId.includes('_')) {
+          const parts = dataId.split('_');
+          hashOnly = parts[parts.length - 1];
         }
 
         out.push({
-          waMessageId: dataId,
+          // waMessageId 留空 jid 占位 · caller 替换成 phoneHint
+          // 形态: <direction>_<phoneE164>@s.whatsapp.net_<hash>
+          // 注: jid 部分由 caller 拼 · 这里给 caller 用的是 hash + direction
+          _hashOnly: hashOnly,
+          _rawDataId: dataId,
           direction,
           text,
           timestamp,
-          senderJid,
+          // senderJid / senderDisplay 留空 · caller 用 hint 填
           senderDisplay,
         });
       }
@@ -237,8 +301,40 @@ export async function readLatestMessages(
     N,
   );
 
-  const messages = (result as HighFidelityMessage[]) ?? [];
-  log.info({ count: messages.length, take: N }, `${LOG_PREFIX} · readLatestMessages 抓到 ${messages.length} 条`);
+  // 应用 caller hint · 拼 waMessageId / senderJid / senderDisplay
+  const arr = (result as Array<{
+    _hashOnly: string;
+    _rawDataId: string;
+    direction: 'in' | 'out';
+    text: string;
+    timestamp: number;
+    senderDisplay: string;
+  }>) ?? [];
+
+  const messages: HighFidelityMessage[] = arr.map((m) => {
+    const senderJid = phoneHint ? `${phoneHint}@s.whatsapp.net` : '';
+    // waMessageId · 用 hash + direction + jid 拼 (有 jid 则带; 没 jid 退化到 _rawDataId)
+    let waMessageId: string;
+    if (phoneHint && m._hashOnly) {
+      waMessageId = `${m.direction === 'out' ? 'true' : 'false'}_${phoneHint}@s.whatsapp.net_${m._hashOnly}`;
+    } else {
+      // 没 phone hint · 用原始 data-id (老路径兼容 · backend 可能依然能识别)
+      waMessageId = m._rawDataId;
+    }
+    return {
+      waMessageId,
+      direction: m.direction,
+      text: m.text,
+      timestamp: m.timestamp,
+      senderJid,
+      senderDisplay: m.senderDisplay || (displayHint ?? ''),
+    };
+  });
+
+  log.info(
+    { count: messages.length, take: N, phoneHint, displayHint },
+    `${LOG_PREFIX} · readLatestMessages 抓到 ${messages.length} 条`,
+  );
   return messages;
 }
 

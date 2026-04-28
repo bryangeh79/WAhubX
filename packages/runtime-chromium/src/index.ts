@@ -478,9 +478,14 @@ async function main() {
 
   // P0.11 · candidate queue + worker · 串行进 chat 读真消息
   // dedupe by waMessageId (60s 窗口) · 防同消息多次入库
+  // 2026-04-28 · Codex P0-3 · phoneE164/displayName 提到 queue 顶层
+  //   原因: chat-reader.readLatestMessages 现在需要 phone hint 拼 senderJid + waMessageId
+  //   bubble data-id 已不再含 jid · phone 必须从 chat-list hint 带
   const candidateQueue: Array<{
     rowDataId: string;
     fallbackHint: unknown; // 老 hint · chat-reader 失败时退化用
+    phoneE164: string | null;
+    displayName: string | null;
     enqueuedAt: number;
   }> = [];
   const recentSeenMessageIds = new Map<string, number>(); // wa_message_id → ts
@@ -527,9 +532,15 @@ async function main() {
           continue;
         }
         // 读真消息
+        // 2026-04-28 · Codex P0-3 · 把 chat-list hint 的 phone/displayName 传给 reader
+        //   bubble data-id 没 jid 时 · reader 用 phoneHint 拼 senderJid 和 waMessageId
         let messages: HighFidelityMessage[] = [];
         try {
-          messages = await readLatestMessages(page, log, { count: 5 });
+          messages = await readLatestMessages(page, log, {
+            count: 5,
+            phoneE164: cand.phoneE164,
+            displayName: cand.displayName,
+          });
         } catch (err) {
           log.warn({ err: err instanceof Error ? err.message : err }, 'P0.11 readLatestMessages 失败');
         }
@@ -577,11 +588,18 @@ async function main() {
         onIncoming: (hint) => {
           // P0.11 · 不再直接 emit · 改塞 queue · worker 进 chat 拿真消息
           if (!wsClient) return;
-          const h = hint as { rowDataId?: string | null };
+          // 2026-04-28 · Codex P0-3 · 把 phone/displayName 也带给 worker
+          const h = hint as {
+            rowDataId?: string | null;
+            phoneE164?: string | null;
+            displayName?: string | null;
+          };
           if (h.rowDataId) {
             candidateQueue.push({
               rowDataId: h.rowDataId,
               fallbackHint: hint,
+              phoneE164: h.phoneE164 ?? null,
+              displayName: h.displayName ?? null,
               enqueuedAt: Date.now(),
             });
             void drainCandidateQueue();
