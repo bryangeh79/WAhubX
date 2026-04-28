@@ -62,42 +62,56 @@ export class ReplyExecutorService {
     const settings = await this.settings.get(conv.tenantId);
     if (settings.mode === 'off') return;
 
-    // 2026-04-28 · 双层 KB Fallback (产品 KB → 通用 KB → RAG → handoff)
-    // primaryKbId: 对话绑定的产品 KB (或 fallback 到 default)
-    // secondaryKbId: 通用 KB (default_kb_id) · 仅当 primary 不是 default 时启用
-    const primaryKbId = conv.kbId ?? settings.defaultKbId;
-    if (!primaryKbId) {
-      this.logger.debug(`conv ${conv.id} · 无 KB · handoff`);
-      await this.markHandoff(conv);
-      return;
+    // 2026-04-28 · 双层 KB Fallback (产品 KB list → 通用 KB → RAG → handoff)
+    //   bug 修: 老逻辑 primaryKbId = conv.kbId ?? defaultKbId · 当 conv 没绑产品 KB 时
+    //          primary === default → secondary 自动 null → 产品 KB 永远查不到
+    //          症状: 客户问 fahubx · 系统只搜通用 KB · 找不到 → "资料不全"
+    //   修: conv 没绑产品 KB (kbId 空 OR = default) 时, primary 扩展为 tenant 所有产品 KB
+    //       逐个试 FAQ → 取最优; RAG 也跨多 KB 检索 chunks
+    const defaultKbId = settings.defaultKbId;
+    let primaryKbIds: number[] = [];
+    if (conv.kbId && conv.kbId !== defaultKbId) {
+      // conv 已归因到具体产品 KB (campaign 路径)
+      primaryKbIds = [conv.kbId];
+    } else {
+      // conv 没绑或绑到 default · 把 tenant 所有产品 KB 都纳入 primary
+      const productKbs = await this.kbRepo.find({
+        where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
+      });
+      primaryKbIds = productKbs.map((k) => k.id);
     }
+    // secondary 始终是通用 KB · 排重避免重复搜
     const secondaryKbId =
-      settings.defaultKbId && primaryKbId !== settings.defaultKbId
-        ? settings.defaultKbId
-        : null;
+      defaultKbId && !primaryKbIds.includes(defaultKbId) ? defaultKbId : null;
 
-    const primaryKb = await this.kbRepo.findOne({ where: { id: primaryKbId } });
-    if (!primaryKb) {
-      await this.markHandoff(conv);
+    if (primaryKbIds.length === 0 && !secondaryKbId) {
+      this.logger.debug(`conv ${conv.id} · tenant 没任何 KB · handoff`);
+      await this.markHandoff(conv, '租户无可用 KB');
       return;
     }
 
-    // 1A · FAQ 匹配 (产品 KB)
-    const faqMatch = await this.matchFaq(primaryKbId, mergedQuestion);
-    if (faqMatch && faqMatch.score >= FAQ_MATCH_THRESHOLD) {
+    // 1A · FAQ 匹配 (跨所有 primary 产品 KB · 取最优)
+    let bestPrimary: { kbId: number; faq: KbFaqEntity; score: number } | null = null;
+    for (const pKbId of primaryKbIds) {
+      const m = await this.matchFaq(pKbId, mergedQuestion);
+      if (m && (!bestPrimary || m.score > bestPrimary.score)) {
+        bestPrimary = { kbId: pKbId, faq: m.faq, score: m.score };
+      }
+    }
+    if (bestPrimary && bestPrimary.score >= FAQ_MATCH_THRESHOLD) {
       this.logger.log(
-        `conv ${conv.id} · FAQ 命中 primary kb=${primaryKbId} · score=${faqMatch.score.toFixed(2)} · faq=${faqMatch.faq.id}`,
+        `conv ${conv.id} · FAQ 命中 primary kb=${bestPrimary.kbId} (跨 ${primaryKbIds.length} 个产品 KB) · score=${bestPrimary.score.toFixed(2)} · faq=${bestPrimary.faq.id}`,
       );
-      const replyText = this.applyGuardrail(faqMatch.faq.answer, mergedQuestion, primaryKbId);
+      const replyText = this.applyGuardrail(bestPrimary.faq.answer, mergedQuestion, bestPrimary.kbId);
       await this.send(conv, replyText, {
         mode: 'faq',
-        kbId: primaryKbId,
-        matchedFaqId: faqMatch.faq.id,
-        confidence: faqMatch.score,
+        kbId: bestPrimary.kbId,
+        matchedFaqId: bestPrimary.faq.id,
+        confidence: bestPrimary.score,
         intent: 'faq_hit',
         handoff: false,
       });
-      await this.faqRepo.increment({ id: faqMatch.faq.id }, 'hitCount', 1);
+      await this.faqRepo.increment({ id: bestPrimary.faq.id }, 'hitCount', 1);
       return;
     }
 
@@ -148,38 +162,47 @@ export class ReplyExecutorService {
     }
     const qVec = embedRes.vectors[0];
 
-    // 向量检索 top-3 (优先产品 KB)
-    const primaryCandidates = await this.chunkRepo.find({ where: { kbId: primaryKbId } });
-    let scored = primaryCandidates
-      .filter((c) => c.embedding && c.embedding.length === qVec.length)
-      .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
+    // 2026-04-28 · 跨多产品 KB 向量检索
+    //   conv 没绑产品 KB 时, primaryKbIds = tenant 所有产品 KB · 跨 KB 取 top-3
+    //   chunks 携带 kbId · 命中后用此 kbId 拿对应 KB 的 goalPrompt
+    let scored: Array<{ chunk: KbChunkEntity; score: number; kbId: number }> = [];
+    if (primaryKbIds.length > 0) {
+      const primaryCandidates = await this.chunkRepo.find({
+        where: { kbId: In(primaryKbIds) },
+      });
+      scored = primaryCandidates
+        .filter((c) => c.embedding && c.embedding.length === qVec.length)
+        .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!), kbId: c.kbId }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+    }
 
     let topScore = scored[0]?.score ?? 0;
-    let usedKbId = primaryKbId;
-    let usedKb = primaryKb;
+    let usedKbId = scored[0]?.kbId ?? (primaryKbIds[0] ?? secondaryKbId ?? 0);
+    let usedKb = await this.kbRepo.findOne({ where: { id: usedKbId } });
 
     // 2026-04-28 · 双层 fallback · primary RAG 信心低 · 试通用 KB
     if (topScore < RAG_CONF_HIGH && secondaryKbId) {
       const secondaryCandidates = await this.chunkRepo.find({ where: { kbId: secondaryKbId } });
       const scored2 = secondaryCandidates
         .filter((c) => c.embedding && c.embedding.length === qVec.length)
-        .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!) }))
+        .map((c) => ({ chunk: c, score: this.cosine(qVec, c.embedding!), kbId: c.kbId }))
         .sort((a, b) => b.score - a.score)
         .slice(0, 3);
       const topScore2 = scored2[0]?.score ?? 0;
       if (topScore2 > topScore) {
-        // 通用 KB 信心更高 · 切到通用
         this.logger.log(
           `conv ${conv.id} · RAG fallback to secondary kb=${secondaryKbId} · score=${topScore2.toFixed(2)} > primary ${topScore.toFixed(2)}`,
         );
         scored = scored2;
         topScore = topScore2;
         usedKbId = secondaryKbId;
-        const secondKb = await this.kbRepo.findOne({ where: { id: secondaryKbId } });
-        if (secondKb) usedKb = secondKb;
+        usedKb = await this.kbRepo.findOne({ where: { id: secondaryKbId } });
       }
+    }
+    if (!usedKb) {
+      // 全 KB 找不到 chunks · 用 primary 第一个 KB 的 metadata 兜底
+      usedKb = await this.kbRepo.findOne({ where: { id: primaryKbIds[0] ?? secondaryKbId ?? 0 } });
     }
 
     if (topScore < RAG_CONF_LOW) {
@@ -225,7 +248,7 @@ export class ReplyExecutorService {
 
     // 组 prompt 调 LLM
     const context = scored.map((s) => s.chunk.text).join('\n\n---\n\n');
-    const goal = usedKb.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
+    const goal = usedKb?.goalPrompt?.trim() || '让客户了解产品并留下联系方式';
     const blackList = (settings.blacklistKeywords ?? []).join('; ');
 
     const systemPrompt = `你是该公司的 WhatsApp 客服代表. 保持友善/简洁/口语化.
