@@ -153,11 +153,28 @@ export async function sendTextInOpenChat(
   }
   await inputEl.dispose();
 
-  // 2. 记录发送前的最后消息时间戳 (用来 confirm 新消息出现)
+  // 2. 2026-04-28 · CRITICAL · 清空输入框残留文字
+  //   bug: 上次 send 因 timeout abort 留半句, 或 takeover viewer 输入字符
+  //   不清直接 type → 客户收到 "残留文 + 新广告" 合并消息 + 莫名前缀
+  //   方法: keyboard Ctrl+A 选全部 · Backspace 删 (优先 React contentEditable)
+  //   备选: page.evaluate 直接清 innerHTML (React 可能不识)
+  try {
+    await page.keyboard.down('Control');
+    await page.keyboard.press('a');
+    await page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 50));
+    await page.keyboard.press('Backspace');
+    await new Promise((r) => setTimeout(r, 100));
+    log.info('D10 sendText · 清空输入框残留 (Ctrl+A + Backspace)');
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, '清空输入框失败 · 继续 (可能仍有残留)');
+  }
+
+  // 3. 记录发送前的最后消息时间戳 (用来 confirm 新消息出现)
   // 简化策略: 不读 DOM 比对 · 直接看单勾出现 (足够 D10)
   await new Promise((r) => setTimeout(r, 200 + Math.random() * 300));
 
-  // 3. human typing
+  // 4. human typing
   try {
     await simulator.simulateHumanTyping(text);
   } catch (err) {

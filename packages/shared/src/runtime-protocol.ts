@@ -270,7 +270,11 @@ export type RuntimeEvent =
 export type RuntimeMessage = RuntimeCommand | RuntimeAck | RuntimeEvent;
 
 export const RUNTIME_HEARTBEAT_INTERVAL_MS = 30_000;
-export const RUNTIME_CMD_ACK_TIMEOUT_MS = 30_000;
+// 2026-04-28 · 30s → 180s
+//   bug: send-text 多行长广告 runtime 端动态超时可达 70s+ · backend 30s 早 reject
+//   症状: 客户收到广告 (runtime 完成了) · 但 backend 标 target=Failed (假失败)
+//   180s 给 send-text/send-media/post-status-media 足够余量 · 真 hang 仍兜底
+export const RUNTIME_CMD_ACK_TIMEOUT_MS = 180_000;
 export const RUNTIME_PROTOCOL_VERSION = 1;
 
 // Runtime WS 重连参数 (runtime-chromium 用)
