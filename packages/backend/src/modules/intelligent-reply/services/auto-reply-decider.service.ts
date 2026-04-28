@@ -95,10 +95,14 @@ export class AutoReplyDeciderService {
       const conv = await this.ensureConversation(tenantId, slotId, phone);
 
       // 闸门 3 · 对话状态
+      // 2026-04-28 · HandoffRequired 也跳过 · 不再重复发 handoff 消息
+      //   bug: 老逻辑只跳 HumanTakeover/DoNotReply/Closed · handoff_required 仍触发
+      //        客户连发多条 · 每条都得到一份 "稍后让同事联系" 的 spam
       if (
         conv.stage === ConversationStage.HumanTakeover ||
         conv.stage === ConversationStage.DoNotReply ||
-        conv.stage === ConversationStage.Closed
+        conv.stage === ConversationStage.Closed ||
+        conv.stage === ConversationStage.HandoffRequired
       ) {
         this.logger.debug(`conv ${conv.id} stage=${conv.stage} · 跳过`);
         return;

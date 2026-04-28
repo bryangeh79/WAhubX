@@ -307,12 +307,39 @@ export async function installInboundWatcher(
       }
 
       // 最后一条消息预览 (row 里通常有 [data-testid="last-msg-content"] 或最后一个 span)
+      // 2026-04-28 · 加严过滤 · 防把 chat 标题 (= 客户号码) 当消息内容
+      //   bug: WA Web row 多个 span 都有 dir 属性 · :last-of-type 可能命中标题 / 时间 · 不是消息预览
+      //   修: 跳过明显是"标题"的内容 (跟 displayName 完全相同 / 纯数字号码 / 纯时间)
       let lastMsg: string | null = null;
-      const lastEl =
-        row.querySelector('[data-testid="last-msg-content"]') ||
-        row.querySelector('span[dir]:last-of-type') ||
-        row.querySelector('div > span:last-of-type');
-      if (lastEl) lastMsg = (lastEl.textContent ?? '').trim().slice(0, 200);
+      const lastCandidates: string[] = [];
+      const lastEl1 = row.querySelector('[data-testid="last-msg-content"]');
+      if (lastEl1) lastCandidates.push((lastEl1.textContent ?? '').trim());
+      // 收集多个候选 · 找第一个看起来像真消息的
+      const dirSpans = row.querySelectorAll('span[dir]');
+      for (let i = 0; i < dirSpans.length; i++) {
+        const t = (dirSpans[i].textContent ?? '').trim();
+        if (t) lastCandidates.push(t);
+      }
+      const isPhoneLike = (s: string) => /^[\+\d\s\-\(\)]{6,}$/.test(s);
+      const isTimeLike = (s: string) =>
+        /^\d{1,2}[:.]\d{2}(\s*(am|pm))?$/i.test(s) ||
+        /^(yesterday|today|now|just now)$/i.test(s) ||
+        /^\d+\s*(min|hour|day|week)s?\s*ago$/i.test(s) ||
+        /^(mon|tue|wed|thu|fri|sat|sun)/i.test(s);
+      for (const c of lastCandidates) {
+        const cTrim = c.slice(0, 200);
+        if (!cTrim) continue;
+        // 跳过跟 displayName 一样的 (= 标题被当 preview)
+        if (displayName && cTrim === displayName) continue;
+        // 跳过纯电话号码 (= 标题)
+        if (isPhoneLike(cTrim)) continue;
+        // 跳过时间戳
+        if (isTimeLike(cTrim)) continue;
+        // 跳过状态片段
+        if (isStatusText(cTrim)) continue;
+        lastMsg = cTrim;
+        break;
+      }
 
       // 2026-04-28 · 去掉 30s 时间桶 · 同 row 不再被强制重 fire
       //   bug: 时间桶导致每 30s 同未读 row 又 fire · 后端 8s 聚合 timer 永远被 reset

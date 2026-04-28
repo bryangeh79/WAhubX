@@ -47,11 +47,13 @@ export class ReplyExecutorService {
   async handle(conversationId: number, mergedQuestion: string, _messageIds: string[]): Promise<void> {
     const conv = await this.convRepo.findOne({ where: { id: conversationId } });
     if (!conv) return;
-    // 再次检查 stage (flush 期间可能被人工接管)
+    // 再次检查 stage (flush 期间可能被人工接管 / 已 handoff)
+    // 2026-04-28 · HandoffRequired 也跳 · 已转人工不再 AI 回复
     if (
       conv.stage === ConversationStage.HumanTakeover ||
       conv.stage === ConversationStage.DoNotReply ||
-      conv.stage === ConversationStage.Closed
+      conv.stage === ConversationStage.Closed ||
+      conv.stage === ConversationStage.HandoffRequired
     ) {
       this.logger.debug(`conv ${conv.id} stage=${conv.stage} · executor 跳`);
       return;
