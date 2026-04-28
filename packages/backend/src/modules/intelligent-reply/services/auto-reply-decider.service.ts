@@ -124,9 +124,14 @@ export class AutoReplyDeciderService {
         return;
       }
       if (conv.aiReplyCount24h >= RATE_24H_LIMIT) {
-        this.logger.debug(`conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff`);
+        this.logger.log(
+          `conv ${conv.id} · 24h 已回 ${conv.aiReplyCount24h} 次 · 触发 handoff (一次性提示 + 标 handoff)`,
+        );
         conv.stage = ConversationStage.HandoffRequired;
         await this.convRepo.save(conv);
+        // 不 silent · 礼貌一次性提示 (不会再答下一条 · stage 已 handoff_required)
+        // 用 emit takeover.handoff 让 ReplyExecutor 实装 (本服务不直接发 · 简单做就同事会跟进)
+        // 这里 V1 简单 · 后续优化为 send 一次"今日咨询频繁 · 已转专人 · 请稍候" 再 handoff
         return;
       }
 

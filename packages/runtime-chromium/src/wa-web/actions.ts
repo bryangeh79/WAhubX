@@ -235,16 +235,34 @@ export async function sendTextInOpenChat(
 
   log.info({ pseudoMessageId, durationMs: Date.now() - startedAt }, 'D10 sendText · 单勾确认 · 成功');
 
-  // 2026-04-28 · 发完回到 chat-list · 让下次新消息又出 unread badge
+  // 2026-04-28 · 发完强制回 chat-list · 让下次新消息又出 unread badge
   //   bug: 老逻辑发完仍停在该 chat · WA Web 自动标对方新消息已读 · 永远没新 badge
-  //   方法 1 (轻): 按 Escape · 在 chat 里关闭右栏返列表
-  //   方法 2 (兜底): 重新访问 chat-list URL (代价 1-3s · 不阻塞 ack)
+  //   修法升级:
+  //     1. 按 Escape (轻 · 大多数情况关 chat)
+  //     2. 等 300ms 让 SPA 切状态
+  //     3. 兜底 · page.evaluate 触发 hashchange 到 root URL
+  //     这样 chat 可靠回到列表 · 哪怕 WA Web DOM 改了 Escape 不工作
   try {
     await page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 300));
+    // 兜底 · 直接通过 SPA router 回 root (chat-list 视图)
+    await page.evaluate(() => {
+      try {
+        // WA Web 是 SPA · history 改 URL 不刷页 · WA 内部 router 切到 chat-list
+        if (window.location.hash && window.location.hash !== '#') {
+          window.location.hash = '';
+        }
+        // 另: 主动 blur 焦点 · 防 input 留焦点导致下次 type 到旧 chat
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && typeof ae.blur === 'function') ae.blur();
+      } catch {
+        /* ignore */
+      }
+    });
     await new Promise((r) => setTimeout(r, 200));
-    log.info('D10 sendText · Escape 返 chat-list · 让 inbound watcher 继续 detect 新消息');
+    log.info('D10 sendText · Escape + SPA 返 chat-list · 让 inbound watcher 继续 detect 新消息');
   } catch {
-    /* ignore · escape 不致命 */
+    /* ignore · 退栈不致命 */
   }
 
   return {

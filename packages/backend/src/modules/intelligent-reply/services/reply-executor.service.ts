@@ -183,19 +183,43 @@ export class ReplyExecutorService {
     }
 
     if (topScore < RAG_CONF_LOW) {
-      // 置信度太低 → 不编造, handoff
-      await this.send(
-        conv,
-        '这个问题让我确认一下, 稍后让同事跟你联系 🙌',
-        {
-          mode: 'handoff',
-          kbId: usedKbId,
-          confidence: topScore,
-          intent: 'low_confidence',
-          handoff: true,
-        },
-      );
-      await this.markHandoff(conv, 'RAG 低置信度 (primary+fallback 都低)');
+      // 2026-04-28 · 低置信度 · 不再"懒散转人工" · 让 AI 主动澄清引导
+      // 老逻辑: 一句 "稍后让同事联系" + markHandoff (永久屏蔽后续问)  → 客服体验差
+      // 新: AI 看资料不够时 · 礼貌追问引导客户给更多信息 · 不 markHandoff · 让下条能继续答
+      const clarifySystemPrompt = `你是该公司 WhatsApp 客服 · 友善亲切口语化 · 80 字以内`;
+      const clarifyUserPrompt = `客户问: "${mergedQuestion}"
+
+我这边资料不全 · 不能直接答. 请你:
+1. 礼貌致歉 (一句话)
+2. 引导客户说更多 (例如: 想了解产品具体哪方面 · 您是哪家公司 · 已有订单号吗 · 等)
+3. 提示如需立即联系真人请回复"人工"
+
+直接输出回复文本 · 不要 JSON · 不超 80 字.`;
+
+      let clarifyText =
+        '您好! 关于这个问题我需要更多信息才能帮到您. 请问能再具体说说您想了解什么吗? 也可以回复"人工"联系真人客服.';
+      try {
+        const clarifyRes = await this.tenantAi.chatWithTenant({
+          systemPrompt: clarifySystemPrompt,
+          userPrompt: clarifyUserPrompt,
+          maxTokens: 200,
+          timeoutMs: 20_000,
+        });
+        if (clarifyRes.ok && clarifyRes.text.trim()) {
+          clarifyText = this.applyGuardrail(clarifyRes.text.trim(), mergedQuestion, usedKbId);
+        }
+      } catch (err) {
+        this.logger.warn(`clarify AI failed: ${err instanceof Error ? err.message : err}`);
+        // 用兜底 clarifyText (默认值)
+      }
+      await this.send(conv, clarifyText, {
+        mode: 'ai',
+        kbId: usedKbId,
+        confidence: topScore,
+        intent: 'clarify_low_confidence',
+        handoff: false,
+      });
+      // 不调 markHandoff · conv stage 保持 'new' · 下条消息能继续答
       return;
     }
 
