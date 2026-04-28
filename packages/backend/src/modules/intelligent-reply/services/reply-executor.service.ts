@@ -449,10 +449,43 @@ ${context.slice(0, 4000)}
     return out;
   }
 
+  // 2026-04-28 · 简繁体常见字归一化 (zh-Hant → zh-Hans · 仅 FAQ matching 用)
+  //   bug: 客户问 "妳好" · starter "你好" tokenize {妳,好} vs {你,好} · jaccard 0.33 < 0.55 ❌
+  //   修: tokenize 前把繁体常用字转简体 · 让"妳好"="你好"="您好" 都能命中
+  //   注: 不引入 OpenCC 等大库 · 内联常见 50 字够用 · 后续可扩
+  // 单字繁→简映射 · 仅 FAQ tokenize 用
+  private static readonly TC_TO_SC: Record<string, string> = {
+    // 人称
+    '妳': '你', '您': '你',
+    // 常见繁体单字 (去重)
+    '們': '们', '個': '个', '麼': '么', '對': '对', '說': '说',
+    '話': '话', '時': '时', '間': '间', '問': '问', '題': '题',
+    '產': '产', '價': '价', '錢': '钱', '買': '买', '賣': '卖',
+    '單': '单', '號': '号', '聯': '联', '繫': '系', '電': '电',
+    '網': '网', '頁': '页', '應': '应', '該': '该', '當': '当',
+    '會': '会', '為': '为', '從': '从', '進': '进', '這': '这',
+    '裡': '里', '謝': '谢', '請': '请', '幫': '帮', '給': '给',
+    '讓': '让', '見': '见', '聽': '听', '愛': '爱', '歡': '欢',
+    '訊': '讯', '線': '线', '連': '连', '開': '开', '關': '关',
+    '閉': '闭', '處': '处', '報': '报', '貨': '货', '驗': '验',
+    '證': '证', '識': '识', '別': '别', '囉': '罗', '哈': '哈',
+    '囉嗦': '罗嗦',
+  };
+
+  private normalizeZhVariants(s: string): string {
+    let out = '';
+    for (const ch of s) {
+      out += ReplyExecutorService.TC_TO_SC[ch] ?? ch;
+    }
+    return out;
+  }
+
   private tokenize(s: string): Set<string> {
+    // 2026-04-28 · 先做简繁归一化 (修 "妳好" 跟 "你好" 不识别 bug)
+    const normalized0 = this.normalizeZhVariants(s);
     // 简单切词: 中文按字 · 英文按词
     const tokens = new Set<string>();
-    const normalized = s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ');
+    const normalized = normalized0.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ');
     // 英文词
     for (const m of normalized.matchAll(/[a-z]{2,}|\d+/g)) {
       tokens.add(m[0]);
