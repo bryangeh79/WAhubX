@@ -280,6 +280,51 @@ export class SlotsService {
   //   - 此监听捕获该事件 · 看 slot.account_id 是否已绑 · 是 → 触发 startBind (rehydrate 路径)
   //   - 不绑 (account_id=null) → 跳, 等用户手动扫码
   //   - 配合 runtime-process-manager 全 active 号常驻 · slot 起来即用
+  // 2026-04-28 · 客服号 24h online 自愈 (用户硬要求)
+  //   触发: WA Web "Use here" 顶号 / chat-list 60s 不见 → emit connection-close category=wa-logged-out
+  //   行为:
+  //     - 客服号 (role=customer_service): 8s 后自动 startBind · IndexedDB 仍在则直接 rehydrate; 失效则进 qr 等扫码
+  //     - 广告号 (broadcast): 不自动重连 · 避免触发 WA 风控 (短时间反复重连嫌疑)
+  @OnEvent('runtime.bridge.connection-close')
+  async onRuntimeConnectionClose(evt: {
+    slotId: number;
+    category: 'page-closed' | 'browser-disconnected' | 'wa-logged-out' | 'runtime-fatal';
+    reason: string;
+  }): Promise<void> {
+    try {
+      // wa-logged-out 才自愈 (其他类: 进程死了 · C1 auto-respawn 接管)
+      if (evt.category !== 'wa-logged-out') return;
+      const slot = await this.slotRepo.findOne({ where: { id: evt.slotId } });
+      if (!slot) return;
+      if (slot.role !== AccountSlotRole.CustomerService) {
+        this.logger.log(
+          `slot ${evt.slotId} (broadcast) wa-logged-out · 不自动重连 (避免触发 WA 风控) · 等手动`,
+        );
+        return;
+      }
+      if (!slot.accountId) {
+        this.logger.log(`slot ${evt.slotId} (CS) wa-logged-out · 未绑账号 · 跳`);
+        return;
+      }
+      this.logger.log(
+        `slot ${evt.slotId} (CS) wa-logged-out · 8s 后自动 startBind 重连 · IndexedDB 在则直接 rehydrate`,
+      );
+      await new Promise((r) => setTimeout(r, 8_000));
+      try {
+        await this.runtimes.runtimeFor(slot).startBind(evt.slotId);
+        this.logger.log(`slot ${evt.slotId} (CS) wa-logged-out · 自愈 startBind dispatched`);
+      } catch (err) {
+        this.logger.warn(
+          `slot ${evt.slotId} (CS) wa-logged-out 自愈失败: ${err instanceof Error ? err.message : err} · 等下次 wa-logged-out 或 runtime crash 重启`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `slot ${evt.slotId} connection-close handler 异常: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
   @OnEvent('runtime.bridge.runtime-online')
   async onRuntimeOnline(evt: { slotId: number; tenantId: number }): Promise<void> {
     try {

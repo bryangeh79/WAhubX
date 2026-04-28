@@ -33,6 +33,7 @@ import { resolveRuntimeLaunchConfig, type RuntimeLaunchConfig } from '@wahubx/sh
 import {
   AccountSlotEntity,
   AccountSlotStatus,
+  AccountSlotRole,
 } from '../slots/account-slot.entity';
 import { ProxyEntity } from '../proxies/proxy.entity';
 import {
@@ -133,10 +134,29 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
         return;
       }
 
-      // stagger 间隔 (Codex 边界 3): 默认 5s · env 可调 · 范围 3-30s
+      // 2026-04-28 · 客服号优先 spawn (用户硬要求 · 客服号 24h online 必须最先 ready)
+      //   排序规则:
+      //     1. customer_service role 排最前 (每 tenant 唯一 · §D11-1)
+      //     2. 同 role 按 slot id ASC (向后兼容)
+      //   间隔策略:
+      //     - 客服号 → 客服号 之间 1s (尽快铺完所有 tenant 的客服号)
+      //     - 客服号 → broadcast 切换 第一个 broadcast 间隔正常 5s
+      //     - broadcast → broadcast 之间 5s (避免 chromium 启动并发风暴 + WA 风控)
+      eligible.sort((a, b) => {
+        const aIsCs = a.role === AccountSlotRole.CustomerService ? 0 : 1;
+        const bIsCs = b.role === AccountSlotRole.CustomerService ? 0 : 1;
+        if (aIsCs !== bIsCs) return aIsCs - bIsCs;
+        return a.id - b.id;
+      });
+
       const intervalRaw = this.config.get<string>('AUTO_SPAWN_INTERVAL_MS', '5000');
-      const interval = Math.max(3_000, Math.min(30_000, parseInt(intervalRaw, 10) || 5_000));
-      this.logger.log(`D12-3 auto-spawn 间隔 ${interval}ms · 启动顺序 = slot id ASC`);
+      const broadcastInterval = Math.max(3_000, Math.min(30_000, parseInt(intervalRaw, 10) || 5_000));
+      const csIntervalRaw = this.config.get<string>('AUTO_SPAWN_CS_INTERVAL_MS', '1000');
+      const csInterval = Math.max(500, Math.min(10_000, parseInt(csIntervalRaw, 10) || 1_000));
+      const csCount = eligible.filter((s) => s.role === AccountSlotRole.CustomerService).length;
+      this.logger.log(
+        `D12-3 auto-spawn 间隔 cs=${csInterval}ms broadcast=${broadcastInterval}ms · 客服号优先 (${csCount} 个)`,
+      );
 
       for (let i = 0; i < eligible.length; i++) {
         const slot = eligible[i];
@@ -150,14 +170,19 @@ export class RuntimeProcessManagerService implements OnModuleInit, OnModuleDestr
             `D12-3 auto-spawn ${order} · slot ${slot.id} · result=${state.status} pid=${state.pid ?? '?'}`,
           );
         } catch (err) {
-          // Codex 边界 4: 单 slot 起不来 · log + 继续 · 不重试不升级
           this.logger.error(
             { err: err instanceof Error ? err.message : err, slotId: slot.id },
             `D12-3 auto-spawn ${order} · slot ${slot.id} 启动失败 · 跳 · 继续下一个`,
           );
         }
-        // 最后一个不等
         if (i < eligible.length - 1) {
+          // 当前是客服号 → 下一个仍 1s; 切到 broadcast → 5s
+          const next = eligible[i + 1];
+          const interval =
+            slot.role === AccountSlotRole.CustomerService &&
+            next.role === AccountSlotRole.CustomerService
+              ? csInterval
+              : broadcastInterval;
           await new Promise((r) => setTimeout(r, interval));
         }
       }
