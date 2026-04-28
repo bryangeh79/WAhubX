@@ -14,7 +14,12 @@ import { KbProtectedEntity, ProtectedEntityType } from '../entities/kb-protected
 import { FileParserService } from './file-parser.service';
 import { PlatformAiService } from './platform-ai.service';
 import { AiTextService } from '../../ai/ai-text.service';
-import { STARTER_COMMON_FAQ, COMMON_KB_META } from '../data/starter-common-faq';
+import {
+  STARTER_COMMON_FAQ,
+  COMMON_KB_META,
+  resolveStarterTemplate,
+} from '../data/starter-common-faq';
+import { TenantEntity } from '../../tenants/tenant.entity';
 
 const DEFAULT_FAQ_QUOTA_PER_MONTH = 20;
 
@@ -33,6 +38,8 @@ export class KnowledgeBaseService {
     private readonly faqRepo: Repository<KbFaqEntity>,
     @InjectRepository(KbProtectedEntity)
     private readonly protectedRepo: Repository<KbProtectedEntity>,
+    @InjectRepository(TenantEntity)
+    private readonly tenantRepo: Repository<TenantEntity>,
     private readonly parser: FileParserService,
     private readonly platformAi: PlatformAiService,
     private readonly tenantAi: AiTextService,
@@ -628,6 +635,14 @@ ${material.slice(0, 8000)}
       await this.get(tenantId, kbId);
     }
 
+    // 2026-04-29 · V2.2 R2 · 取 tenant 名做占位符替换 context
+    const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+    const ctx = {
+      tenantName: tenant?.name ?? null,
+      companyName: tenant?.name ?? null, // V1 没单独 companyName 字段, 用 tenant.name
+      botName: 'AI 智能客服',              // V1 没单独 botName 字段, 默认值
+    };
+
     // 灌 FAQ · 跳已存在 question
     let inserted = 0;
     let skipped = 0;
@@ -637,12 +652,17 @@ ${material.slice(0, 8000)}
         skipped++;
         continue;
       }
+      // 2026-04-29 · V2.2 R2: answer 替换 {{companyName}} / {{tenantName}} / {{botName}}
+      const resolvedAnswer = resolveStarterTemplate(faq.answer, ctx);
+      // 2026-04-29 · V2.2 R3: variants 转 'var:xxx' tag (跟 generateFaqs 同款格式)
+      const variantTags = (faq.variants ?? []).map((v) => `var:${v.trim()}`).filter((t) => t.length > 4);
+      const finalTags = [...faq.tags, ...variantTags];
       await this.faqRepo.save(
         this.faqRepo.create({
           kbId,
           question: faq.question,
-          answer: faq.answer,
-          tags: faq.tags,
+          answer: resolvedAnswer,
+          tags: finalTags,
           status: 'enabled' as FaqStatus,
           source: 'manual_bulk' as FaqSource,
         }),
@@ -698,25 +718,49 @@ ${material.slice(0, 8000)}
       return { processed: 0, updated: 0, skipped: 0, failed: 0 };
     }
 
+    // 2026-04-29 · V2.2 R2 · 拿 tenant 名 + 准备占位符 ctx
+    //   AI 改写后仍可能写死产品名 (LLM 不一定遵守"通用风格" 指令)
+    //   双层保险:
+    //   1. system prompt 严格禁止写死产品名 (用通用代词或占位符)
+    //   2. 改写后做 sanity check: 答案含产品名时拒绝替换 · 保留原 starter
+    const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+    const tenantNameForCtx = tenant?.name ?? '本公司';
+    const productNamesInTenant = productKbs
+      .filter((k) => k.id !== kbId)
+      .map((k) => k.name.trim())
+      .filter((n) => n.length >= 2);
+
     let updated = 0;
     let failed = 0;
+    let rejectedHardcoded = 0; // 因写死产品名被拒的 FAQ 数
 
     // 3. 对每条 FAQ 调 AI 改写 (单条单调用 · 控成本 + 容错)
     for (const faq of starterFaqs) {
-      const systemPrompt = `你是一个客服 FAQ 优化助手. 根据公司业务上下文 · 把通用 FAQ 答案改写得更贴合公司. 要求:
+      const systemPrompt = `你是一个 SaaS 客服 FAQ 优化助手 · 帮 "${tenantNameForCtx}" 把通用 FAQ 答案改写得更贴合该公司业务.
+
+== 风格 ==
 - 友善亲切 · 口语化
 - 不超过 80 字
 - 保留关键引导信息 (如让用户提供订单号 / 转人工等)
 - 自然不生硬 · 不要太营销
-- 直接输出新答案 · 不要解释 · 不要 JSON`;
 
-      const userPrompt = `公司业务上下文:
+== 严格禁止 ==
+- **不要硬写具体产品名** · 用 "我们的产品" / "我们的服务" / "本公司" 等通用词代替
+- 即使业务上下文提到了多个产品名 · 也不要把产品名写进通用 FAQ 答案
+  (因为这条是通用 FAQ · 客户可能问任何产品)
+- 不报具体价格数字
+- 不承诺 100% / 保证 / 绝对
+
+== 输出 ==
+直接输出新答案文本 · 不要解释 · 不要 JSON`;
+
+      const userPrompt = `公司业务上下文 (仅供参考语气和定位 · 不要直接写进答案):
 ${businessContext.slice(0, 2000)}
 
 通用 FAQ 问题: ${faq.question}
 默认答案: ${faq.answer}
 
-请改写答案 (直接输出文本):`;
+请改写答案 (直接输出文本 · 不要写死任何产品名):`;
 
       try {
         const r = await this.tenantAi.chatWithTenant({
@@ -734,6 +778,21 @@ ${businessContext.slice(0, 2000)}
         // 简单 sanity: 长度 + 防 AI 输出明显格式错误
         if (newAnswer.length < 5 || newAnswer.length > 500) {
           failed++;
+          continue;
+        }
+        // 2026-04-29 · V2.2 R2 · sanity check: 防 AI 写死具体产品名
+        //   AI 偶尔不遵守"通用代词"指令 · 把 "FAhubX/WAhubX/M33" 写进答案
+        //   sanity: 答案含任何 productKbs[].name 关键词 → 拒绝替换 · 保留原 starter
+        const containsHardcodedProduct = productNamesInTenant.some((pn) => {
+          const lo = newAnswer.toLowerCase();
+          const lpn = pn.toLowerCase();
+          return lpn.length >= 3 && lo.includes(lpn);
+        });
+        if (containsHardcodedProduct) {
+          rejectedHardcoded++;
+          this.logger.warn(
+            `customizeStarterFaqs · faq ${faq.id} · AI 输出含硬编码产品名 · 拒绝替换 · 保留原 starter answer`,
+          );
           continue;
         }
         // 截 200 字防 guardrail
@@ -755,7 +814,7 @@ ${businessContext.slice(0, 2000)}
     }
 
     this.logger.log(
-      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} processed=${starterFaqs.length} updated=${updated} failed=${failed}`,
+      `customizeStarterFaqs · tenant=${tenantId} kb=${kbId} processed=${starterFaqs.length} updated=${updated} failed=${failed} rejectedHardcoded=${rejectedHardcoded}`,
     );
     return {
       processed: starterFaqs.length,
