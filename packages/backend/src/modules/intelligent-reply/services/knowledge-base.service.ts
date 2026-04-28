@@ -360,8 +360,13 @@ export class KnowledgeBaseService {
     //   - 区分公司通用 KB 跟产品 KB · 通用 KB 出客服话术 (问候/转人工/价格反问/营业时间), 产品 KB 出产品专属 FAQ
     //   - 风格: 口语化 + 销售引导 + 不报价
     //   - 兼容存储: variants/intent/handoff_action/follow_up_question/risk_level 全部塞 tags 字段
-    //     格式: ['intent:pricing', 'handoff:if_no_price', 'risk:medium', 'fu:请问您想管理多少个号', 'var:多少钱', 'var:这个价位怎么样', 'var:报价', 'product_intro']
+    //     格式: ['intent:pricing', 'handoff:if_no_price', 'risk:medium', 'fu:具体哪方面价格?', 'var:多少钱', 'var:报价', 'var:价位怎么样', 'product_intro']
+    //     (上面这些只是数据格式示例 · 实际 LLM 生成的 var/fu 内容由当前 KB 资料决定 · 不绑定 WAhubX 平台)
     //     reply-executor.matchFaq 解析时把 var: 前缀的当 variant 参与匹配
+    // 2026-04-29 · SaaS 边界修正:
+    //   去掉 "会不会被封 / VPN / IP / 数据安全" 这种 WhatsApp/Facebook 自动化
+    //   产品特有疑虑. 改成通用模板 (常见疑虑由 LLM 看 ${kb.name} 实际资料推断).
+    //   适用场景包括: 美容/课程/地产/SaaS 软件/电商等任意行业.
     const isCompanyCommonKb = kb.isDefault;
     const kbScopeBlock = isCompanyCommonKb
       ? `**这是公司通用 KB · 你要生成"客服通用话术 FAQ"** (不是产品介绍):
@@ -376,16 +381,16 @@ export class KnowledgeBaseService {
 - 道别 / 感谢
 **不要生成产品具体功能 FAQ** (那是产品 KB 的工作)`
       : `**这是产品 KB ("${kb.name}") · 你要生成"该产品专属 FAQ"**:
-- 这个产品是做什么的 / 主要功能
-- 适合什么客户 / 使用场景
-- 套餐 / 方案区别
-- 风险说明 / 安全性
-- 开通流程 / 怎么使用 / 上手要多久
-- 技术细节 (产品资料里写了的)
-- 常见疑虑 (会不会被封 / VPN / IP / 数据安全)
+- 这个产品/服务是做什么的 / 主要价值
+- 适合什么客户 / 典型使用场景
+- 套餐 / 方案 / 包装区别 (如果资料里有)
+- 流程: 怎么开始 / 怎么使用 / 多久见效或上手
+- 客户常见疑虑 (从资料推断 · 例如效果 / 周期 / 成本 / 服务范围 / 售后保障 / 风险)
+- 注意: 不要从其他行业经验照搬话题 · 严格根据下面的"参考资料"生成
 **不要生成通用客服 FAQ** (问候 / 营业时间 / 联系方式 → 公司通用 KB 的工作)`;
 
     const systemPrompt = `你是资深 WhatsApp 客服话术设计师, 帮 SaaS 公司生成"成交型 FAQ" (不是说明书摘抄).
+你支持任意行业租户 (美容 / 课程 / 地产 / SaaS / 电商等), 客户问题和答案要严格基于本次提供的"参考资料", 不要套用其他行业模板.
 风格底线:
 - 中文口语化 · 像真人客服微信聊天
 - 答完带一个自然追问 (推动客户继续说话)
@@ -394,7 +399,7 @@ export class KnowledgeBaseService {
 - 不承诺 100% / 保证 / 绝对
 - 资料里有的联系方式原样保留
 - 资料里没有的价格 → 引导留联系方式 + 转人工 (不能编)
-- 销售导向: 客户一表现兴趣就引导留 WhatsApp / 公司名 / 账号需求量`;
+- 销售导向: 客户一表现兴趣就引导留联系方式 (具体问什么 — 例如班次 / 项目预算 / 使用规模 / 客户人数 — 由资料决定)`;
 
     const userPrompt = `
 业务目标: ${goal}
@@ -412,7 +417,7 @@ ${material.slice(0, 8000)}
   "canonical_question": "标准问题 (15 字以内 · 口语化)",
   "variants": ["客户可能这样问 1", "客户可能这样问 2", "客户可能这样问 3"],
   "answer": "亲切口语化答案 (≤120 字 · 含 emoji · 末尾带追问)",
-  "intent": "greeting | product_intro | pricing | package | demo | setup | risk | vpn_ip | technical_support | refund | payment | complaint | human_agent | off_topic | unclear | lead_collection",
+  "intent": "greeting | product_intro | pricing | package | demo | setup | risk | technical_support | refund | payment | complaint | human_agent | off_topic | unclear | lead_collection",
   "handoff_action": "none | always | if_no_price | if_uncertain",
   "follow_up_question": "答完之后的自然追问",
   "risk_level": "low | medium | high",
@@ -422,8 +427,8 @@ ${material.slice(0, 8000)}
 要求:
 - variants 至少 3 个 · 涵盖客户真实可能的问法 (不是改写 canonical_question · 是不同表达)
 - 价格相关问题 handoff_action 设 "if_no_price"
-- demo / 购买 / 投诉 / 退款 / 付款 / 账号异常类 handoff_action 设 "always"
-- 风险话题 (会不会封号 / VPN / IP) risk_level 设 "high"
+- demo / 购买 / 投诉 / 退款 / 付款 / 服务出问题 类 handoff_action 设 "always"
+- 风险/疑虑话题 (具体例子 由"参考资料"决定 · 不要套用其他行业的疑虑) risk_level 设 "high"
 - 销售场景 (客户表达兴趣 / 询价) intent 设 "lead_collection" 或 "pricing"
 
 返回:

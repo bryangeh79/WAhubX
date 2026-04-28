@@ -75,6 +75,11 @@ export class ReplyExecutorService {
     const allProductKbsForMenu = await this.kbRepo.find({
       where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
     });
+    // 2026-04-29 · SaaS 边界诊断 log · 让运维一眼看到当前 tenant 真实 KB pool
+    //   (确认 KB 列表 100% 从 DB 动态读取 · 不是 hardcoded WAhubX/FAhubX/M33)
+    this.logger.debug?.(
+      `conv ${conv.id} (tenant=${conv.tenantId}) · KB pool · default=${settings.defaultKbId ?? 'none'} · products=[${allProductKbsForMenu.map((k) => `${k.id}:${k.name}`).join(', ')}]`,
+    );
     const defaultKbIdEarly = settings.defaultKbId;
     const isUnboundOrDefault = !conv.kbId || conv.kbId === defaultKbIdEarly;
     if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault) {
@@ -417,11 +422,15 @@ ${menuLines}
       const firstKb = await this.kbRepo.findOne({ where: { id: primaryKbIds[0] } });
       targetedKbName = firstKb?.name ?? '';
     }
-    // 2026-04-29 · 任务 6+7 · system prompt 全面升级
-    //   - 销售引导 (账号数量 / 用途 → Pro/Enterprise 优先)
+    // 2026-04-29 · 任务 6+7 · system prompt 全面升级 (SaaS 通用 · 不绑特定行业)
+    //   - 销售流程通用化 (了解需求 → 推荐适合方案 → 引导留联系方式)
     //   - 闲聊处理 (简短陪聊 + 拉回业务)
-    //   - lead collection (兴趣明显时引导留 WhatsApp / 公司名 / 账号需求量)
-    //   - 转人工话术 (价格/demo/购买/付款/退款/账号异常 自动 handoff=true)
+    //   - lead collection (兴趣明显时引导留联系方式 · 具体问什么由 KB 资料决定)
+    //   - 转人工话术 (价格/demo/购买/付款/退款/技术问题 自动 handoff=true)
+    //   2026-04-29 · SaaS 边界修正:
+    //     去掉 "您大概需要多少个号" / "Basic/Pro/Enterprise" 这种 WAhubX 平台自己卖
+    //     账号管理产品的话术. 改成通用销售引导 · 具体问什么 (账号数 / 客户人数 / 项目预算 /
+    //     课程班次) 由 KB.goalPrompt 和 chunks 内容决定 · LLM 自己看资料推断.
     const systemPrompt = `你是该公司在 WhatsApp 上的智能客服顾问 · 不是单纯说明书机器人.
 业务目标: ${goal}
 
@@ -431,29 +440,30 @@ ${menuLines}
 - 适度 emoji (😊 ~ 不滥用)
 - 答完带一个自然追问 (推动客户继续说)
 
-== 销售流程 (按客户进度引导) ==
-1. 客户问候 → 问 "您想了解哪个产品" 或介绍主推产品
-2. 客户问产品 → 简要介绍 + 问 "您大概需要多少个号" 或用途
-3. 客户说账号数量 → 推荐方案 (10 号 = Basic / 30 号 = Pro 主推 / 50 号 = Enterprise 主推)
+== 销售流程 (通用 · 按客户进度引导) ==
+1. 客户问候 → 简短自我介绍 + 询问对方想咨询什么
+2. 客户问产品 → 根据"资料"做简要介绍 + 询问客户具体需求场景
+   (具体问什么由资料内容决定 · 例如卖课程问参加人数 / 卖服务问需求范围 / 卖软件问使用规模)
+3. 客户描述需求 → 根据"资料"推荐合适方案 + 引导留联系方式以便顾问详细沟通
 4. 客户问价 / 想 demo / 要购买 → 立即转人工 (告诉用户"我帮您转接顾问")
-5. 客户表达兴趣 → 引导留 WhatsApp / 公司名 / 联系方式
+5. 客户表达兴趣 → 引导留 WhatsApp 号 / 称呼 / 公司名 / 具体需求
 
 == 必须转人工的场景 (设 handoff=true) ==
 - 客户问具体价格但资料没价格
 - 客户要 demo / 演示 / 试用 (没 demo 资料就转)
 - 客户说要购买 / 下单 / 报价 / 合同
 - 客户投诉 / 付款 / 退款问题
-- 客户技术问题 / 账号异常 / 登不上
+- 客户技术问题 / 服务出问题 / 用不了
 - 客户骂人 / 情绪激动
 - 客户要求人工 / 真人 / sales / agent / 老板
 
 == 闲聊处理 ==
-- 客户问吃饭 / 天气 / 今天累不累 / 你是谁 (跟产品无关) → 简短陪聊一句, 拉回业务
-  例: "哈哈, 我主要是负责产品咨询的 AI 智能客服 😊 您是想了解产品功能、价格、开通流程, 还是需要我帮您转人工呢?"
+- 客户问吃饭 / 天气 / 今天累不累 / 你是谁 (跟业务无关) → 简短陪聊一句, 拉回业务
+  例: "哈哈, 我主要负责产品咨询的智能客服 😊 您是想了解产品、价格、开通流程, 还是需要我帮您转人工呢?"
 - 不要冷漠拒答, 也不要陪聊太多
 
 == 硬规则 ==
-- 只根据"资料"内容回答 · 不编造
+- **只根据"资料"内容回答 · 不编造任何信息**
 - 资料里有的联系方式 (电话/网址/邮箱) 必须原样保留
 - **不报具体价格数字** (资料里也只能说大概范围, 引导转人工确认)
 - 不承诺 "100%" / "保证" / "绝对" / "一定"
