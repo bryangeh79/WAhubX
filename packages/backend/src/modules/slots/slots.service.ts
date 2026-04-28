@@ -9,6 +9,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { OnEvent } from '@nestjs/event-emitter';
 import { AccountSlotEntity, AccountSlotStatus, AccountSlotRole } from './account-slot.entity';
 import { WaAccountEntity } from './wa-account.entity';
@@ -1037,7 +1039,7 @@ export class SlotsService {
       await this.accountRepo.delete(accountIdToDelete);
     }
 
-    // 3. rm -rf data/slots/<slotIndex>/
+    // 3. rm -rf data/slots/<slotIndex>/  (老 baileys session 路径)
     const slotDir = getSlotDir(slot.slotIndex);
     try {
       if (fs.existsSync(slotDir)) {
@@ -1046,6 +1048,28 @@ export class SlotsService {
     } catch (err) {
       this.logger.warn(`slot ${id} 文件系统清理失败 (${slotDir}): ${err}`);
       // 不阻塞: DB 已清干净, 磁盘残留留给用户手工处理
+    }
+
+    // 4. 2026-04-28 · CRITICAL · rm -rf chromium puppeteer profile
+    //   Windows: %APPDATA%\wahubx\slots\<slotIndex>\
+    //   bug: 老代码只删 data/slots/ (baileys 时代) · 没动 AppData/wahubx/slots/
+    //        chromium profile (cookies/IndexedDB) 残留 → 下次扫码自动登录旧号
+    const idxPadded = String(slot.slotIndex).padStart(2, '0');
+    const chromiumSlotDir =
+      process.platform === 'win32'
+        ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'wahubx', 'slots', idxPadded)
+        : process.platform === 'darwin'
+          ? path.join(os.homedir(), 'Library', 'Application Support', 'wahubx', 'slots', idxPadded)
+          : null; // linux: 跟 dataDir 同根 · 上面 step 3 已清
+    if (chromiumSlotDir) {
+      try {
+        if (fs.existsSync(chromiumSlotDir)) {
+          fs.rmSync(chromiumSlotDir, { recursive: true, force: true });
+          this.logger.log(`slot ${id} chromium profile 已清: ${chromiumSlotDir}`);
+        }
+      } catch (err) {
+        this.logger.warn(`slot ${id} chromium profile 清理失败 (${chromiumSlotDir}): ${err}`);
+      }
     }
 
     this.logger.log(`Cleared slot ${id} (tenant ${slot.tenantId}, index ${slot.slotIndex})`);
