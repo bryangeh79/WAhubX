@@ -15,8 +15,14 @@ import { ReplyExecutorService } from './reply-executor.service';
 
 // 硬编码常量 (不给租户改)
 const AGGREGATION_WINDOW_MS = 8000;
-const RATE_30MIN_MS = 30 * 60 * 1000;
-const RATE_24H_LIMIT = 3;
+// 2026-04-28 · 限速放宽 · 老值太狠 turn-by-turn 客服对话被屏蔽
+//   老 30min 只回 1 次 · 客户连问 3 个问题只能答第 1 个 · 体验差
+//   新 3s · 仅 debounce 同一 burst (8s 聚合后正常回 turn-by-turn)
+//   老 24h 只回 3 次 · 真客户咨询场景动辄 5-10 轮 · 不够
+//   新 24h 30 条 · 配合 tenant_reply_settings.daily_ai_reply_limit (默认 200)
+//     双层保险: 单对话 30 + 全租户 daily limit
+const RATE_DEBOUNCE_MS = 3_000;
+const RATE_24H_LIMIT = 30;
 const HANDOFF_KEYWORDS_LEVEL1 = [
   '投诉', '退款', '退货', '律师', '报警', '骂', '操', '傻逼', '滚', '垃圾', '骗子',
   'scam', 'refund', 'lawyer', 'sue',
@@ -113,7 +119,7 @@ export class AutoReplyDeciderService {
       await this.convRepo.save(conv);
 
       // 闸门 5 · 频率限流
-      if (conv.lastAiReplyAt && Date.now() - conv.lastAiReplyAt.getTime() < RATE_30MIN_MS) {
+      if (conv.lastAiReplyAt && Date.now() - conv.lastAiReplyAt.getTime() < RATE_DEBOUNCE_MS) {
         this.logger.debug(`conv ${conv.id} · 30min 内已回过 · 跳`);
         return;
       }
