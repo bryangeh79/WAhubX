@@ -67,7 +67,72 @@ export interface InboundWatcherOptions {
 const DEFAULT_DEDUPE_WINDOW_MS = 60_000;
 
 /**
+ * 检查 page 上 watcher 是否健康 (observer + pollTimer 都还在 + chat-list pane 存在)
+ *
+ * 2026-04-28 · 用户 live 取证根因:
+ *   WA Web 全页 reload / Use here / 重连 → page context 重置 →
+ *   __wahubxObserver / __wahubxPollTimer 都没了 (但 exposeFunction 装的 callback 跨 navigation 保留) →
+ *   runtime 看 inboundUninstall != null 以为还装着 → 假在线 (再也不收新消息)
+ *
+ * 修法: 30s 周期 + framenavigated 触发 · 调本函数 · 不健康就 reinstall
+ */
+export async function isWatcherHealthy(page: Page): Promise<{
+  ok: boolean;
+  reason?: string;
+  hasObserver: boolean;
+  hasPollTimer: boolean;
+  hasCallback: boolean;
+  hasChatListPane: boolean;
+}> {
+  try {
+    return await page.evaluate(() => {
+      const w = window as unknown as {
+        __wahubxObserver?: MutationObserver | null;
+        __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+        __wahubxOnIncoming?: unknown;
+      };
+      const hasObserver = !!w.__wahubxObserver;
+      const hasPollTimer = !!w.__wahubxPollTimer;
+      const hasCallback = typeof w.__wahubxOnIncoming === 'function';
+      const PANE_SELECTORS = [
+        '[data-testid="chat-list"]',
+        '#pane-side',
+        'div[role="grid"][aria-label*="Chat"]',
+      ];
+      let hasPane = false;
+      for (const sel of PANE_SELECTORS) {
+        if (document.querySelector(sel)) {
+          hasPane = true;
+          break;
+        }
+      }
+      const ok = hasObserver && hasPollTimer && hasCallback && hasPane;
+      let reason: string | undefined;
+      if (!hasPane) reason = 'chat-list pane missing';
+      else if (!hasCallback) reason = 'callback missing';
+      else if (!hasObserver) reason = 'observer missing (WA Web reload?)';
+      else if (!hasPollTimer) reason = 'pollTimer missing (WA Web reload?)';
+      return { ok, reason, hasObserver, hasPollTimer, hasCallback, hasChatListPane: hasPane };
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `evaluate failed: ${err instanceof Error ? err.message : err}`,
+      hasObserver: false,
+      hasPollTimer: false,
+      hasCallback: false,
+      hasChatListPane: false,
+    };
+  }
+}
+
+/**
  * 安装 inbound watcher · 必须在 chat-list 状态调
+ *
+ * 2026-04-28 · 改 reentrant:
+ *   - 先看 page 端 observer/pollTimer 是否还在 (page reload 后会丢)
+ *   - exposeFunction 已装过抛 'Failed to add page binding' · 用 try/catch 吃掉
+ *   - page.evaluate 重新装 observer + pollTimer (之前的 exposeFunction 还在 · callback 不重)
  */
 export async function installInboundWatcher(
   page: Page,
@@ -80,7 +145,23 @@ export async function installInboundWatcher(
   const diagCallbackName = '__wahubxOnDiag';
   const dedupeMap = new Map<string, number>();
 
-  await page.exposeFunction(callbackName, (raw: unknown) => {
+  // 2026-04-28 · 重装时 exposeFunction 会抛 "Failed to add page binding" · 吃掉
+  //   exposeFunction 是 puppeteer 跨 navigation 自动重 wire 的 · 不需要重装
+  //   但 page reload 后 page.evaluate 装的 observer/pollTimer 没了 · 需要重装
+  const tryExpose = async (name: string, fn: (raw: unknown) => void): Promise<void> => {
+    try {
+      await page.exposeFunction(name, fn);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Failed to add page binding') || msg.includes('already exists')) {
+        opts.log.debug?.({ name }, 'inbound watcher · exposeFunction already installed (重装走重 evaluate)');
+        return;
+      }
+      throw err;
+    }
+  };
+
+  await tryExpose(callbackName, (raw: unknown) => {
     try {
       const hint = raw as IncomingMessageHint;
       if (!hint || typeof hint !== 'object') return;
@@ -105,7 +186,7 @@ export async function installInboundWatcher(
   });
 
   // 2026-04-28 · Codex P0-1 · 诊断回调 · pollScan 第一次跑发一次概况 + selector 失效时再发
-  await page.exposeFunction(diagCallbackName, (raw: unknown) => {
+  await tryExpose(diagCallbackName, (raw: unknown) => {
     try {
       const d = raw as {
         paneFound: boolean;
@@ -125,10 +206,23 @@ export async function installInboundWatcher(
   // 这个脚本在 page context 跑 · 不能用 Node API · 不能 import
   await page.evaluate(
     (cbName: string, diagName: string) => {
-      const w = window as unknown as { [k: string]: unknown };
+      const w = window as unknown as { [k: string]: unknown } & {
+        __wahubxObserver?: MutationObserver | null;
+        __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+      };
       const cb = w[cbName] as ((hint: unknown) => void) | undefined;
       const diag = w[diagName] as ((d: unknown) => void) | undefined;
       if (!cb) return;
+
+      // 2026-04-28 · 重装时先清旧 · 防 leak
+      if (w.__wahubxObserver) {
+        try { w.__wahubxObserver.disconnect(); } catch { /* ignore */ }
+        w.__wahubxObserver = null;
+      }
+      if (w.__wahubxPollTimer) {
+        try { clearInterval(w.__wahubxPollTimer); } catch { /* ignore */ }
+        w.__wahubxPollTimer = null;
+      }
 
       const PANE_SELECTORS = [
         '[data-testid="chat-list"]',

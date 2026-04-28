@@ -12,6 +12,7 @@
 
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import type { Frame } from 'puppeteer-core';
 import pino from 'pino';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -31,7 +32,7 @@ import {
   sendTextInOpenChat,
   sendMediaInOpenChat,
 } from './wa-web/actions';
-import { installInboundWatcher } from './wa-web/inbound-watcher';
+import { installInboundWatcher, isWatcherHealthy } from './wa-web/inbound-watcher';
 import { enterChat, readLatestMessages, exitChat, type HighFidelityMessage } from './wa-web/chat-reader';
 // 2026-04-26 · D11 · WA Status / Profile actions
 import { postStatusText, postStatusMedia, browseStatuses, reactStatuses } from './wa-web/status';
@@ -580,8 +581,28 @@ async function main() {
     }
   };
 
-  const installInboundWatcherIfNeeded = async (): Promise<void> => {
-    if (inboundUninstall) return; // 已装
+  // 2026-04-28 · 用户 live 取证根因:
+  //   WA Web 全页 reload / Use here / 重连 → page.evaluate 装的 observer/pollTimer 没了
+  //   但 exposeFunction 装的 callback 还在 + inboundUninstall 不为 null
+  //   → runtime 以为还装着 · 永不重装 · 假在线
+  // 修法:
+  //   - reinstallInboundWatcher() · 不再因 inboundUninstall 已存在就 skip
+  //   - 30s healthcheck timer · isWatcherHealthy 检查 page 端 observer/pollTimer 还在不在
+  //   - page.on('framenavigated') · main frame 重新导航时强制重装
+  let inboundWatcherHealthcheckTimer: NodeJS.Timeout | null = null;
+
+  const installInboundWatcherIfNeeded = async (force = false): Promise<void> => {
+    if (inboundUninstall && !force) {
+      // 检查 page 端是否健康 · 不健康强制重装
+      const health = await isWatcherHealthy(page);
+      if (health.ok) return; // 健康 · 不重装
+      log.warn(
+        { reason: health.reason, hasObserver: health.hasObserver, hasPollTimer: health.hasPollTimer, hasCallback: health.hasCallback, hasChatListPane: health.hasChatListPane },
+        'inbound watcher · page 端不健康 · 重装',
+      );
+      // 旧 uninstall 引用已死 · 直接清掉重新走装
+      inboundUninstall = null;
+    }
     try {
       const { uninstall } = await installInboundWatcher(page, {
         log,
@@ -624,6 +645,59 @@ async function main() {
       );
     }
   };
+
+  // 2026-04-28 · watcher 30s healthcheck + framenavigated 监听
+  //   触发场景:
+  //     - WA Web 自动 reload (idle / Use here)
+  //     - "Don't close this window. Your messages are downloading." 进度条
+  //     - 网络断开重连
+  //   行为:
+  //     - 30s 周期调 isWatcherHealthy · 不健康 reinstall
+  //     - main frame navigated · 立刻 reinstall (不等下次 tick)
+  const startInboundWatcherHealthcheck = (): void => {
+    if (inboundWatcherHealthcheckTimer) return;
+    log.info('inbound watcher healthcheck STARTED · 30s 周期 · WA Web reload 后自动重装');
+    inboundWatcherHealthcheckTimer = setInterval(() => {
+      void (async () => {
+        if (g_state !== 'chat-list') return;
+        try {
+          const health = await isWatcherHealthy(page);
+          if (!health.ok) {
+            log.warn(
+              { reason: health.reason, ...health },
+              'watcher healthcheck · 不健康 · 触发重装',
+            );
+            inboundUninstall = null;
+            await installInboundWatcherIfNeeded(true);
+          }
+        } catch (err) {
+          log.warn(
+            { err: err instanceof Error ? err.message : err },
+            'watcher healthcheck tick failed',
+          );
+        }
+      })();
+    }, 30_000);
+  };
+  const stopInboundWatcherHealthcheck = (): void => {
+    if (inboundWatcherHealthcheckTimer) {
+      clearInterval(inboundWatcherHealthcheckTimer);
+      inboundWatcherHealthcheckTimer = null;
+      log.info('inbound watcher healthcheck STOPPED');
+    }
+  };
+
+  // page main frame 重 nav (WA Web reload / Use here) · 立刻 mark watcher 失效
+  page.on('framenavigated', (frame: Frame) => {
+    if (frame !== page.mainFrame()) return;
+    log.warn(
+      { url: frame.url() },
+      'page main frame navigated · WA Web reload? · mark inbound watcher 失效',
+    );
+    // 不立即重装 (让 runBindFlow / chatList watchdog 等 chat-list 真出现再装)
+    // 但 inboundUninstall 引用要清 · 让下次 healthcheck / installInboundWatcherIfNeeded 真重装
+    inboundUninstall = null;
+  });
 
   // 2026-04-25 · D8-3 · chat-list watchdog · 监 WA 主动踢号
   // 30s 周期 · chat-list 选择器消失 = WA logged out · 立刻推 connection-close
@@ -749,6 +823,7 @@ async function main() {
       // (老逻辑只在 SOAK_MODE · 单次绑测 / T2.x 必无掉线感知)
       startChatListWatchdog();
       startHeartbeatKeepalive();
+      startInboundWatcherHealthcheck();
       return { outcome: 'rehydrated' };
     }
 
@@ -1353,6 +1428,7 @@ async function main() {
   const shutdown = async (signal: string): Promise<void> => {
     log.warn({ signal, fsmState: fsm.state }, 'shutdown signal received');
     if (idleScheduler) idleScheduler.stop();
+    stopInboundWatcherHealthcheck();
     if (inboundUninstall) {
       try {
         await inboundUninstall();

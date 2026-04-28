@@ -220,9 +220,54 @@ export async function sendTextInOpenChat(
         /* ignore */
       }
     }
+    // 2026-04-28 · 用户 live 取证后续 P0:
+    //   tick 没出来不能再"无脑当成功" · 加 input 是否真清空 二次验证
+    //   - input 真清空 → 大概率发出去了 (WA Web 发出后 input 自动清) · ok=true unconfirmed=true
+    //   - input 还有残留 → Enter 没生效 / typing 卡 · ok=false 让上层重试
+    let inputCleared = false;
+    let inputRemainder = '';
+    try {
+      const inputProbe = await page.evaluate((selectors: string[]) => {
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (!el) continue;
+          const t = (el.textContent ?? '').trim();
+          return { found: true, text: t };
+        }
+        return { found: false, text: '' };
+      }, WA_SELECTORS.messageInput);
+      if (inputProbe.found) {
+        inputRemainder = inputProbe.text;
+        inputCleared = inputRemainder === '';
+      } else {
+        // input 都没了 · 可能进度页 / 主页 reload · 视作未确认但不当 fail (留 unconfirmed)
+        inputCleared = true;
+        inputRemainder = '<input element gone>';
+      }
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        'D10 sendText · input 二次验证 evaluate 失败 · 走严判 (ok=false)',
+      );
+      inputCleared = false;
+    }
+
+    if (!inputCleared) {
+      log.error(
+        { confirmTimeoutMs, pseudoMessageId, inputRemainder: inputRemainder.slice(0, 80) },
+        'D10 sendText · tick 未出 + input 仍有残留 · 判定发送失败 · 上层应重试',
+      );
+      return {
+        ok: false,
+        pseudoMessageId: null,
+        error: `send unconfirmed and input not cleared (remainder=${inputRemainder.slice(0, 40)})`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     log.warn(
-      { confirmTimeoutMs, pseudoMessageId },
-      'D10 sendText · Enter 已按 · 但 tick 未在超时内出现 · 视作发送成功 (unconfirmed) · 用户手机端核对',
+      { confirmTimeoutMs, pseudoMessageId, inputRemainder },
+      'D10 sendText · tick 未出 但 input 已清空 · 视作发送成功 (unconfirmed) · 用户手机端核对',
     );
     return {
       ok: true,
