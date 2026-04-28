@@ -82,6 +82,48 @@ export class ReplyExecutorService {
     );
     const defaultKbIdEarly = settings.defaultKbId;
     const isUnboundOrDefault = !conv.kbId || conv.kbId === defaultKbIdEarly;
+
+    // 2026-04-29 · SaaS 测试 T7a 修 · 多产品菜单优先级降低
+    //   bug: 客户问 "你吃饭了吗" / "怎么联系" 等闲聊/通用问题 · 多产品 tenant 直接发菜单
+    //        正确: 通用 FAQ 先试一次 · 命中就答 (问候/闲聊/客气话/转人工等都该走通用 FAQ)
+    //   规则: 触发菜单前先扫一遍通用 KB FAQ · 命中 score >= FAQ_THRESHOLD 直接答 · 不发菜单
+    //   注: 这只挡 secondary KB FAQ · 产品 KB FAQ 仍走主流程 (KB pre-filter 优先)
+    let earlyCommonFaqMatch: { faq: KbFaqEntity; score: number; matchedVariant?: string } | null = null;
+    if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault && defaultKbIdEarly) {
+      earlyCommonFaqMatch = await this.matchFaq(defaultKbIdEarly, mergedQuestion);
+      if (earlyCommonFaqMatch && earlyCommonFaqMatch.score >= FAQ_MATCH_THRESHOLD) {
+        this.logger.log(
+          `conv ${conv.id} · 早期通用 FAQ 命中 kb=${defaultKbIdEarly} · score=${earlyCommonFaqMatch.score.toFixed(2)} · 跳过菜单 · 直接答 (问候/闲聊路径)`,
+        );
+        const faqMeta = ReplyExecutorService.extractFaqMeta(earlyCommonFaqMatch.faq.tags);
+        const replyText = this.applyGuardrail(
+          earlyCommonFaqMatch.faq.answer,
+          mergedQuestion,
+          defaultKbIdEarly,
+        );
+        await this.send(conv, replyText, {
+          mode: 'faq',
+          kbId: defaultKbIdEarly,
+          matchedFaqId: earlyCommonFaqMatch.faq.id,
+          confidence: earlyCommonFaqMatch.score,
+          intent: faqMeta.intent ?? 'faq_hit_common_early',
+          handoff: faqMeta.handoffAction === 'always',
+          metadata: {
+            matched_variant: earlyCommonFaqMatch.matchedVariant ?? null,
+            faq_intent: faqMeta.intent,
+            faq_handoff_action: faqMeta.handoffAction,
+            mode_resolved: 'common_kb_faq_early',
+            early_match_skip_menu: true,
+          },
+        });
+        await this.faqRepo.increment({ id: earlyCommonFaqMatch.faq.id }, 'hitCount', 1);
+        if (faqMeta.handoffAction === 'always') {
+          await this.markHandoff(conv, `faq handoff:always intent=${faqMeta.intent}`);
+        }
+        return;
+      }
+    }
+
     if (allProductKbsForMenu.length >= 2 && isUnboundOrDefault) {
       // (a) 看上一条 audit 是不是 product_menu_shown · 是的话尝试解析客户回复
       const lastNotice = await this.auditRepo
@@ -165,12 +207,38 @@ ${menuLines}
     const allProductKbs = await this.kbRepo.find({
       where: { tenantId: conv.tenantId, isDefault: false, status: 1 },
     });
+    // 2026-04-29 · SaaS 测试 T3 修 · KB pre-filter 中文产品名失效
+    //   bug: 老 normalize 只保留 a-z0-9 · 中文产品名 ("祛痘护理配套") normalize 后 = ""
+    //        中文租户 KB pre-filter 永远不命中 · 美容/课程/地产 全失效
+    //   修:
+    //     a) 保留中文字符 (替原 a-z0-9 limit) · 跟 parseProductMenuReply 一致
+    //     b) 子串包含逻辑: KB 名所有 ≥2 字符的子串中, 任一在 query 里 → 命中
+    //        客户问 "祛痘" · KB "祛痘护理配套" 子串含 "祛痘" → ✓
+    //        客户问 "想了解 fahubx" · KB "FAhubX" normalize="fahubx" 整体出现 → ✓
+    //        客户问 "塑形" · KB "身体塑形课程" 子串含 "塑形" → ✓
+    //   安全:
+    //     - 子串至少 2 字 (防单字误命中)
+    //     - 多 KB 命中合并为 primaryKbIds (跨 KB 检索)
     const normalizeForKbName = (s: string): string =>
-      s.toLowerCase().replace(/[^a-z0-9]/g, '');
+      s.toLowerCase().replace(/[^a-z0-9一-鿿]/g, '');
     const qNorm = normalizeForKbName(mergedQuestion);
+    const kbNameMatchesQuery = (kbNorm: string, qN: string): boolean => {
+      if (kbNorm.length < 2 || qN.length < 2) return false;
+      // 整词 includes (英文长名快路径)
+      if (qN.includes(kbNorm) || kbNorm.includes(qN)) return true;
+      // 子串扫描 · KB 名长度 N → 滑窗 2..N · 任一子串在 query 里 → 命中
+      const maxLen = Math.min(kbNorm.length, 8);
+      for (let len = maxLen; len >= 2; len--) {
+        for (let i = 0; i + len <= kbNorm.length; i++) {
+          const sub = kbNorm.substring(i, i + len);
+          if (qN.includes(sub)) return true;
+        }
+      }
+      return false;
+    };
     const hitKbsByName = allProductKbs.filter((k) => {
       const kbNorm = normalizeForKbName(k.name);
-      return kbNorm.length >= 3 && qNorm.includes(kbNorm);
+      return kbNameMatchesQuery(kbNorm, qNorm);
     });
     // 2026-04-28 · isKbExplicitlyTargeted · 客户消息含产品名时设 true
     //   后续低 RAG 分时不走 clarify · 仍喂该 KB chunks 给 LLM 答
