@@ -42,6 +42,9 @@ import { SelectProxyBeforeBindModal } from './bind/SelectProxyBeforeBindModal';
 import { ChatModal } from './chat/ChatModal';
 import { SimInfoModal } from './sim/SimInfoModal';
 import { SimInfoBulkModal } from './sim/SimInfoBulkModal';
+// 2026-04-29 · P0-CS-3 · 账号体检 + 一键恢复
+import { CheckupModal } from './slots/CheckupModal';
+import { RecoverModal } from './slots/RecoverModal';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -262,6 +265,9 @@ export function SlotsPage() {
   const [emptyExpanded, setEmptyExpanded] = useState(false);
   // 2026-04-22 · SIM 批量录入 Modal
   const [bulkSimOpen, setBulkSimOpen] = useState(false);
+  // 2026-04-29 · P0-CS-3 · 账号体检 + 一键恢复 modal
+  const [checkupOpen, setCheckupOpen] = useState(false);
+  const [recoverOpen, setRecoverOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -392,6 +398,24 @@ export function SlotsPage() {
             disabled={activeSlots.length === 0}
           >
             📝 批量填 SIM
+          </Button>
+          {/* 2026-04-29 · P0-CS-3 · 账号体检 + 一键恢复 */}
+          <Button
+            size="small"
+            onClick={() => setCheckupOpen(true)}
+            disabled={activeSlots.length === 0}
+            style={{ borderColor: '#1677ff', color: '#1677ff' }}
+          >
+            🩺 账号体检
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            onClick={() => setRecoverOpen(true)}
+            disabled={activeSlots.length === 0}
+            style={{ background: '#fa8c16', borderColor: '#fa8c16' }}
+          >
+            ⚡ 一键恢复
           </Button>
           <Button size="small" onClick={() => void load()} loading={loading}>刷新</Button>
         </Space>
@@ -746,6 +770,30 @@ export function SlotsPage() {
           phoneNumber: s.phoneNumber,
           status: s.status,
         }))}
+      />
+      {/* 2026-04-29 · P0-CS-3 · 账号体检 + 一键恢复 modal */}
+      <CheckupModal
+        open={checkupOpen}
+        onClose={() => setCheckupOpen(false)}
+        slots={activeSlots.map((s) => ({
+          id: s.id,
+          slotIndex: s.slotIndex,
+          role: s.role,
+          phoneNumber: s.phoneNumber,
+          status: s.status,
+        }))}
+      />
+      <RecoverModal
+        open={recoverOpen}
+        onClose={() => setRecoverOpen(false)}
+        slots={activeSlots.map((s) => ({
+          id: s.id,
+          slotIndex: s.slotIndex,
+          role: s.role,
+          phoneNumber: s.phoneNumber,
+          status: s.status,
+        }))}
+        onRecovered={() => void load()}
       />
       {groupEditor && (
         <GroupEditorModal

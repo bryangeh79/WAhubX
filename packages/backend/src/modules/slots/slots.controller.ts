@@ -24,6 +24,7 @@ import {
   type BulkUpdateItemDto,
 } from './sim-info.service';
 import { HandoverService } from './handover.service';
+import { SlotHealthService, type CheckupResult, type RecoverResult } from './slot-health.service';
 import { Res } from '@nestjs/common';
 import type { Response } from 'express';
 
@@ -33,6 +34,7 @@ export class SlotsController {
     private readonly slots: SlotsService,
     private readonly simInfo: SimInfoService,
     private readonly handover: HandoverService,
+    private readonly slotHealth: SlotHealthService,
   ) {}
 
   // ── 转出手机 · 导出备份 (2026-04-22) ──────────────────────
@@ -338,5 +340,35 @@ export class SlotsController {
   ) {
     const slot = await this.slots.findOne(id, cur.tenantId);
     return this.slots.getConnectionDiagnosis(id, slot);
+  }
+
+  // 2026-04-29 · P0-CS-3 · 账号体检 (12 项 check + 中文总结 + 建议动作)
+  // 仅诊断 · 不动 runtime / session · 写一行 recovery_audit (action_type='diagnose')
+  @Get(':id/checkup')
+  async checkup(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<CheckupResult> {
+    if (cur.tenantId == null) {
+      throw new BadRequestException('请切换到租户视角');
+    }
+    return this.slotHealth.runCheckup(id, cur.tenantId);
+  }
+
+  // 2026-04-29 · P0-CS-3 · 一键恢复 (单 slot 状态驱动)
+  // 状态驱动 · 不批量 · QR 不清 session · 重启只在 runtime 真坏时
+  @Post(':id/recover')
+  @HttpCode(HttpStatus.OK)
+  async recover(
+    @CurrentUser() cur: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<RecoverResult> {
+    if (cur.tenantId == null) {
+      throw new BadRequestException('请切换到租户视角');
+    }
+    // RequestUser.id 是 JWT subject (string · 可能含 prefix) · 尽力解析成 int
+    const parsedId = parseInt(cur.id ?? '', 10);
+    const operatorUserId = Number.isFinite(parsedId) ? parsedId : null;
+    return this.slotHealth.runRecover(id, cur.tenantId, operatorUserId);
   }
 }

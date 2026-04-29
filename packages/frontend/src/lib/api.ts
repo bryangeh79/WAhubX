@@ -154,3 +154,21 @@ export function extractErrorMessage(err: unknown, fallback = '请求失败'): st
   if (err instanceof Error) return err.message;
   return fallback;
 }
+
+// 2026-04-29 · P0-CS-3 · 账号体检 + 一键恢复 API client
+import type { CheckupResult, RecoverResult } from './slot-health-types';
+
+export const slotHealthApi = {
+  async checkup(slotId: number): Promise<CheckupResult> {
+    const res = await api.get<CheckupResult>(`/slots/${slotId}/checkup`, {
+      timeout: 30_000, // checkup 跑 4-5 个 SQL · 一般 < 1s
+    });
+    return res.data;
+  },
+  async recover(slotId: number): Promise<RecoverResult> {
+    const res = await api.post<RecoverResult>(`/slots/${slotId}/recover`, undefined, {
+      timeout: 60_000, // 含 stop+start runtime · 最长 ~30s
+    });
+    return res.data;
+  },
+};
