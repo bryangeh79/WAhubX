@@ -10,6 +10,7 @@ import { SlotsService } from './slots.service';
 import { SimInfoService } from './sim-info.service';
 import { HandoverService } from './handover.service';
 import { SlotHealthService } from './slot-health.service';
+import { CsGuardianService } from './cs-guardian.service';
 import { SlotsController } from './slots.controller';
 import { MessagingModule } from '../messaging/messaging.module';
 import { SlotRuntimeModule } from '../slot-runtime/slot-runtime.module';
@@ -33,7 +34,7 @@ import { RuntimeProcessModule } from '../runtime-process/runtime-process.module'
     // TakeoverModule is @Global · TakeoverLockService 自动可注入
   ],
   controllers: [SlotsController],
-  providers: [SlotsService, SimInfoService, HandoverService, SlotHealthService],
+  providers: [SlotsService, SimInfoService, HandoverService, SlotHealthService, CsGuardianService],
   exports: [SlotsService, SimInfoService, HandoverService, SlotHealthService, TypeOrmModule],
 })
 export class SlotsModule {}

@@ -169,6 +169,68 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
     return this.clients.get(slotId)?.lastPageState ?? null;
   }
 
+  // ═══ 2026-04-29 · P0.5-CS · 轻量 watcher 控制 RPC 包装 ═══
+  // 这些方法都是 sendCommand 的语义化包装 · 业务层 (slot-health / cs-guardian) 调这些
+  // 而不直接 sendCommand · 类型安全 + 集中错误处理
+
+  async getWatcherHealth(slotId: number): Promise<{
+    ok: boolean;
+    error?: string;
+    data?: {
+      installed: boolean;
+      healthy: boolean;
+      lastInstallAt?: number | null;
+      lastRescanAt?: number | null;
+      pageState?: string | null;
+      reason?: string;
+      hasObserver?: boolean;
+      hasPollTimer?: boolean;
+      hasCallback?: boolean;
+      hasChatListPane?: boolean;
+    };
+  }> {
+    if (!this.clients.has(slotId)) return { ok: false, error: 'runtime not connected' };
+    try {
+      const ack = await this.sendCommand<unknown>(slotId, { kind: 'cmd', type: 'get-watcher-health' });
+      return ack as { ok: boolean; error?: string; data?: never };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async reinstallWatcher(slotId: number, force = true): Promise<{ ok: boolean; error?: string; data?: { ok: boolean; installed: boolean; reason?: string; pageState?: string | null } }> {
+    if (!this.clients.has(slotId)) return { ok: false, error: 'runtime not connected' };
+    try {
+      // 注: TS Omit<discriminated-union, 'k'> 不保留判别 · 用 unknown 中转
+      const cmd = { kind: 'cmd', type: 'reinstall-watcher', force } as unknown as Omit<RuntimeCommand, 'requestId'>;
+      const ack = await this.sendCommand<unknown>(slotId, cmd);
+      return ack as { ok: boolean; error?: string; data?: never };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async rescanInbound(slotId: number): Promise<{ ok: boolean; error?: string; data?: { ok: boolean; triggered: boolean; reason?: string; pageState?: string | null } }> {
+    if (!this.clients.has(slotId)) return { ok: false, error: 'runtime not connected' };
+    try {
+      const ack = await this.sendCommand<unknown>(slotId, { kind: 'cmd', type: 'rescan-inbound' });
+      return ack as { ok: boolean; error?: string; data?: never };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async postLoginRecovery(slotId: number, settleMs = 3000): Promise<{ ok: boolean; error?: string; data?: { ok: boolean; result: string; pageState?: string | null; watcherHealth?: Record<string, unknown>; steps?: string[] } }> {
+    if (!this.clients.has(slotId)) return { ok: false, error: 'runtime not connected' };
+    try {
+      const cmd = { kind: 'cmd', type: 'post-login-recovery', settleMs } as unknown as Omit<RuntimeCommand, 'requestId'>;
+      const ack = await this.sendCommand<unknown>(slotId, cmd);
+      return ack as { ok: boolean; error?: string; data?: never };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   /**
    * D8-2 · 公共方法 · 触发 runtime 开始 bind 流程
    */
@@ -356,7 +418,24 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
   private handleEvent(conn: ClientConn, evt: RuntimeEvent): void {
     if (evt.type === 'heartbeat') {
       conn.lastHeartbeatAt = Date.now();
-      conn.lastPageState = evt.pageState;
+      // 2026-04-29 · P0.5-CS · pageState transition 检测 · 旧 → 新 不一致触发 event
+      //   重要场景: qr / splash / connecting → chat-list (扫码成功) · 让 post-login auto recovery 监听
+      //   不重要 (chat-list → chat-list) 不触发
+      const oldPageState = conn.lastPageState;
+      const newPageState = evt.pageState;
+      conn.lastPageState = newPageState;
+      if (oldPageState !== newPageState) {
+        this.events.emit('runtime.bridge.page-state-changed', {
+          slotId: conn.slotId,
+          tenantId: conn.tenantId,
+          oldPageState,
+          newPageState,
+          ts: Date.now(),
+        });
+        this.logger.log(
+          `slot ${conn.slotId} pageState transition: ${oldPageState ?? 'null'} → ${newPageState}`,
+        );
+      }
     }
 
     // D8-2 · 更新 per-slot bind 缓存 (Codex 拍板 · 缓存按 slotId 独立)

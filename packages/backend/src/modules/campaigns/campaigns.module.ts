@@ -33,6 +33,8 @@ import { CampaignStateController } from './controllers/campaign-state.controller
 
 import { CampaignFeatureFlagGuard } from './guards/feature-flag.guard';
 import { SendAdExecutor } from './executors/send-ad.executor';
+// 2026-04-29 · P0.5-CS · send-ad executor preflight 用 RuntimeBridgeService
+import { RuntimeBridgeModule } from '../runtime-bridge/runtime-bridge.module';
 
 // 2026-04-23 · 广告投放向导 v1 · plan rosy-dazzling-wave
 @Module({
@@ -51,6 +53,7 @@ import { SendAdExecutor } from './executors/send-ad.executor';
       CampaignTargetEntity,
     ]),
     SlotsModule,
+    RuntimeBridgeModule,
   ],
   controllers: [
     AdvertisementsController,

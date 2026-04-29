@@ -591,6 +591,10 @@ async function main() {
   //   - page.on('framenavigated') · main frame 重新导航时强制重装
   let inboundWatcherHealthcheckTimer: NodeJS.Timeout | null = null;
 
+  // 2026-04-29 · P0.5-CS · 跟踪 watcher 安装/扫描时间 · 给 get-watcher-health RPC 用
+  let lastWatcherInstallAt: number | null = null;
+  let lastWatcherRescanAt: number | null = null;
+
   const installInboundWatcherIfNeeded = async (force = false): Promise<void> => {
     if (inboundUninstall && !force) {
       // 检查 page 端是否健康 · 不健康强制重装
@@ -637,12 +641,48 @@ async function main() {
         },
       });
       inboundUninstall = uninstall;
+      lastWatcherInstallAt = Date.now(); // 2026-04-29 · P0.5-CS
       log.info('D10 inbound watcher installed · P0.11 高保真 enabled');
     } catch (err) {
       log.warn(
         { err: err instanceof Error ? err.message : err },
         'D10 inbound watcher install failed · 不阻塞 · receive 暂不可用',
       );
+    }
+  };
+
+  // 2026-04-29 · P0.5-CS · 主动触发 pollScan 一次 · 复用 page 内已注入的逻辑
+  // 不打开聊天 · 不读 unread · 不清 unread badge · 仅 read-only 扫 chat-list rows
+  const triggerInboundRescan = async (): Promise<{ ok: boolean; reason?: string }> => {
+    try {
+      if (!inboundUninstall) {
+        return { ok: false, reason: 'watcher-not-installed' };
+      }
+      // 用 page.evaluate 触发已注入的 pollScan · 它通过 __wahubxRecoveryTimers 间接也行
+      // 但更直接: 我们重新 push 5 档延时 setTimeout · 利用现有 P0-CS-2 多档 rescan 机制
+      // 注: pollScan 函数本身在 page closure 里 · 没法外部直接调
+      // 退化方案: dispatch 一个 visibility change · 让 chat-list MutationObserver 重测
+      //   + 让 5s pollTimer 自然下次跑
+      // 真正的 rescan 复用是在 reinstallWatcher 里 · 此处仅 trigger 一次"手动"扫描信号
+      await page.evaluate(() => {
+        try {
+          // 触发 visibilitychange · 部分情况让 WA Web 重渲染 chat-list
+          document.dispatchEvent(new Event('visibilitychange'));
+          // 滚动 chat-list pane 1px · 强制 MutationObserver 重看 row 状态
+          const pane = document.querySelector('[data-testid="chat-list"], #pane-side');
+          if (pane && pane instanceof HTMLElement) {
+            const sc = pane.scrollTop;
+            pane.scrollTop = sc + 1;
+            setTimeout(() => { pane.scrollTop = sc; }, 200);
+          }
+        } catch {
+          /* ignore */
+        }
+      });
+      lastWatcherRescanAt = Date.now();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   };
 
@@ -1395,10 +1435,129 @@ async function main() {
           () => ({ ok: false, error: `UPDATE_PROFILE_TIMEOUT (>${SEND_HARD_TIMEOUT_BASE_MS}ms · runtime abort)` }),
         );
       }
+      // ═══ 2026-04-29 · P0.5-CS · 轻量 watcher 控制 RPC ═══
+      // 不重启 Chromium · 不清 session · 不发消息 · 复用 install/pollScan 已有逻辑
+      if (cmd.type === 'get-watcher-health') {
+        try {
+          const health = await isWatcherHealthy(page);
+          return {
+            ok: true,
+            data: {
+              installed: inboundUninstall != null,
+              healthy: health.ok,
+              lastHeartbeatAt: null, // P0.5 不区分 watcher 心跳, 沿用 runtime heartbeat (backend 已有)
+              lastInstallAt: lastWatcherInstallAt,
+              lastRescanAt: lastWatcherRescanAt,
+              pageState: g_state,
+              reason: health.reason,
+              hasObserver: health.hasObserver,
+              hasPollTimer: health.hasPollTimer,
+              hasCallback: health.hasCallback,
+              hasChatListPane: health.hasChatListPane,
+            },
+          };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (cmd.type === 'reinstall-watcher') {
+        try {
+          const force = cmd.force ?? true;
+          await installInboundWatcherIfNeeded(force);
+          const health = await isWatcherHealthy(page);
+          return {
+            ok: true,
+            data: {
+              ok: health.ok,
+              installed: inboundUninstall != null,
+              reason: health.reason,
+              pageState: g_state,
+            },
+          };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (cmd.type === 'rescan-inbound') {
+        const r = await triggerInboundRescan();
+        return {
+          ok: r.ok,
+          data: {
+            ok: r.ok,
+            triggered: r.ok,
+            reason: r.reason,
+            pageState: g_state,
+          },
+        };
+      }
+      if (cmd.type === 'post-login-recovery') {
+        const steps: string[] = [];
+        try {
+          // 1. 必须在 chat-list 状态 · 否则 skip
+          if (g_state !== 'chat-list') {
+            return {
+              ok: true,
+              data: {
+                ok: false,
+                result: 'skipped-not-chat-list',
+                pageState: g_state,
+                steps: [`pageState=${g_state} · not chat-list · skipped`],
+              },
+            };
+          }
+          steps.push(`pageState=chat-list confirmed`);
+
+          // 2. 等 chat-list 稳定 (settle)
+          const settleMs = Math.min(Math.max(cmd.settleMs ?? 3000, 0), 10000);
+          if (settleMs > 0) {
+            await new Promise((r) => setTimeout(r, settleMs));
+            steps.push(`settled ${settleMs}ms`);
+          }
+
+          // 3. reinstall watcher (force=true 走 P0-CS-2 多档 rescan)
+          await installInboundWatcherIfNeeded(true);
+          steps.push('watcher reinstall (force=true) called');
+
+          // 4. trigger rescan
+          const rescan = await triggerInboundRescan();
+          steps.push(`rescan triggered: ok=${rescan.ok}${rescan.reason ? ' · ' + rescan.reason : ''}`);
+
+          // 5. 最终 health check
+          const health = await isWatcherHealthy(page);
+          const watcherHealthData = {
+            installed: inboundUninstall != null,
+            healthy: health.ok,
+            lastInstallAt: lastWatcherInstallAt,
+            lastRescanAt: lastWatcherRescanAt,
+            pageState: g_state,
+            reason: health.reason,
+            hasObserver: health.hasObserver,
+            hasPollTimer: health.hasPollTimer,
+            hasCallback: health.hasCallback,
+            hasChatListPane: health.hasChatListPane,
+          };
+          return {
+            ok: true,
+            data: {
+              ok: health.ok,
+              result: health.ok ? 'recovered' : 'reinstall-failed',
+              pageState: g_state,
+              watcherHealth: watcherHealthData,
+              steps,
+            },
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            data: { ok: false, result: 'reinstall-failed', steps },
+          };
+        }
+      }
       // 所有合法分支都覆盖 · 这里仅防御性兜底
       return { ok: false, error: `cmd type "${(cmd as { type?: string }).type ?? 'unknown'}" not implemented` };
     });
-    log.info('D11 · WS command handlers registered (incl. post-status-text/media · browse-statuses · react-status · update-profile-about)');
+    log.info('D11 · WS command handlers registered (incl. post-status-text/media · browse-statuses · react-status · update-profile-about · P0.5-CS watcher RPC)');
   }
 
   // ─── 启动行为分流 ───────────────────────────────────────────────

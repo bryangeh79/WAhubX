@@ -556,17 +556,67 @@ export class SlotHealthService {
         reasonZh: '需要重新扫码 · P0 不清 session/profile/cookie · 请在接管页面扫码',
       });
     } else if (waIsChatList && watcherCheck?.status === 'pass') {
-      // Case 4 (健康): runtime + chat-list + watcher 全好 → NO ACTION
-      // 不重启 · 也不重装 watcher · 真的没有问题需要恢复
-      // (用户约束 2: "如果 runtime 已经 open 且 heartbeat fresh, 不要为了重装 watcher 重启")
+      // Case 4 (健康): runtime + chat-list + watcher 全好 → 仍跑 post-login-recovery 巩固
+      //   2026-04-29 · P0.5-CS · 改为轻量 RPC · 不再 NO ACTION
+      //   即使健康也跑一次 reinstall+rescan 巩固 (RPC 失败不影响 result)
+      try {
+        const recovery = await this.runtimeBridge.postLoginRecovery(slotId, 1500);
+        if (recovery.ok && recovery.data?.ok) {
+          actionsAttempted.push({
+            key: 'post_login_recovery',
+            status: 'pass',
+            messageZh: `post-login-recovery 完成 · ${recovery.data.result} (轻量路径 · 不重启 Chromium)`,
+            raw: recovery.data as unknown as Record<string, unknown>,
+          });
+        } else {
+          actionsAttempted.push({
+            key: 'post_login_recovery',
+            status: 'warn',
+            messageZh: `post-login-recovery 未完全成功: ${recovery.error ?? recovery.data?.result ?? 'unknown'}`,
+            raw: recovery.data as unknown as Record<string, unknown>,
+          });
+        }
+      } catch (err) {
+        actionsAttempted.push({
+          key: 'post_login_recovery',
+          status: 'warn',
+          messageZh: `post-login-recovery 异常 (不影响在线): ${err instanceof Error ? err.message : err}`,
+        });
+      }
     } else if (waIsChatList && watcherCheck && watcherCheck.status !== 'pass') {
-      // Case 4 (watcher 不健康): runtime healthy 但 watcher unhealthy
-      // P0 不重启 · 等 runtime 内 30s healthcheck 自愈
-      actionsSkipped.push({
-        key: 'watcher_reinstall',
-        reasonZh: 'watcher 不健康 · P0 不重启 runtime · 等 runtime 内置 30s 自检自动重装',
-        raw: watcherCheck.raw,
-      });
+      // Case 4 (watcher 不健康): runtime healthy + chat-list 但 watcher unhealthy
+      //   2026-04-29 · P0.5-CS · 用轻量 RPC 修 · 不重启 Chromium
+      //   流程: reinstall-watcher → rescan-inbound · 失败才 fallback
+      try {
+        const reinstall = await this.runtimeBridge.reinstallWatcher(slotId, true);
+        if (reinstall.ok && reinstall.data?.ok) {
+          actionsAttempted.push({
+            key: 'reinstall_watcher_rpc',
+            status: 'pass',
+            messageZh: `已重装 watcher (轻量 RPC · 不重启 Chromium)`,
+            raw: reinstall.data as unknown as Record<string, unknown>,
+          });
+          const rescan = await this.runtimeBridge.rescanInbound(slotId);
+          actionsAttempted.push({
+            key: 'rescan_inbound_rpc',
+            status: rescan.ok ? 'pass' : 'warn',
+            messageZh: rescan.ok ? '已触发 rescan-inbound' : `rescan-inbound 失败: ${rescan.error ?? rescan.data?.reason ?? '?'}`,
+            raw: rescan.data as unknown as Record<string, unknown>,
+          });
+        } else {
+          // RPC 失败 · fallback 提醒等 30s 自检
+          actionsSkipped.push({
+            key: 'reinstall_watcher_rpc',
+            reasonZh: `reinstall-watcher RPC 失败 (${reinstall.error ?? '?'}) · fallback 等 runtime 30s 自检`,
+            raw: reinstall.data as unknown as Record<string, unknown>,
+          });
+        }
+      } catch (err) {
+        actionsSkipped.push({
+          key: 'reinstall_watcher_rpc',
+          reasonZh: `RPC 调用异常 (${err instanceof Error ? err.message : err}) · fallback 等 runtime 30s 自检`,
+        });
+      }
     } else {
       // 兜底: 其他状态 (splash/connecting/unknown) · 不动
       actionsSkipped.push({

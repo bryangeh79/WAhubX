@@ -20,6 +20,9 @@ import { AdvertisementsService } from '../services/advertisements.service';
 import { OpeningLinesService } from '../services/opening-lines.service';
 import { CustomerGroupsService } from '../services/customer-groups.service';
 import { phoneToJid } from '../utils/phone';
+// 2026-04-29 · P0.5-CS · preflight 检查 · 不让 QR / runtime 假死的 slot 跑 send
+import { RuntimeBridgeService } from '../../runtime-bridge/runtime-bridge.service';
+import { AccountSlotStatus } from '../../slots/account-slot.entity';
 
 // 2026-04-23 · 广告发送 executor · plan §B "Send-Ad Executor"
 //
@@ -59,6 +62,8 @@ export class SendAdExecutor implements TaskExecutor {
     private readonly ads: AdvertisementsService,
     private readonly openings: OpeningLinesService,
     private readonly groups: CustomerGroupsService,
+    // 2026-04-29 · P0.5-CS · preflight 用
+    private readonly runtimeBridge: RuntimeBridgeService,
     @InjectRepository(AccountSlotEntity)
     private readonly slotRepo: Repository<AccountSlotEntity>,
     @InjectRepository(AdvertisementEntity)
@@ -112,6 +117,20 @@ export class SendAdExecutor implements TaskExecutor {
     const slot = await this.slotRepo.findOne({ where: { accountId: ctx.accountId } });
     if (!slot) {
       return this.markFail(target, 'SLOT_NOT_FOUND', `account ${ctx.accountId} 无槽位`);
+    }
+
+    // 4'. 2026-04-29 · P0.5-CS · preflight check · 不让 QR / 假死 slot 跑 send
+    //   场景: 用户重启 backend / WA 踢号 · runtime 还跑但 chromium 已是 QR 页
+    //   不 preflight: 跑到 sendText 才报 "cannot send · not in chat-list (current: qr)" · task 失败 + 噪音
+    //   preflight: 提前标 target=Skipped · 错误码清晰 · UI 能告诉用户去扫码
+    const preflightFail = this.preflightCheck(slot);
+    if (preflightFail) {
+      await this.markTarget(target, CampaignTargetStatus.Skipped, preflightFail.code, preflightFail.msg);
+      ctx.log('preflight-skip', true, { code: preflightFail.code, msg: preflightFail.msg });
+      this.logger.log(
+        `slot ${slot.id} send-ad preflight 拦截 · ${preflightFail.code} · ${preflightFail.msg}`,
+      );
+      return { success: false, errorCode: preflightFail.code, errorMessage: preflightFail.msg };
     }
 
     // 5. 拼文本 · 广告本身 → 若 ai_enabled + variants 非空, 随机抽 1 条变体 · 否则用原文
@@ -178,6 +197,66 @@ export class SendAdExecutor implements TaskExecutor {
     const body = (ad ?? '').trim();
     if (!op) return body;
     return `${op}\n\n${body}`;
+  }
+
+  /**
+   * 2026-04-29 · P0.5-CS · 发送前预检
+   *   场景: 防止 QR / 假死 / quarantine / takeover 状态的 slot 进 sendText
+   *   返 null = 通过 · 返 { code, msg } = 拦截
+   *
+   * 规则 (按优先级):
+   *   1. slot 状态 quarantine / suspended → PRECHECK_SLOT_NOT_ACTIVE
+   *   2. takeover_active → PRECHECK_TAKEOVER_ACTIVE
+   *   3. runtime WS 未连 → PRECHECK_RUNTIME_DISCONNECTED
+   *   4. heartbeat stale (>180s) → PRECHECK_RUNTIME_STALE
+   *   5. pageState != 'chat-list' → PRECHECK_NOT_CHAT_LIST
+   *   6. pageState === 'qr' → PRECHECK_WA_NEED_SCAN (优先 5)
+   *
+   * 注: 不自动重置 failed task (P0 边界) · 不批量恢复广告号
+   */
+  private preflightCheck(slot: AccountSlotEntity): { code: string; msg: string } | null {
+    const HB_STALE_MS = 180_000;
+
+    // 1. slot 状态
+    if (slot.status === AccountSlotStatus.Quarantine) {
+      return { code: 'PRECHECK_SLOT_QUARANTINE', msg: '槽位已 quarantine · 不能发送' };
+    }
+    if (slot.status === AccountSlotStatus.Suspended) {
+      const until = slot.suspendedUntil ? new Date(slot.suspendedUntil).getTime() : 0;
+      if (until > Date.now()) {
+        return { code: 'PRECHECK_SLOT_SUSPENDED', msg: `槽位 suspended 至 ${slot.suspendedUntil}` };
+      }
+    }
+    if (slot.status === AccountSlotStatus.Empty) {
+      return { code: 'PRECHECK_SLOT_EMPTY', msg: '槽位未绑号' };
+    }
+
+    // 2. takeover_active
+    if (slot.takeoverActive) {
+      return { code: 'PRECHECK_TAKEOVER_ACTIVE', msg: '槽位被人工接管中 · 自动化暂停' };
+    }
+
+    // 3. runtime WS 连接
+    if (!this.runtimeBridge.hasConnection(slot.id)) {
+      return { code: 'PRECHECK_RUNTIME_DISCONNECTED', msg: 'runtime WS 桥未连 · 进程可能未启动' };
+    }
+
+    // 4. heartbeat stale
+    const hb = slot.socketLastHeartbeatAt ? new Date(slot.socketLastHeartbeatAt).getTime() : 0;
+    if (hb > 0 && Date.now() - hb > HB_STALE_MS) {
+      return { code: 'PRECHECK_RUNTIME_STALE', msg: `runtime 心跳停滞 ${Math.floor((Date.now() - hb) / 1000)}s · 假死` };
+    }
+
+    // 5/6. pageState
+    const pageState = this.runtimeBridge.getCurrentPageState(slot.id);
+    if (pageState === 'qr') {
+      return { code: 'PRECHECK_WA_NEED_SCAN', msg: 'WA 在 QR 状态 · 需扫码' };
+    }
+    if (pageState !== 'chat-list') {
+      return { code: 'PRECHECK_NOT_CHAT_LIST', msg: `WA pageState=${pageState ?? 'null'} · 不在 chat-list` };
+    }
+
+    return null; // 通过
   }
 
   private async markTarget(

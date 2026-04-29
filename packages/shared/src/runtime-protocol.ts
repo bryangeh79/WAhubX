@@ -36,6 +36,11 @@ export type RuntimeCommandType =
   | 'browse-statuses'       // 浏览未读他人 status · runtime 直接 DOM 自驱
   | 'react-status'          // 给某条 status 表情反应
   | 'update-profile-about'  // 改个人签名/关于
+  // 2026-04-29 · P0.5-CS · 轻量 watcher 控制 RPC (不重启 Chromium · 不清 session)
+  | 'get-watcher-health'    // 查 watcher 健康度 (observer/pollTimer/callback/chat-list pane)
+  | 'reinstall-watcher'     // 重装 inbound watcher (调 installInboundWatcherIfNeeded(force=true))
+  | 'rescan-inbound'        // 主动触发 pollScan 一次 (复用现有 P0-CS-2 多档 rescan)
+  | 'post-login-recovery'   // 扫码后恢复 · 等 chat-list 稳定 → 重装 watcher → rescan
   | 'shutdown';
 
 export interface RuntimeCommandBase {
@@ -146,6 +151,70 @@ export interface UpdateProfileAboutCommand extends RuntimeCommandBase {
   text: string;
 }
 
+// ═══ 2026-04-29 · P0.5-CS · 轻量 watcher 控制 RPC ═══
+//
+// 设计原则:
+//   - 不重启 Chromium · 不清 session/profile/cookie · 不发消息
+//   - 复用 runtime 已有的 installInboundWatcherIfNeeded / pollScan
+//   - response data 含足够诊断信息让 backend 写 audit
+//   - 失败时返 ok:false 不抛 ack timeout
+
+export interface GetWatcherHealthCommand extends RuntimeCommandBase {
+  type: 'get-watcher-health';
+}
+/** get-watcher-health 返回结构 (在 ack.data) */
+export interface WatcherHealthData {
+  installed: boolean;
+  healthy: boolean;
+  /** ms · backend 用 new Date(ts) 转 ISO */
+  lastHeartbeatAt?: number | null;
+  lastInstallAt?: number | null;
+  lastRescanAt?: number | null;
+  pageState?: string | null;
+  reason?: string;
+  /** 诊断细节 */
+  hasObserver?: boolean;
+  hasPollTimer?: boolean;
+  hasCallback?: boolean;
+  hasChatListPane?: boolean;
+}
+
+export interface ReinstallWatcherCommand extends RuntimeCommandBase {
+  type: 'reinstall-watcher';
+  /** 默认 true · 强制重装 (走 installInboundWatcherIfNeeded(force=true)) */
+  force?: boolean;
+}
+export interface ReinstallWatcherData {
+  ok: boolean;
+  installed: boolean;
+  reason?: string;
+  pageState?: string | null;
+}
+
+export interface RescanInboundCommand extends RuntimeCommandBase {
+  type: 'rescan-inbound';
+}
+export interface RescanInboundData {
+  ok: boolean;
+  triggered: boolean;
+  reason?: string;
+  pageState?: string | null;
+}
+
+export interface PostLoginRecoveryCommand extends RuntimeCommandBase {
+  type: 'post-login-recovery';
+  /** 等 chat-list 稳定的毫秒数 · 默认 3000 · 上限 10000 */
+  settleMs?: number;
+}
+export interface PostLoginRecoveryData {
+  ok: boolean;
+  /** 'recovered' | 'skipped-not-chat-list' | 'reinstall-failed' | 'rescan-failed' */
+  result: string;
+  pageState?: string | null;
+  watcherHealth?: WatcherHealthData;
+  steps?: string[];
+}
+
 export interface ShutdownCommand extends RuntimeCommandBase {
   type: 'shutdown';
 }
@@ -167,6 +236,10 @@ export type RuntimeCommand =
   | BrowseStatusesCommand
   | ReactStatusCommand
   | UpdateProfileAboutCommand
+  | GetWatcherHealthCommand
+  | ReinstallWatcherCommand
+  | RescanInboundCommand
+  | PostLoginRecoveryCommand
   | ShutdownCommand;
 
 export interface RuntimeAck {

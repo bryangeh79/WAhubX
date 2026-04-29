@@ -447,6 +447,41 @@ export function SlotsPage() {
     [slots],
   );
 
+  // 2026-04-29 · P0.5-CS · 客服号告警: 检测客服号是否需扫码 / 离线 / 假死
+  //   触发: pageState=qr / runtime dead / heartbeat stale (>180s)
+  //   表达: 顶部红色 Alert · 文案明确告诉用户去接管页扫码
+  const csAlert = useMemo(() => {
+    const cs = slots.find(
+      (s) => s.role === 'customer_service' && s.status === 'active' && s.accountId,
+    );
+    if (!cs) return null;
+
+    const ws = computeWaStatus(cs);
+    const phone = cs.phoneNumber ?? `slot #${cs.slotIndex}`;
+    if (ws.level === 'qr') {
+      return {
+        type: 'error' as const,
+        message: '客服号需要扫码',
+        description: `客服号 ${phone} 需要重新扫码 · AI 客服已暂停 · 请进入「人工接管」页面扫码 · 扫码成功后系统会自动恢复 watcher 和 inbound 监听 (post-login-recovery)`,
+      };
+    }
+    if (ws.level === 'offline') {
+      return {
+        type: 'error' as const,
+        message: '客服号离线',
+        description: `客服号 ${phone} 当前离线 (${ws.hint}) · AI 客服已暂停 · 系统会自动尝试恢复 (CS guardian 每 3 分钟巡检) · 也可点「⚡ 一键恢复」立即处理`,
+      };
+    }
+    if (ws.level === 'transition') {
+      return {
+        type: 'warning' as const,
+        message: '客服号正在初始化',
+        description: `客服号 ${phone} 当前 ${ws.hint} · 请稍候`,
+      };
+    }
+    return null;
+  }, [slots]);
+
   if (user?.tenantId === null) {
     return (
       <Alert
@@ -502,6 +537,18 @@ export function SlotsPage() {
           <Button size="small" onClick={() => void load()} loading={loading}>刷新</Button>
         </Space>
       </div>
+
+      {/* 2026-04-29 · P0.5-CS · 客服号 QR / 离线 告警条 · 红 Alert · 仅在客服号异常时显示 */}
+      {csAlert && (
+        <Alert
+          type={csAlert.type}
+          showIcon
+          message={csAlert.message}
+          description={csAlert.description}
+          style={{ marginBottom: 16 }}
+          banner
+        />
+      )}
 
       {/* 顶部概览 · 4 KPI 卡 + 合计进度条 · 2026-04-24 重构 */}
       <Card
