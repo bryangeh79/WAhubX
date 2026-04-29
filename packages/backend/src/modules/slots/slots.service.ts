@@ -1303,6 +1303,9 @@ export class SlotsService {
       socketLastHeartbeatAt: slot.socketLastHeartbeatAt
         ? slot.socketLastHeartbeatAt.toISOString()
         : null,
+      // 2026-04-29 · P0-CS-3 · 状态灯真值 · UI 用此判断 chat-list/qr/splash/...
+      //   注: 跟 online 区分 · online=WS 桥层面活着 · pageState=WA 业务真实状态
+      pageState: this.runtimeBridge.getCurrentPageState(slot.id),
       // 2026-04-21 · 卡片信息增强
       warmupStartedAt: stats?.warmupStartedAt ?? null,
       warmupTotalDays: WARMUP_TOTAL_DAYS,

@@ -12,6 +12,16 @@ export class SlotResponseDto {
   // 2026-04-25 · 稳定性: 真实状态三指标
   suspendedUntil!: string | null;         // suspended 冷却到何时 · 期间不动
   socketLastHeartbeatAt!: string | null;  // 最后心跳时间 · UI 判 healthy/degraded/dead
+  // 2026-04-29 · P0-CS-3 · UI 状态灯红绿真值
+  //   来源: runtime heartbeat.pageState (chat-list/qr/splash/connecting/closed/...)
+  //   注意: 跟 online 不同 · online=true 仅说明 WS 桥连得上 · 不代表 WA 业务在线
+  //   UI 主灯应看此字段:
+  //     'chat-list' → 绿 (真在线)
+  //     'qr'        → 红 (需扫码)
+  //     'splash' / 'splash-stuck' / 'connecting' / 'starting' → 黄 (过渡中)
+  //     'closed' / 'failed' → 红 (异常)
+  //     null / 'unknown' → 灰 (未知)
+  pageState!: string | null;
   accountId!: number | null;
   phoneNumber!: string | null;
   waNickname!: string | null;

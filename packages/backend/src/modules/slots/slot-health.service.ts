@@ -147,8 +147,7 @@ export class SlotHealthService {
     const bridgeConnected = this.runtimeBridge.hasConnection(slotId);
     const cached = this.runtimeBridge.getCachedBindState(slotId);
     const pageState = bridgeConnected
-      ? (this.runtimeBridge['clients']?.get?.(slotId) as { lastPageState?: string | null } | undefined)?.lastPageState
-        ?? null
+      ? this.runtimeBridge.getCurrentPageState(slotId)
       : null;
 
     let waStatus: CheckStatus = 'unknown';

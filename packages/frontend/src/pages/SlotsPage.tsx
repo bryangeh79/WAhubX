@@ -66,6 +66,9 @@ interface SlotItem {
   // 2026-04-25 · 稳定性 · 真实状态三指标
   suspendedUntil?: string | null;
   socketLastHeartbeatAt?: string | null;
+  // 2026-04-29 · P0-CS-3 · 状态灯红绿真值 · runtime heartbeat.pageState
+  //   chat-list = WA 真在线 · qr = 需扫码 · splash/connecting = 过渡 · null = 未知
+  pageState?: string | null;
   accountId: number | null;
   phoneNumber: string | null;
   waNickname: string | null;
@@ -156,12 +159,91 @@ function computeHealth(slot: SlotItem): { level: 'healthy' | 'degraded' | 'dead'
   return { level: 'dead', hint: `客服号心跳已 ${Math.round(age / 60000)} 分钟无响应 · 需排查` };
 }
 
+// 2026-04-29 · 老的 runtime 心跳健康色 · 现在仍保留供 computeHealth() 用 (audit/工具) · 但主 UI 灯改 WA_STATUS_COLOR
+// 给 lint: void HEALTH_COLOR (避免未使用警告)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const HEALTH_COLOR = {
   healthy: '#25d366',
   degraded: '#faad14',
   dead: '#f5222d',
   idle: '#d9d9d9',
 };
+void HEALTH_COLOR;
+
+// 2026-04-29 · P0-CS-3 · WA 业务状态 · UI 主灯 (优先于 runtime/WS 心跳)
+//
+// 老 computeHealth 只看 WS 桥心跳 · 不反映 WA 是否真登录
+// bug: WA 把 session 踢下线后 chromium 还跑 · runtime 心跳还在 · 但 WA Web 已是 QR 页
+//      computeHealth 仍判 healthy + 绿点 · UI 误导客户"在线"
+//
+// 此函数读 slot.pageState (从 runtime heartbeat.pageState) 决定真状态:
+//   chat-list  → 绿 · 在线
+//   qr         → 红 · 需扫码 (最关键)
+//   splash/splash-stuck → 黄 · 初始化中
+//   connecting/starting → 黄 · 连接中
+//   closed/failed → 红 · 离线
+//   null/unknown + online → 灰 · 状态未知 (runtime 健康但还没收过 heartbeat)
+//   !online    → 灰 · 未连接
+//
+// 设计原则: QR 必须红 · runtime 在线但 QR 不准显示绿
+type WaStatusLevel = 'online' | 'qr' | 'transition' | 'offline' | 'unknown' | 'idle';
+
+const WA_STATUS_COLOR: Record<WaStatusLevel, string> = {
+  online: '#25d366',
+  qr: '#f5222d',
+  transition: '#faad14',
+  offline: '#f5222d',
+  unknown: '#d9d9d9',
+  idle: '#d9d9d9',
+};
+
+const WA_STATUS_LABEL: Record<WaStatusLevel, string> = {
+  online: 'WA 在线',
+  qr: '需扫码',
+  transition: '初始化中',
+  offline: '离线',
+  unknown: '状态未知',
+  idle: '待命中',
+};
+
+function computeWaStatus(slot: SlotItem): { level: WaStatusLevel; hint: string; tagColor: string } {
+  // 空槽 / 隔离 / 暂停 — 沿用 runtime 层面的判断
+  if (slot.status === 'empty') return { level: 'idle', hint: '空槽', tagColor: 'default' };
+  if (slot.status === 'quarantine') return { level: 'offline', hint: '号疑似被 WA 限制 · 需换号', tagColor: 'error' };
+  if (slot.status === 'suspended') {
+    return { level: 'offline', hint: '已暂停 · 等冷却或手动恢复', tagColor: 'warning' };
+  }
+
+  // 广告号 idle: 设计就是不连 chromium · 显灰 · 不报警
+  if (slot.online !== true && slot.role !== 'customer_service') {
+    return { level: 'idle', hint: '广告号 · 按需待命中 (跑任务时才连 Chromium)', tagColor: 'default' };
+  }
+
+  // online=false (客服号或 active) → 离线
+  if (slot.online !== true) {
+    return { level: 'offline', hint: '客服号离线 · runtime/WS 桥未连', tagColor: 'error' };
+  }
+
+  // online=true · 看 pageState 决定 WA 业务状态
+  const ps = slot.pageState;
+  if (ps === 'chat-list') {
+    return { level: 'online', hint: 'WA 已登录 · chat-list', tagColor: 'success' };
+  }
+  if (ps === 'qr') {
+    return { level: 'qr', hint: 'WhatsApp Web 在 QR 状态 · 请扫码登录', tagColor: 'error' };
+  }
+  if (ps === 'splash' || ps === 'splash-stuck') {
+    return { level: 'transition', hint: 'WA Web 加载中 (splash)', tagColor: 'warning' };
+  }
+  if (ps === 'connecting' || ps === 'starting') {
+    return { level: 'transition', hint: `WA 连接中 (${ps})`, tagColor: 'warning' };
+  }
+  if (ps === 'closed' || ps === 'failed') {
+    return { level: 'offline', hint: `WA 异常 (${ps})`, tagColor: 'error' };
+  }
+  // null / 'unknown' — runtime 还没上报 pageState
+  return { level: 'unknown', hint: 'runtime 在线但 pageState 未上报 · 状态未知', tagColor: 'default' };
+}
 
 // 2026-04-21 · 用户提供的 WhatsApp 官方 logo 图 · 加右下数字角标
 function WaLogo({ n, size = 40 }: { n: number; size?: number }) {
@@ -843,7 +925,10 @@ function ActiveSlotCard({
     ? { label: '待命中', color: 'blue', bar: '#1677ff', pct: baseMeta.pct }
     : baseMeta;
   // 2026-04-25 · 稳定性 · 健康度 · 显示三色灯 (2026-04-26 · 改成角色感知)
+  // 2026-04-29 · P0-CS-3 · health 仍用作 runtime 层指标 · 但 UI 主灯改用 waStatus
   const health = computeHealth(slot);
+  // 2026-04-29 · P0-CS-3 · WA 业务状态 (主灯真值 · 看 pageState 不只是 runtime 心跳)
+  const waStatus = computeWaStatus(slot);
   const memberGroups = groups.filter((g) => g.slotIds.includes(slot.id));
   const [warmupWizardOpen, setWarmupWizardOpen] = useState(false);
   const [groupMembershipOpen, setGroupMembershipOpen] = useState(false);
@@ -971,19 +1056,37 @@ function ActiveSlotCard({
       title={
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <WaLogo n={slot.slotIndex} size={36} />
-          <Tag color={meta.color} style={{ margin: 0, fontSize: 12, padding: '2px 10px', borderRadius: 12, fontWeight: 500 }}>
-            {meta.label}
-          </Tag>
+          {/* 2026-04-29 · P0-CS-3 · 状态 Tag · active 槽位用 WA 业务状态覆盖 (chat-list=运营中 · qr=需扫码) · 其他状态 (warmup/suspended/quarantine/empty) 沿用老 meta */}
+          {slot.status === 'active' && slot.accountId && waStatus.level !== 'idle' ? (
+            <Tag color={waStatus.tagColor} style={{ margin: 0, fontSize: 12, padding: '2px 10px', borderRadius: 12, fontWeight: 500 }}>
+              {waStatus.level === 'online' ? '运营中' : WA_STATUS_LABEL[waStatus.level]}
+            </Tag>
+          ) : (
+            <Tag color={meta.color} style={{ margin: 0, fontSize: 12, padding: '2px 10px', borderRadius: 12, fontWeight: 500 }}>
+              {meta.label}
+            </Tag>
+          )}
           {slot.accountId && (
-            <Tooltip title={health.hint}>
+            // 2026-04-29 · P0-CS-3 · 主灯改用 waStatus (WA 业务状态) · tooltip 同时显 Runtime + WA 真相
+            <Tooltip
+              title={
+                <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                  <div>WA: <strong>{WA_STATUS_LABEL[waStatus.level]}</strong></div>
+                  <div style={{ color: 'rgba(255,255,255,0.85)' }}>{waStatus.hint}</div>
+                  <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(255,255,255,0.65)' }}>
+                    Runtime: {slot.online ? '在线' : '离线'} · {health.hint}
+                  </div>
+                </div>
+              }
+            >
               <span
                 style={{
                   display: 'inline-block',
                   width: 10,
                   height: 10,
                   borderRadius: '50%',
-                  background: HEALTH_COLOR[health.level],
-                  boxShadow: `0 0 4px ${HEALTH_COLOR[health.level]}`,
+                  background: WA_STATUS_COLOR[waStatus.level],
+                  boxShadow: `0 0 4px ${WA_STATUS_COLOR[waStatus.level]}`,
                 }}
               />
             </Tooltip>

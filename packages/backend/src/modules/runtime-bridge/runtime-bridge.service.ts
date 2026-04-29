@@ -160,6 +160,16 @@ export class RuntimeBridgeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 2026-04-29 · P0-CS-3 · UI 状态灯需要 · 取 runtime 实际 WA 页面状态
+   * 来源: heartbeat.pageState (chat-list / qr / splash / connecting / closed / ...)
+   * 区别于 BindStateCache.bindState (是 fsm 历史) · pageState 是当前 DOM 状态
+   * 用途: SlotResponseDto.pageState 暴露给前端 · 决定状态灯红绿
+   */
+  getCurrentPageState(slotId: number): string | null {
+    return this.clients.get(slotId)?.lastPageState ?? null;
+  }
+
+  /**
    * D8-2 · 公共方法 · 触发 runtime 开始 bind 流程
    */
   async startBind(slotId: number, pairingPhoneNumber?: string): Promise<{ state: string }> {
