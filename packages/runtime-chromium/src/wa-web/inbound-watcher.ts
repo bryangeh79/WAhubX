@@ -682,6 +682,27 @@ export async function installInboundWatcher(
         }
       };
       const pollTimer = setInterval(pollScan, 5_000);
+
+      // 2026-04-29 · P0-CS-2 修 · existing unread 补扫
+      //   bug 复现 (用户真测): WA 把 session 踢下线 · 重新扫码登录后
+      //     旧 unread 消息 (那 5 条) 留在 chat-list · 但 watcher 重装时
+      //     pollScan() 跑一次后 5s 一次 poll · MutationObserver 不会 fire
+      //     (旧 unread 是"存在的状态" · 不是"新变化")
+      //     → 旧 unread 永远不进 backend
+      //   修: 重装后做多档延时 rescan · 1s/3s/6s/10s/15s
+      //     (a) DOM 还没 fully render 时第一次 pollScan 抓不到 · 后续延时能补
+      //     (b) WA Web 登录回到 chat-list 时有过渡动画 · 选择器变化
+      //     (c) backend dedupeMap 每次 install 重置 · 多扫不重复 fire (key 相同就 dedupe)
+      //   注: 扫已读 (unread=0) 的 row 不 fire (extractHint 在 unread<=0 时返 null)
+      //       所以这里只补抓**当前仍 unread 的旧消息**
+      const RECOVERY_SCAN_DELAYS_MS = [500, 1500, 3500, 7000, 12000];
+      const recoveryTimers: Array<ReturnType<typeof setTimeout>> = [];
+      for (const delay of RECOVERY_SCAN_DELAYS_MS) {
+        const t = setTimeout(() => {
+          try { pollScan(); } catch { /* ignore */ }
+        }, delay);
+        recoveryTimers.push(t);
+      }
       // 立刻跑一次 · 减少首次发现延迟 + 让 diag 早出
       try {
         pollScan();
@@ -697,7 +718,12 @@ export async function installInboundWatcher(
       (window as unknown as {
         __wahubxObserver?: MutationObserver | null;
         __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+        __wahubxRecoveryTimers?: Array<ReturnType<typeof setTimeout>> | null;
       }).__wahubxPollTimer = pollTimer;
+      // 2026-04-29 · 暴露 recovery timers · uninstall 时清干净
+      (window as unknown as {
+        __wahubxRecoveryTimers?: Array<ReturnType<typeof setTimeout>> | null;
+      }).__wahubxRecoveryTimers = recoveryTimers;
     },
     callbackName,
     diagCallbackName,
@@ -711,6 +737,7 @@ export async function installInboundWatcher(
         const w = window as unknown as {
           __wahubxObserver?: MutationObserver | null;
           __wahubxPollTimer?: ReturnType<typeof setInterval> | null;
+          __wahubxRecoveryTimers?: Array<ReturnType<typeof setTimeout>> | null;
         };
         if (w.__wahubxObserver) {
           w.__wahubxObserver.disconnect();
@@ -719,6 +746,11 @@ export async function installInboundWatcher(
         if (w.__wahubxPollTimer) {
           clearInterval(w.__wahubxPollTimer);
           w.__wahubxPollTimer = null;
+        }
+        // 2026-04-29 · 清 recovery timers (P0-CS-2 修)
+        if (w.__wahubxRecoveryTimers) {
+          for (const t of w.__wahubxRecoveryTimers) clearTimeout(t);
+          w.__wahubxRecoveryTimers = null;
         }
       });
     } catch {
